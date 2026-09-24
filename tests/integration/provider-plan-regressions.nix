@@ -209,7 +209,6 @@ in
   ) "every configured provider node must remain deployable even when it has no current environments";
 
   provider-plan-move-survives-replan = asserts.assertTrue "provider-plan-move-survives-replan" (
-  provider-plan-move-survives-replan = asserts.assertTrue "provider-plan-move-survives-replan" (
     replannedPlan.nodes ? old-node
     && replannedPlan.environments.${mainUser}.previousNode == "old-node"
     && replannedState.${mainUser}.node == "old-node"

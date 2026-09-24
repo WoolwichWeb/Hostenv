@@ -324,7 +324,6 @@ let
       ) validatedEnvironments;
 
       nodeConnections =
-      nodeConnections =
         let
           # Remember old nodes too: migrations may still need to contact them.
           namesFromEnvs = map (env: env.node) environmentsWithUid;
