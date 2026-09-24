@@ -325,6 +325,13 @@ let
           lib.filterAttrs (_: env: env.node == nodeName) retiredEnvs
         );
 
+      # State is retained indefinitely, so do not resurrect nodes that are no
+      # longer part of the provider. A configured node with no current
+      # environments still needs a deployment if it has users to retire.
+      retiredCleanupNodes = lib.filter (
+        nodeName: retiredUsersForNode nodeName != { }
+      ) (builtins.attrNames nodeSystems);
+
       nodeConnections =
         let
           # Remember old nodes too: migrations may still need to contact them.
@@ -477,7 +484,17 @@ let
               ;
             nixSigning.trustedPublicKeys = nixSigning.trustedPublicKeys or [ ];
             environments = { };
-            nodes = { };
+            nodes = lib.genAttrs retiredCleanupNodes (nodeName: {
+              provider = {
+                inherit deployPublicKeys deployUser;
+                nixSigning.trustedPublicKeys = nixSigning.trustedPublicKeys or [ ];
+                retiredUsers = retiredUsersForNode nodeName;
+              };
+
+              # providerNixosSystem derives per-environment packages and
+              # secrets from this attrset. Cleanup-only nodes have neither.
+              users.users = { };
+            });
           };
           configAttrs = builtins.foldl' (
             acc: env:

@@ -81,24 +81,16 @@ let
     hostenvHostname = "hosting.test";
     letsEncrypt = { adminEmail = "ops@example.test"; acceptTerms = true; };
     nodeFor.default = "node-a";
-    nodeSystems.node-a = system;
+    nodeSystems = {
+      node-a = system;
+      old-node = system;
+    };
     secretsFile = "secrets/secrets.yaml";
   } // overrides);
 
   baseline = mkPlan { };
   plan = lib.importJSON baseline.plan;
   state = lib.importJSON baseline.state;
-  movedEnvironment = mkPlan {
-    nodeFor = {
-      default = "old-node";
-      production = "node-a";
-    };
-    nodeSystems = {
-      node-a = system;
-      old-node = system;
-    };
-  };
-  movedPlan = lib.importJSON movedEnvironment.plan;
   withoutState = mkPlan { statePath = null; };
   missingState = mkPlan { statePath = providerRoot + "/generated/absent.json"; };
   noStatePlan = lib.importJSON withoutState.plan;
@@ -194,9 +186,13 @@ in
     plan.nodes.node-a.provider.retiredUsers.retiredOnActiveNode.uid == 4502
     && !(plan.nodes.node-a.provider.retiredUsers ? retired)
     && !(plan.nodes.node-a.provider.retiredUsers ? ${mainUser})
-    && movedPlan.nodes.old-node.provider.retiredUsers.${mainUser}.uid == 2501
-    && !(movedPlan.nodes.node-a.provider.retiredUsers ? ${mainUser})
-  ) "users removed from an active node, including moved environments, must be passed to NixOS cleanup only on their previous node";
+    && plan.nodes.old-node.provider.retiredUsers.${mainUser}.uid == 2501
+    && plan.nodes.old-node.users.users == { }
+    && lib.all
+      (env: env.node != "old-node")
+      (builtins.attrValues plan.environments)
+    && !(plan.nodes ? retired-node)
+  ) "a configured node with only retired users must remain in the plan long enough to receive cleanup";
 
   provider-plan-optional-state = asserts.assertTrue "provider-plan-optional-state" (
     lib.importJSON missingState.plan == noStatePlan
