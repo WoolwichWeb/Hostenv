@@ -328,9 +328,9 @@ let
       # State is retained indefinitely, so do not resurrect nodes that are no
       # longer part of the provider. A configured node with no current
       # environments still needs a deployment if it has users to retire.
-      retiredCleanupNodes = lib.filter (
-        nodeName: retiredUsersForNode nodeName != { }
-      ) (builtins.attrNames nodeSystems);
+      retiredCleanupNodes = lib.filter (nodeName: retiredUsersForNode nodeName != { }) (
+        builtins.attrNames nodeSystems
+      );
 
       nodeConnections =
         let
@@ -484,6 +484,11 @@ let
               ;
             nixSigning.trustedPublicKeys = nixSigning.trustedPublicKeys or [ ];
             environments = { };
+
+            # Seed deployment nodes attrset.
+            # Seed entries are nodes having only retired user accounts,
+            # a corner case where all environments previously on the node
+            # have been retired or moved to another node.
             nodes = lib.genAttrs retiredCleanupNodes (nodeName: {
               provider = {
                 inherit deployPublicKeys deployUser;
