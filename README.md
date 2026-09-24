@@ -193,7 +193,10 @@ still working on improvements to Provider support.
    nix run .#hostenv-provider -- plan
    ```
 
-   This writes: `generated/{flake.nix,plan.json,state.json}`.
+   This writes: `generated/{flake.nix,plan.json,state.json}`. Commit
+   `generated/plan.json` and `generated/state.json`: state contains durable
+   UID/hostname reservations, while the previous generated plan is used to
+   validate provider-node retirement transitions.
 
    ```bash
    nix run .#hostenv-provider -- dns-gate
