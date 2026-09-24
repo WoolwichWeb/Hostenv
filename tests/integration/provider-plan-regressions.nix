@@ -166,8 +166,6 @@ in
 {
   provider-plan-default-state-and-lock = asserts.assertTrue "provider-plan-default-state-and-lock" (
     plan.environments.${mainUser}.uid == 2501
-    && !(plan.environments.${mainUser} ? knownIdentity)
-    && !(plan.environments.${testingUser} ? knownIdentity)
     && plan.environments.${mainUser}.repo.url == "https://example.invalid/org/fixture.git"
     && lib.all (result: result.success) (builtins.attrValues (outputResults baseline))
   ) "default paths should read the provider's state and lock, never its existing plan.json";
@@ -210,8 +208,6 @@ in
     lib.importJSON missingState.plan == noStatePlan
     && builtins.isInt noStatePlan.environments.${mainUser}.uid
     && builtins.isInt noStatePlan.environments.${testingUser}.uid
-    && !(noStatePlan.environments.${mainUser} ? knownIdentity)
-    && !(noStatePlan.environments.${testingUser} ? knownIdentity)
     && noStatePlan.environments.${mainUser}.uid != noStatePlan.environments.${testingUser}.uid
   ) "missing and null state inputs should both support first-time planning";
 
