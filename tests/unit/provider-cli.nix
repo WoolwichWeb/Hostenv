@@ -564,6 +564,108 @@ in
     echo ok > "$out"
   '';
 
+
+  provider-cli-node-retirement-plan = pkgs.runCommand "provider-cli-node-retirement-plan" { } ''
+    set -euo pipefail
+
+    work="$TMPDIR/provider"
+    fakeBin="$TMPDIR/bin"
+    newPlan="$TMPDIR/new-plan.json"
+    mkdir -p "$work/generated" "$fakeBin"
+
+    cat > "$work/generated/plan.json" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "old-node": "active"
+      },
+      "nodes": {
+        "old-node": {}
+      },
+      "nodeConnections": {
+        "old-node": {
+          "hostname": "old-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {}
+    }
+    EOF
+
+    cat > "$work/generated/state.json" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newPlan" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {},
+      "nodes": {},
+      "nodeConnections": {},
+      "environments": {}
+    }
+    EOF
+
+    cat > "$fakeBin/nix" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    case " $* " in
+      *" eval "*)
+        printf 'x86_64-linux\n'
+        ;;
+      *" build "*)
+        printf '%s\n' "$NEW_PLAN"
+        ;;
+      *)
+        echo "unexpected nix invocation: $*" >&2
+        exit 2
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/nix"
+
+    cat > "$fakeBin/ssh" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    cat >/dev/null
+    if [ "''${NODE_EMPTY:-0}" != 1 ]; then
+      printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+    fi
+    EOF
+    chmod +x "$fakeBin/ssh"
+
+    (
+      cd "$work"
+
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "active node was removed without entering retiring state"
+        exit 1
+      fi
+
+      ${pkgs.gnused}/bin/sed -i 's/"old-node": "active"/"old-node": "retiring"/' generated/plan.json
+
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with a live Hostenv environment was removed"
+        exit 1
+      fi
+
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+    )
+
+    echo ok > "$out"
+  '';
+
   provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
