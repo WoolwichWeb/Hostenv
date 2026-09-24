@@ -114,12 +114,6 @@ reconcileObservedNodesInState desiredNodes successfulEnvironments observedNodes 
 nodeKey :: K.Key
 nodeKey = K.fromString "node"
 
-presentKey :: K.Key
-presentKey = K.fromString "present"
-
-pendingKey :: K.Key
-pendingKey = K.fromString "pendingCleanupNodes"
-
 uidKey :: K.Key
 uidKey = K.fromString "uid"
 
@@ -140,7 +134,3 @@ lookupInteger key object =
                 Right integer -> Just integer
                 Left _ -> Nothing
         _ -> Nothing
-
-asText :: A.Value -> Maybe Text
-asText (A.String value) = Just value
-asText _ = Nothing
