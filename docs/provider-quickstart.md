@@ -96,6 +96,10 @@ nix run .#hostenv-provider -- deploy
 
 Use `-n node-a` to deploy only that node.
 
+When moving an environment between nodes, keep the old node in
+`provider.nodeSystems` until the move has completed successfully. Hostenv
+deploys and activates the destination before retiring the source account.
+
 ## Next steps
 
 - [Manage provider secrets](provider-secrets.md).

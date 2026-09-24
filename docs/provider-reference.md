@@ -33,6 +33,38 @@ provider = {
 Each node should have a matching directory under `nodes/` containing its
 `configuration.nix` and `hardware-configuration.nix`.
 
+### Retiring or removing a node
+
+Keep a source node in `provider.nodeSystems` until every Hostenv environment
+has either moved away from it or been retired. Hostenv treats `nodeSystems`
+as the authoritative provider inventory when reconciling placement.
+
+A safe node retirement is therefore:
+
+1. stop assigning environments to the node with `nodeFor`;
+2. deploy the moves or retirements while the old node remains in
+   `provider.nodeSystems`;
+3. confirm Hostenv has removed the old environment accounts;
+4. only then remove the node from `nodeSystems` and its `nodes/<name>/`
+   configuration.
+
+For migration-enabled environments that already have a reserved identity,
+Hostenv refuses to treat "not found on any inventory node" as a fresh
+deployment. Restore the source node to `nodeSystems`, or use
+`--skip-migrations <environment>` only when deliberately initializing that
+environment without its previous data.
+
+Source retirement is a finalization step: Hostenv first migrates data, deploys
+the destination system, and successfully activates the destination
+environment. Only then does it disable lingering/stop the old user manager and
+deploy the source system configuration that removes the account. If a source
+system deployment fails, Hostenv attempts to restore the old user manager so a
+retry remains possible.
+
+`--skip-migrations` and ignored migration failures protect their source
+accounts for that run. Hostenv may defer the corresponding source-node system
+deployment rather than destroy data that was intentionally not migrated.
+
 ## Client projects
 
 Add each client project to the provider's `flake.nix` as an input named

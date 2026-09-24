@@ -103,7 +103,7 @@ pkgs.testers.runNixOSTest {
 
         old.fail("getent passwd ${user}")
         old.fail("test -e /var/lib/systemd/linger/${user}")
-        old.succeed("systemctl is-active --quiet user@${toString uid}.service || true")
+        old.fail("systemctl is-active --quiet user@${toString uid}.service")
         new.succeed("getent passwd ${user}")
         new.succeed("grep -qx 'hello-from-old-node' /home/${user}/data/sentinel.txt")
   '';
