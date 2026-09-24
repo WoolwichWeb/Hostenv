@@ -1906,6 +1906,9 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                 printProviderLine "hostenv-provider: aborting deployment because one or more preflight checks failed"
                 Sh.exitWith (ExitFailure 1)
 
+            let deployArgs' = deployArgs True False
+            let inventoryNodes = planSystemTargetNodes plan Nothing
+
             let migrationEnvInfos =
                     filter
                         (\envInfo -> envInfo.userName `notElem` skipMigrations && envInfo.migrateBackups /= [])
@@ -1935,27 +1938,61 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                     if envInfo.userName `elem` skipMigrations || envInfo.migrateBackups == []
                         then pure (Right Nothing)
                         else do
-                            let resolution =
-                                    EnvironmentState.resolveMigrationSourceNode
-                                        envInfo.node
+                            let observedPlacements =
+                                    EnvironmentState.observedNodesForUser
                                         envInfo.userName
                                         envInfo.uid
-                                        (sourceFor envInfo.userName)
                                         observedNodeUsers
-                            case resolution of
-                                Right (Just sourceNode) ->
-                                    case sourceFor envInfo.userName of
-                                        Just _ ->
-                                            printProviderLine
-                                                ("hostenv: migration source for " <> envInfo.userName <> " forced via --migration-source: " <> sourceNode)
-                                        Nothing ->
-                                            printProviderLine
-                                                ("hostenv: migration source for " <> envInfo.userName <> " observed on node: " <> sourceNode)
-                                _ -> pure ()
-                            pure $ case resolution of
-                                Left err -> Left err
-                                Right (Just sourceNode) -> Right (Just (envInfo, sourceNode))
-                                Right Nothing -> Right Nothing
+                            let missingKnownIdentity =
+                                    envInfo.knownIdentity && null observedPlacements
+                            if missingKnownIdentity
+                                then
+                                    pure
+                                        ( Left
+                                            ( "existing environment "
+                                                <> envInfo.userName
+                                                <> " (UID "
+                                                <> T.pack (show envInfo.uid)
+                                                <> ") was not found on any configured provider node. "
+                                                <> "If this environment is being moved, keep its source node in provider.nodeSystems "
+                                                <> "until migration and source retirement complete. "
+                                                <> "Use --skip-migrations "
+                                                <> envInfo.userName
+                                                <> " only when intentionally initializing it without its previous data."
+                                            )
+                                        )
+                                else do
+                                    let resolution =
+                                            EnvironmentState.resolveMigrationSourceNode
+                                                envInfo.node
+                                                envInfo.userName
+                                                envInfo.uid
+                                                (sourceFor envInfo.userName)
+                                                observedNodeUsers
+                                    case resolution of
+                                        Right (Just sourceNode)
+                                            | sourceNode `notElem` inventoryNodes ->
+                                                pure
+                                                    ( Left
+                                                        ( "migration source "
+                                                            <> sourceNode
+                                                            <> " for "
+                                                            <> envInfo.userName
+                                                            <> " is reachable but is not in provider.nodeSystems. "
+                                                            <> "Keep source nodes in provider inventory until migration and retirement complete."
+                                                        )
+                                                    )
+                                        Right (Just sourceNode) -> do
+                                            case sourceFor envInfo.userName of
+                                                Just _ ->
+                                                    printProviderLine
+                                                        ("hostenv: migration source for " <> envInfo.userName <> " forced via --migration-source: " <> sourceNode)
+                                                Nothing ->
+                                                    printProviderLine
+                                                        ("hostenv: migration source for " <> envInfo.userName <> " observed on node: " <> sourceNode)
+                                            pure (Right (Just (envInfo, sourceNode)))
+                                        Right Nothing -> pure (Right Nothing)
+                                        Left err -> pure (Left err)
 
             let migrationFatalErrors =
                     [ err
@@ -1971,83 +2008,62 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                     | Right (Just migration) <- migrationResolutions
                     ]
 
-            if null migrations
-                then printProviderLine "hostenv-provider: no migrations required"
-                else do
-                    printProviderLine ("hostenv-provider: migrations required for " <> T.pack (show (length migrations)) <> " environment(s)")
-                    forM_ migrations $ \(envInfo, prevNode) -> do
-                        let backups = T.intercalate ", " envInfo.migrateBackups
-                        printProviderLine ("hostenv-provider: migrate backups for " <> envInfo.userName <> " from " <> prevNode <> " -> " <> envInfo.node <> " (" <> backups <> ")")
-                    let runMigration (envInfo, prevNode) = do
-                            snapshots <- forM envInfo.migrateBackups $ \backupName -> do
-                                snap <- runMigrationBackup deployUser resolveNodeConnection envInfo prevNode backupName
-                                pure (backupName, snap)
-                            writeRestorePlan deployUser resolveNodeConnection envInfo prevNode snapshots
-                            let snapshotPairs = map (\(name, sid) -> name <> "=" <> sid) snapshots
-                            printProviderLine ("hostenv-provider: restore plan written for " <> envInfo.userName <> " (snapshots: " <> T.intercalate ", " snapshotPairs <> ")")
-                    if ignoreMigrationErrors
-                        then do
-                            failures <- fmap catMaybes $
-                                forM migrations $ \(envInfo, prevNode) -> do
-                                    res <- try (runMigration (envInfo, prevNode)) :: IO (Either SomeException ())
-                                    case res of
-                                        Right _ -> pure Nothing
-                                        Left err -> do
-                                            printProviderLine ("hostenv-provider: warning: migration failed for " <> envInfo.userName <> ": " <> T.pack (displayException err))
-                                            pure (Just (envInfo.userName, prevNode))
-                            let unsafeFailures =
-                                    filter
-                                        (\(_, sourceNode) -> sourceNode `elem` targetNodes)
-                                        failures
-                            unless (null unsafeFailures) $ do
-                                printProviderErrLine
-                                    ( "hostenv-provider: error: cannot ignore migration failure while its source node is being deployed; "
-                                        <> "that system deployment could remove the source account: "
-                                        <> T.intercalate ", " [envName <> "@" <> sourceNode | (envName, sourceNode) <- unsafeFailures]
-                                    )
-                                Sh.exitWith (ExitFailure 1)
-                            when (not (null failures)) $
-                                printProviderLine
-                                    ( "hostenv-provider: warning: ignored migration failures for "
-                                        <> T.intercalate ", " [envName | (envName, _) <- failures]
-                                    )
-                        else
-                            forM_ migrations runMigration
+            let runMigration (envInfo, prevNode) = do
+                    snapshots <- forM envInfo.migrateBackups $ \backupName -> do
+                        snap <- runMigrationBackup deployUser resolveNodeConnection envInfo prevNode backupName
+                        pure (backupName, snap)
+                    writeRestorePlan deployUser resolveNodeConnection envInfo prevNode snapshots
+                    let snapshotPairs = map (\(name, sid) -> name <> "=" <> sid) snapshots
+                    printProviderLine ("hostenv-provider: restore plan written for " <> envInfo.userName <> " (snapshots: " <> T.intercalate ", " snapshotPairs <> ")")
 
-            cleanupResults <-
-                forM targetNodes $ \nodeName ->
-                    cleanupManagedUsersOnNode
-                        (isNothing mNode)
-                        deployUser
-                        resolveNodeConnection
+            ignoredMigrationFailures <-
+                if null migrations
+                    then do
+                        printProviderLine "hostenv-provider: no migrations required"
+                        pure []
+                    else do
+                        printProviderLine ("hostenv-provider: migrations required for " <> T.pack (show (length migrations)) <> " environment(s)")
+                        forM_ migrations $ \(envInfo, prevNode) -> do
+                            let backups = T.intercalate ", " envInfo.migrateBackups
+                            printProviderLine ("hostenv-provider: migrate backups for " <> envInfo.userName <> " from " <> prevNode <> " -> " <> envInfo.node <> " (" <> backups <> ")")
+                        if ignoreMigrationErrors
+                            then do
+                                failures <- fmap catMaybes $
+                                    forM migrations $ \(envInfo, prevNode) -> do
+                                        res <- try (runMigration (envInfo, prevNode)) :: IO (Either SomeException ())
+                                        case res of
+                                            Right _ -> pure Nothing
+                                            Left err -> do
+                                                printProviderLine ("hostenv-provider: warning: migration failed for " <> envInfo.userName <> ": " <> T.pack (displayException err))
+                                                pure (Just envInfo.userName)
+                                when (not (null failures)) $
+                                    printProviderLine
+                                        ( "hostenv-provider: warning: preserving migration source nodes after ignored failures for "
+                                            <> T.intercalate ", " failures
+                                        )
+                                pure failures
+                            else do
+                                forM_ migrations runMigration
+                                pure []
+
+            let protectedSourceUsers =
+                    S.fromList (skipHits ++ ignoredMigrationFailures)
+
+            let retirementsForNode nodeName =
+                    EnvironmentState.managedUsersToRetire
+                        nodeName
                         desiredNodesByUser
                         (M.findWithDefault M.empty nodeName observedNodeUsers)
                         state
-                        nodeName
-            let cleanupFailures = [err | Left err <- cleanupResults]
-            unless (null cleanupFailures) $ do
-                forM_ cleanupFailures $
-                    printProviderErrLine . ("hostenv-provider: error: " <>)
-                Sh.exitWith (ExitFailure 1)
+            let movedSourceUsers nodeName =
+                    [ userName
+                    | (userName, _) <- retirementsForNode nodeName
+                    , M.member userName desiredNodesByUser
+                    ]
+            let envsForNode nodeName =
+                    filter (\envInfo -> envInfo.node == nodeName) envInfosFiltered
 
-            -- Perform deployment
-            --
-            -- Start with the system deployment, since deploy-rs tends to
-            -- fail deployments where this is not run separately (if there are
-            -- new user accounts/environments added to the server).
-
-            -- `--skip-checks` used here as deploy-rs checks fail when the
-            -- local and remote architectures differ. For example: when on an
-            -- x86 machine deploying to an ARM server.
-            -- @todo: we could add a `--skip-checks` parameter to this CLI
-            -- and pass it through to deploy-rs.
-            let deployArgs' = deployArgs True False
-
-            -- System deployment of each node. Retains results, so we can
-            -- cowardly refuse to deploy environments where the system deploy
-            -- failed to complete.
-            systemDeployRes <-
-                forM targetNodes $ \nodeName -> do
+            let deploySystemNode nodeName = do
                     let target = nodeName <> ".system"
                     let targetInstallable = deployProfilePathInstallable nodeName "system"
                     signRes <-
@@ -2061,45 +2077,142 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                     if signRes /= ExitSuccess
                         then do
                             printProviderLine ("hostenv-provider: failed to sign deployment target " <> target)
-                            pure (nodeName, signRes)
+                            pure signRes
                         else do
                             let args = deployArgs' (Just target)
                             printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
                             res <- Sh.proc "nix" args Sh.empty
                             deployGuard res args
-                            pure (nodeName, res)
+                            pure res
 
-            -- Environments deployment for the node.
-            envDeployRes <- forM (toNamed envInfosFiltered) $ \(envName, envInfo) -> do
-                let target = envInfo.node <> "." <> envInfo.userName
-                let targetInstallable = deployProfilePathInstallable envInfo.node envInfo.userName
-                let args = deployArgs' (Just target)
-                let systemStatus = case filter ((==) envInfo.node . fst) systemDeployRes of
-                        [] -> Left "node not in system deployment list"
-                        (_, ExitSuccess) : [] -> Right ExitSuccess
-                        (_, code) : [] -> Left ("system deployment failed for node " <> envInfo.node <> " (exit " <> T.pack (show code) <> ")")
-                        _moreThanOneNode -> Left "multiple matching nodes found in system deployment list"
+            let deployEnvironment envInfo = do
+                    let envName = envInfo.userName
+                    let target = envInfo.node <> "." <> envInfo.userName
+                    let targetInstallable = deployProfilePathInstallable envInfo.node envInfo.userName
+                    let args = deployArgs' (Just target)
+                    printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
+                    signRes <-
+                        if S.member envInfo.node localPushSet
+                            then case signingKeyInfo of
+                                Just keyInfo -> signInstallable keyInfo targetInstallable target
+                                Nothing -> do
+                                    printProviderLine ("hostenv-provider: signing configuration missing for node " <> envInfo.node)
+                                    pure (ExitFailure 1)
+                            else pure ExitSuccess
+                    if signRes /= ExitSuccess
+                        then do
+                            printProviderLine ("hostenv-provider: failed to sign deployment target " <> target)
+                            pure (envName, signRes)
+                        else do
+                            res <- Sh.proc "nix" args Sh.empty
+                            deployGuard res args
+                            pure (envName, res)
 
-                printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
-                case systemStatus of
-                    Left err -> printProviderLine ("hostenv-provider: " <> err) >> pure (envName, ExitFailure 1)
-                    Right ExitSuccess -> do
-                        signRes <-
-                            if S.member envInfo.node localPushSet
-                                then case signingKeyInfo of
-                                    Just keyInfo -> signInstallable keyInfo targetInstallable target
-                                    Nothing -> do
-                                        printProviderLine ("hostenv-provider: signing configuration missing for node " <> envInfo.node)
-                                        pure (ExitFailure 1)
-                                else pure ExitSuccess
-                        if signRes /= ExitSuccess
-                            then do
-                                printProviderLine ("hostenv-provider: failed to sign deployment target " <> target)
-                                pure (envName, signRes)
+            let deployReadyNodes pendingNodes systemResults envResults successfulEnvironments =
+                    let ready nodeName =
+                            let movedUsers = movedSourceUsers nodeName
+                                hasProtectedSource = any (`S.member` protectedSourceUsers) movedUsers
+                                destinationsSucceeded =
+                                    all (`S.member` successfulEnvironments) movedUsers
+                             in not hasProtectedSource && destinationsSucceeded
+                        readyNodes = filter ready pendingNodes
+                     in if null readyNodes
+                            then pure (pendingNodes, systemResults, envResults, successfulEnvironments)
                             else do
-                                res <- Sh.proc "nix" args Sh.empty
-                                deployGuard res args
-                                pure (envName, res)
+                                roundResults <-
+                                    forM readyNodes $ \nodeName -> do
+                                        prepared <-
+                                            prepareManagedUserCleanupOnNode
+                                                deployUser
+                                                resolveNodeConnection
+                                                desiredNodesByUser
+                                                (M.findWithDefault M.empty nodeName observedNodeUsers)
+                                                state
+                                                nodeName
+                                        case prepared of
+                                            Left err -> do
+                                                printProviderErrLine ("hostenv-provider: error: " <> err)
+                                                let failedEnvs =
+                                                        [(envInfo.userName, ExitFailure 1) | envInfo <- envsForNode nodeName]
+                                                pure (nodeName, ExitFailure 1, failedEnvs)
+                                            Right cleanedUsers -> do
+                                                systemCode <- deploySystemNode nodeName
+                                                when (systemCode /= ExitSuccess && not (null cleanedUsers)) $
+                                                    rollbackManagedUserCleanupOnNode
+                                                        deployUser
+                                                        resolveNodeConnection
+                                                        nodeName
+                                                        cleanedUsers
+                                                nodeEnvResults <-
+                                                    if systemCode == ExitSuccess
+                                                        then forM (envsForNode nodeName) deployEnvironment
+                                                        else do
+                                                            forM_ (envsForNode nodeName) $ \envInfo ->
+                                                                printProviderLine
+                                                                    ( "hostenv-provider: system deployment failed for node "
+                                                                        <> nodeName
+                                                                        <> "; skipping environment "
+                                                                        <> envInfo.userName
+                                                                    )
+                                                            pure
+                                                                [(envInfo.userName, ExitFailure 1) | envInfo <- envsForNode nodeName]
+                                                pure (nodeName, systemCode, nodeEnvResults)
+                                let roundSystemResults =
+                                        [(nodeName, code) | (nodeName, code, _) <- roundResults]
+                                let roundEnvResults = concat [results | (_, _, results) <- roundResults]
+                                let roundSuccessful =
+                                        S.fromList
+                                            [ envName
+                                            | (envName, ExitSuccess) <- roundEnvResults
+                                            ]
+                                deployReadyNodes
+                                    (pendingNodes \\ readyNodes)
+                                    (systemResults ++ roundSystemResults)
+                                    (envResults ++ roundEnvResults)
+                                    (successfulEnvironments `S.union` roundSuccessful)
+
+            (pendingNodes, systemDeployRes, envDeployRes, successfulEnvironments) <-
+                deployReadyNodes targetNodes [] [] S.empty
+
+            let pendingNodeDetails =
+                    [ ( nodeName
+                      , movedSourceUsers nodeName
+                      , filter (`S.member` protectedSourceUsers) (movedSourceUsers nodeName)
+                      , filter
+                            (\userName ->
+                                not (S.member userName protectedSourceUsers)
+                                    && not (S.member userName successfulEnvironments)
+                            )
+                            (movedSourceUsers nodeName)
+                      )
+                    | nodeName <- pendingNodes
+                    ]
+            let deferredOnly =
+                    [ (nodeName, protected)
+                    | (nodeName, movedUsers, protected, blocked) <- pendingNodeDetails
+                    , null blocked
+                    , not (null movedUsers)
+                    , length protected == length movedUsers
+                    ]
+            let unsafePending =
+                    [ (nodeName, blocked)
+                    | (nodeName, _, _, blocked) <- pendingNodeDetails
+                    , not (null blocked)
+                    ]
+            forM_ deferredOnly $ \(nodeName, protected) ->
+                printProviderLine
+                    ( "hostenv-provider: warning: deferred source-node finalization on "
+                        <> nodeName
+                        <> " to preserve migration source(s): "
+                        <> T.intercalate ", " protected
+                    )
+            forM_ unsafePending $ \(nodeName, blocked) ->
+                printProviderErrLine
+                    ( "hostenv-provider: error: cannot safely finalize source node "
+                        <> nodeName
+                        <> "; destination environment(s) did not deploy successfully: "
+                        <> T.intercalate ", " blocked
+                    )
 
             verificationFatalFailures <-
                 if skipVerification
