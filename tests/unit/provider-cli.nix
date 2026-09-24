@@ -224,6 +224,21 @@ in
       ! ${pkgs.gnugrep}/bin/grep -Fq "loginctl disable-linger" "$sshLog"
       mv "$TMPDIR/valid-plan.json" generated/plan.json
 
+      cp generated/plan.json "$TMPDIR/valid-plan.json"
+      ${pkgs.jq}/bin/jq '.environments["acme-prod"].deploymentVerification = {"enable":"not-a-bool"}' \
+        generated/plan.json > "$TMPDIR/malformed-plan.json"
+      mv "$TMPDIR/malformed-plan.json" generated/plan.json
+      : > "$log"
+      : > "$sshLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" SSH_LOG="$sshLog" \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build; then
+        echo "invalid deployment verification was reported as success"
+        exit 1
+      fi
+      test ! -s "$log"
+      ! ${pkgs.gnugrep}/bin/grep -Fq "loginctl disable-linger" "$sshLog"
+      mv "$TMPDIR/valid-plan.json" generated/plan.json
+
       # A source-only deployment can observe that this is a moved environment,
       # but cannot prove the destination participates in the same transaction.
       # It must fail before deploy-rs can remove the source account.
