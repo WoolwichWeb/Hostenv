@@ -616,18 +616,17 @@ in
           "sshOpts": []
         }
       },
-      "environments": {}
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "old-node"
+        }
+      }
     }
     EOF
 
     cat > "$work/generated/state.json" <<'EOF'
-    {
-      "acme-prod": {
-        "userName": "acme-prod",
-        "uid": 2000,
-        "virtualHosts": []
-      }
-    }
+    {}
     EOF
 
     cat > "$newPlan" <<'EOF'
@@ -689,6 +688,15 @@ in
       PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NODE_EMPTY=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
 
+      cat > generated/state.json <<'EOF'
+      {
+        "acme-prod": {
+          "userName": "acme-prod",
+          "uid": 2000,
+          "virtualHosts": []
+        }
+      }
+      EOF
       rm generated/plan.json
       if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NODE_EMPTY=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run; then
