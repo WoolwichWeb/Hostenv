@@ -1540,7 +1540,7 @@ validateNodeInventoryTransition planPath statePath newPlanRaw = do
                     let uidMismatches =
                             EnvironmentState.managedUserUidMismatches
                                 observedUsers
-                                state
+                                managedIdentities
                     unless (null managedUsers && null uidMismatches) $
                         error
                             ( "hostenv-provider: refusing to remove retiring node "
