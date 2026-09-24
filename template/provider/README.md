@@ -16,6 +16,12 @@ state, and flake used to deploy them.
 Commit `generated/state.json`. Hostenv uses it only for durable reservations:
 stable environment UIDs and hostname ownership. Deployment leaves it unchanged.
 
+When draining a provider node, keep it in `provider.nodeSystems`, remove it
+from `provider.nodeFor`, and set
+`provider.nodeStatus.<node> = "retiring"`. Hostenv will keep the node
+available for migration/cleanup and will reject removing it from inventory
+until it is clean.
+
 ## Runtime secrets
 
 Framework services may request named runtime files. Laravel requests

@@ -96,9 +96,17 @@ nix run .#hostenv-provider -- deploy
 
 Use `-n node-a` to deploy only that node.
 
-When moving an environment between nodes, keep the old node in
-`provider.nodeSystems` until the move has completed successfully. Hostenv
-deploys and activates the destination before retiring the source account.
+When draining a node, remove it from any `provider.nodeFor` mapping but keep
+it in `provider.nodeSystems` and set:
+
+```nix
+provider.nodeStatus.old-node = "retiring";
+```
+
+Hostenv keeps retiring nodes deployable for migration and cleanup, deploys and
+activates each destination before retiring its source account, and refuses to
+remove the node from inventory until a live check confirms no reserved Hostenv
+accounts remain.
 
 ## Next steps
 

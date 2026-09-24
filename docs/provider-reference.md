@@ -42,11 +42,25 @@ as the authoritative provider inventory when reconciling placement.
 A safe node retirement is therefore:
 
 1. stop assigning environments to the node with `nodeFor`;
-2. deploy the moves or retirements while the old node remains in
-   `provider.nodeSystems`;
-3. confirm Hostenv has removed the old environment accounts;
-4. only then remove the node from `nodeSystems` and its `nodes/<name>/`
-   configuration.
+2. keep the node in `provider.nodeSystems` and declare it retiring:
+
+   ```nix
+   provider.nodeStatus.old-node = "retiring";
+   ```
+
+   Retiring nodes remain deployable and observable, but Hostenv rejects
+   `nodeFor` mappings that would schedule environments onto them;
+3. deploy the moves or retirements until Hostenv has removed the old
+   environment accounts;
+4. remove the node from `nodeSystems`, `nodeStatus`, and its
+   `nodes/<name>/` configuration.
+
+`hostenv-provider plan` enforces this transition using the previous generated
+plan. Removing an active node is rejected. Removing a retiring node causes
+Hostenv to contact it using the previous plan's connection details and inspect
+its passwd database; the node is removed only when no reserved Hostenv account
+remains. If the node cannot be reached, removal is rejected rather than assumed
+safe.
 
 A UID reservation in `state.json` does **not** mean an environment has
 already been deployed; planning a brand-new environment creates its reservation
