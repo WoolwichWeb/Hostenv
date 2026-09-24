@@ -42,8 +42,6 @@ import Hostenv.Provider.DnsGateFilter (
     disableLetsEncryptPaths,
     filterEnvironmentsByNode,
  )
-import Hostenv.Provider.DnsPointsToCache (DnsPointsToCache, cacheDnsPointsTo, newDnsPointsToCache)
-import Hostenv.Provider.PrevNodeDiscovery qualified as PrevNode
 import Hostenv.Provider.SigningTarget (deployProfilePathInstallable)
 import Options.Applicative qualified as OA
 import System.Directory qualified as Dir
@@ -333,23 +331,6 @@ prettyJson raw = do
         ExitFailure c ->
             error ("jq failed while formatting JSON (exit " <> show c <> "): " <> err)
 
-reconcileObservedStateNodes :: Text -> M.Map Text Text -> [Text] -> EnvironmentState.NodeUsers -> IO ()
-reconcileObservedStateNodes statePath desiredNodes successfulEnvironments observedNodeUsers =
-    unless (M.null observedNodeUsers) $ do
-        stateExists <- Sh.testfile (fromString (T.unpack statePath))
-        when stateExists $ do
-            raw <- BL.readFile (T.unpack statePath)
-            state <- case A.eitherDecode' raw of
-                Left err -> error ("failed to parse " <> T.unpack statePath <> ": " <> err)
-                Right value -> pure (value :: KM.KeyMap A.Value)
-            let updated = EnvironmentState.reconcileObservedNodesInState desiredNodes successfulEnvironments observedNodeUsers state
-            currentPretty <- prettyJson raw
-            updatedPretty <- prettyJson (A.encode (A.Object updated))
-            when (currentPretty /= updatedPretty) $ do
-                BL.writeFile (T.unpack statePath) updatedPretty
-                _ <- Sh.procs "git" ["add", statePath] Sh.empty
-                pure ()
-
 withTempBytesFile :: String -> BL.ByteString -> (FilePath -> IO a) -> IO a
 withTempBytesFile template content action = do
     tmpDir <- Dir.getTemporaryDirectory
@@ -397,16 +378,12 @@ printDiffAgainstFile path proposedPretty = do
                 else printUnifiedDiff path currentPretty proposedPretty
 
 -- -------- Migration helpers --------
-data DeploymentStatus = NotAttempted | Skipped | Succeeded | Failed ExitCode
 data EnvInfo = EnvInfo
     { userName :: Text
     , node :: Text
-    , prevNode :: Maybe Text
     , migrateBackups :: [Text]
     , runtimeDir :: Text
-    , vhosts :: [Text]
-    , uid :: Maybe Integer
-    , deploymentStatus :: DeploymentStatus
+    , uid :: Integer
     }
 
 -- Note: check the nix code that generates plan.json
@@ -416,36 +393,22 @@ data EnvInfo = EnvInfo
 toNamed :: [EnvInfo] -> [(Text, EnvInfo)]
 toNamed = map (\e -> (e.userName, e))
 
-uniqueNames :: [EnvInfo] -> [Text]
-uniqueNames = S.toList . S.fromList . map (.userName)
-
-toNodeNamed :: [EnvInfo] -> [(Text, EnvInfo)]
-toNodeNamed = map (\e -> (e.node, e))
-
-uniqueNodeNames :: [EnvInfo] -> [Text]
-uniqueNodeNames = S.toList . S.fromList . map (.node)
-
+instance A.FromJSON EnvInfo where
 instance A.FromJSON EnvInfo where
     parseJSON = A.withObject "EnvInfo" $ \o -> do
         hostenvObj <- o .: "hostenv"
         userName <- hostenvObj .: "userName"
         runtimeDir <- hostenvObj .: "runtimeDir"
         node <- o .: "node"
-        prevNode <- o .:? "previousNode"
         migrateBackups <- o .:? "migrations" .!= []
-        vhostsObj <- o .:? "virtualHosts" .!= (KM.empty :: KM.KeyMap A.Value)
-        let vhosts = map (K.toText . fst) (KM.toList vhostsObj)
-        uid <- o .:? "uid"
+        uid <- o .: "uid"
         pure $
             EnvInfo
                 { userName = userName
                 , node = node
-                , prevNode = prevNode
                 , migrateBackups = migrateBackups
                 , runtimeDir = runtimeDir
-                , vhosts = vhosts
                 , uid = uid
-                , deploymentStatus = NotAttempted
                 }
 
 data Snapshot = Snapshot {snapId :: Text}
@@ -1401,7 +1364,6 @@ planSystemTargetNodes plan mNode =
             Just nodeName -> filter (== nodeName) nodeNames
 
 nodeUsesRemoteBuild :: KM.KeyMap A.Value -> Text -> Bool
-nodeUsesRemoteBuild :: KM.KeyMap A.Value -> Text -> Bool
 nodeUsesRemoteBuild remoteBuildMap nodeName =
     fromMaybe False (lookupBool (K.fromText nodeName) remoteBuildMap)
 
@@ -1417,54 +1379,17 @@ runNodeDeployPreflight resolveNodeConnection deployUser nodeName requiresTrusted
             , runRemote = runRemoteOutput target
             }
 
-environmentUserPresentOnNode :: Text -> (Text -> NodeConnection) -> Text -> EnvInfo -> IO (Either Text Bool)
-environmentUserPresentOnNode deployUser nodeConnection nodeName envInfo = do
-    let target = mkSshTarget deployUser (nodeConnection nodeName)
-    let absentMarker = "__HOSTENV_USER_ABSENT__"
-    let lookupCmd =
-            "entry=$(getent passwd "
-                <> shellEscape envInfo.userName
-                <> " 2>/dev/null || true); "
-                <> "if [ -z \"$entry\" ]; then printf '%s\\n' "
-                <> absentMarker
-                <> "; else printf '%s\\n' \"$entry\"; fi"
-    (code, out, err) <- runRemoteOutput target ["bash", "-lc", lookupCmd]
-    case code of
-        ExitFailure exitCode ->
-            pure
-                ( Left
-                    ( "failed to inspect user "
-                        <> envInfo.userName
-                        <> " on "
-                        <> nodeName
-                        <> " (exit "
-                        <> T.pack (show exitCode)
-                        <> "): "
-                        <> T.strip err
-                    )
-                )
-        ExitSuccess ->
-            if T.strip out == absentMarker
-                then pure (Right False)
-                else
-                    let users = EnvironmentState.parsePasswdUsers out
-                        matches =
-                            case envInfo.uid of
-                                Just expectedUid -> M.lookup envInfo.userName users == Just expectedUid
-                                Nothing -> M.member envInfo.userName users
-                     in pure (Right matches)
-
-cleanupManagedUsersOnNode ::
+readNodeUsers ::
     Text ->
     (Text -> NodeConnection) ->
-    M.Map Text Text ->
-    KM.KeyMap A.Value ->
     Text ->
     IO (Either Text (Text, M.Map Text Integer))
-cleanupManagedUsersOnNode deployUser nodeConnection desiredNodes state nodeName = do
+readNodeUsers deployUser nodeConnection nodeName = do
     let target = mkSshTarget deployUser (nodeConnection nodeName)
-    (readCode, passwdOut, readErr) <- runRemoteOutput target ["getent", "passwd"]
-    case readCode of
+    (code, out, err) <- runRemoteOutput target ["getent", "passwd"]
+    case code of
+        ExitSuccess ->
+            pure (Right (nodeName, EnvironmentState.parsePasswdUsers out))
         ExitFailure exitCode ->
             pure
                 ( Left
@@ -1473,17 +1398,44 @@ cleanupManagedUsersOnNode deployUser nodeConnection desiredNodes state nodeName 
                         <> " (exit "
                         <> T.pack (show exitCode)
                         <> "): "
-                        <> T.strip readErr
+                        <> T.strip err
                     )
                 )
-        ExitSuccess -> do
-            let observedUsers = EnvironmentState.parsePasswdUsers passwdOut
-            let retiredUsers =
-                    EnvironmentState.managedUsersToRetire
-                        nodeName
-                        desiredNodes
-                        observedUsers
-                        state
+
+cleanupManagedUsersOnNode ::
+    Bool ->
+    Text ->
+    (Text -> NodeConnection) ->
+    M.Map Text Text ->
+    M.Map Text Integer ->
+    KM.KeyMap A.Value ->
+    Text ->
+    IO (Either Text ())
+cleanupManagedUsersOnNode allowMovedCleanup deployUser nodeConnection desiredNodes observedUsers state nodeName = do
+    let target = mkSshTarget deployUser (nodeConnection nodeName)
+    let retiredUsers =
+            EnvironmentState.managedUsersToRetire
+                nodeName
+                desiredNodes
+                observedUsers
+                state
+    let movedUsers =
+            [ userName
+            | (userName, _) <- retiredUsers
+            , M.member userName desiredNodes
+            ]
+    if not allowMovedCleanup && not (null movedUsers)
+        then
+            pure
+                ( Left
+                    ( "node-filtered deployment would retire moved environment user(s) from "
+                        <> nodeName
+                        <> " before their destination is deployed: "
+                        <> T.intercalate ", " movedUsers
+                        <> ". Run an unfiltered deploy to migrate and retire them safely."
+                    )
+                )
+        else do
             cleanupResults <-
                 forM retiredUsers $ \(userName, uid) -> do
                     let lingerPath = "/var/lib/systemd/linger/" <> userName
@@ -1510,22 +1462,7 @@ cleanupManagedUsersOnNode deployUser nodeConnection desiredNodes state nodeName 
                     pure (userName, code)
             let failures = [(name, code) | (name, code) <- cleanupResults, code /= ExitSuccess]
             if null failures
-                then do
-                    (verifyCode, verifyOut, verifyErr) <- runRemoteOutput target ["getent", "passwd"]
-                    case verifyCode of
-                        ExitSuccess ->
-                            pure (Right (nodeName, EnvironmentState.parsePasswdUsers verifyOut))
-                        ExitFailure exitCode ->
-                            pure
-                                ( Left
-                                    ( "failed to re-read passwd database on "
-                                        <> nodeName
-                                        <> " after cleanup (exit "
-                                        <> T.pack (show exitCode)
-                                        <> "): "
-                                        <> T.strip verifyErr
-                                    )
-                                )
+                then pure (Right ())
                 else
                     pure
                         ( Left
@@ -1536,24 +1473,7 @@ cleanupManagedUsersOnNode deployUser nodeConnection desiredNodes state nodeName 
                             )
                         )
 
-readObservedNodeUsers :: Text -> (Text -> NodeConnection) -> Text -> IO (Maybe (Text, M.Map Text Integer))
-readObservedNodeUsers deployUser nodeConnection nodeName = do
-    let target = mkSshTarget deployUser (nodeConnection nodeName)
-    (code, out, err) <- runRemoteOutput target ["getent", "passwd"]
-    case code of
-        ExitSuccess ->
-            pure (Just (nodeName, EnvironmentState.parsePasswdUsers out))
-        ExitFailure exitCode -> do
-            printProviderLine
-                ( "hostenv-provider: warning: could not observe users on "
-                    <> nodeName
-                    <> " after system deployment (exit "
-                    <> T.pack (show exitCode)
-                    <> "): "
-                    <> T.strip err
-                )
-            pure Nothing
-
+runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
 runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
 runMigrationBackup deployUser nodeConnection envInfo prevNode backupName = do
     let sourceTarget = mkSshTarget deployUser (nodeConnection prevNode)
@@ -1673,119 +1593,6 @@ clearRestorePlan deployUser nodeConnection envInfo = do
         _ ->
             printProviderLine ("hostenv-provider: no pending restore plan for skipped environment " <> envInfo.userName)
 
-resolvePrevNode ::
-    DnsLookupCache ->
-    DnsPointsToCache ->
-    (Text -> Maybe Text) ->
-    (Text -> EnvInfo -> IO (Either Text Bool)) ->
-    Text ->
-    [Text] ->
-    EnvInfo ->
-    IO (Either Text (Maybe Text))
-resolvePrevNode dnsCache dnsPointsToCache explicitSourceFor sourceUserPresent hostenvHostname discoveryNodes envInfo =
-    case PrevNode.resolveDeclaredPrevNode envInfo.node (explicitSourceFor envInfo.userName) envInfo.prevNode of
-        PrevNode.NoDeclaredPrevNode -> discoverFromDns
-        PrevNode.DeclaredCurrentNode _source _sourceNode ->
-            pure (Right Nothing)
-        PrevNode.DeclaredPreviousNode source sourceNode ->
-            validateDeclaredSource source sourceNode
-  where
-    validateDeclaredSource source sourceNode = do
-        present <- sourceUserPresent sourceNode envInfo
-        case present of
-            Left err -> pure (Left err)
-            Right True -> do
-                case source of
-                    PrevNode.MigrationSourceOverride ->
-                        printProviderLine ("hostenv: previous node for " <> envInfo.userName <> " forced via --migration-source: " <> sourceNode)
-                    PrevNode.PlanPreviousNode ->
-                        printProviderLine ("hostenv: previous node for " <> envInfo.userName <> " configured: " <> sourceNode)
-                pure (Right (Just sourceNode))
-            Right False ->
-                case source of
-                    PrevNode.MigrationSourceOverride ->
-                        pure
-                            ( Left
-                                ( "migration source "
-                                    <> sourceNode
-                                    <> " does not contain Hostenv user "
-                                    <> envInfo.userName
-                                )
-                            )
-                    PrevNode.PlanPreviousNode -> do
-                        printProviderLine
-                            ( "hostenv: previous node "
-                                <> sourceNode
-                                <> " no longer contains "
-                                <> envInfo.userName
-                                <> "; migration was already handed off or the source was removed"
-                            )
-                        pure (Right Nothing)
-
-    validateDiscoveredSource discoveryHost node = do
-        present <- sourceUserPresent node envInfo
-        case present of
-            Left err -> pure (Left err)
-            Right True -> do
-                printProviderLine ("hostenv: previous node for " <> envInfo.userName <> " discovered via DNS " <> discoveryHost <> ": " <> node)
-                pure (Right (Just node))
-            Right False -> do
-                printProviderLine
-                    ( "hostenv: DNS points "
-                        <> discoveryHost
-                        <> " at "
-                        <> node
-                        <> ", but that node no longer contains "
-                        <> envInfo.userName
-                        <> "; skipping migration"
-                    )
-                pure (Right Nothing)
-
-    discoverFromDns = do
-        let probedHosts = PrevNode.probeHosts hostenvHostname envInfo.userName envInfo.vhosts
-        -- TODO: Finish the refactor by typing EnvInfo/discoveryNodes at the
-        -- source instead of wrapping raw Text into NodeName here.
-        let candidateNodes = map PrevNode.NodeName discoveryNodes
-        let currentNode = PrevNode.NodeName envInfo.node
-        let previousNodeCandidates = PrevNode.previousNodeCandidates currentNode candidateNodes
-        if null previousNodeCandidates
-            then pure (Right Nothing)
-            else do
-                let pointsTo = cacheDnsPointsTo dnsPointsToCache (dnsPointsToWith dnsCache)
-                probes <-
-                    forM probedHosts $ \probeHost ->
-                        PrevNode.probeHost pointsTo hostenvHostname probeHost candidateNodes
-                let resolution = PrevNode.chooseDiscoveryOutcome currentNode probes
-                case resolution of
-                    PrevNode.DiscoveryResolved (PrevNode.Hostname discoveryHost) (PrevNode.NodeName node) ->
-                        validateDiscoveredSource discoveryHost node
-                    PrevNode.DiscoverySkipped PrevNode.DiscoveryNoMatches ->
-                        pure (Right Nothing)
-                    PrevNode.DiscoverySkipped (PrevNode.DiscoveryMatchedCurrent (PrevNode.Hostname probedHost) _matchedNodes) -> do
-                        printProviderLine
-                            ( "hostenv: DNS for "
-                                <> probedHost
-                                <> " points to the current node "
-                                <> envInfo.node
-                                <> "; no migration needed for "
-                                <> envInfo.userName
-                            )
-                        pure (Right Nothing)
-                    PrevNode.DiscoveryAmbiguous (PrevNode.Hostname discoveryHost) nodes ->
-                        pure
-                            ( Left
-                                ( "DNS for "
-                                    <> discoveryHost
-                                    <> " matches more than one possible previous node for "
-                                    <> envInfo.userName
-                                    <> ": "
-                                    <> T.intercalate ", " [nodeName | PrevNode.NodeName nodeName <- nodes]
-                                    <> ". Set --migration-source "
-                                    <> envInfo.userName
-                                    <> "=<node> or set previousNode explicitly."
-                                )
-                            )
-
 writeRestorePlan :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> [(Text, Text)] -> IO ()
 writeRestorePlan deployUser nodeConnection envInfo prevNode snapshots = do
     let deployTarget = mkSshTarget deployUser (nodeConnection envInfo.node)
@@ -1793,7 +1600,7 @@ writeRestorePlan deployUser nodeConnection envInfo prevNode snapshots = do
     let restoreDir = runtimeDir <> "/restore"
     let restorePath = restoreDir <> "/plan.json"
     let envUser = envInfo.userName
-    let ownerSpec = maybe envUser (T.pack . show) envInfo.uid
+    let ownerSpec = T.pack (show envInfo.uid)
     let runtimeGroup = "users"
     let groupSpec = ownerSpec
     let snapObj = KM.fromList (map (\(name, sid) -> (K.fromText name, A.String sid)) snapshots)
@@ -1909,9 +1716,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             let sourceHits = filter (\(envName, _) -> any (\e -> e.userName == envName) envInfosFiltered) migrationSources
             let sourceMisses = map fst migrationSources \\ map fst sourceHits
             let sourceFor envName = lookup envName migrationSources
-            let discoveryNodes = PrevNode.discoveryNodeNames plan (uniqueNodeNames (map fst envRows))
-            dnsCache <- newDnsLookupCache
-            dnsPointsToCache <- newDnsPointsToCache
+            let discoveryNodes = planSystemTargetNodes plan Nothing
 
             -- Perform data migrations if the environment has moved node.
             case mNode of
@@ -1938,25 +1743,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                 Left err -> error ("failed to parse " <> T.unpack statePath <> ": " <> err)
                 Right value -> pure (value :: KM.KeyMap A.Value)
 
-            -- A node-filtered deployment must not remove the source account of
-            -- an environment that is moving elsewhere: the destination would
-            -- not participate in this deployment, so migration cannot safely
-            -- happen before account removal.
-            case mNode of
-                Nothing -> pure ()
-                Just nodeName -> do
-                    let movedCleanupUsers =
-                            EnvironmentState.movedUsersOnNode nodeName desiredNodesByUser state
-                    unless (null movedCleanupUsers) $ do
-                        printProviderErrLine
-                            ( "hostenv-provider: error: --node "
-                                <> nodeName
-                                <> " would retire moved environment user(s) before their destination is deployed: "
-                                <> T.intercalate ", " movedCleanupUsers
-                                <> ". Run an unfiltered deploy to migrate and retire them safely."
-                            )
-                        Sh.exitWith (ExitFailure 1)
-
+            let deployArgs useCheckSigs useDryActivate deployArgM =
             let deployArgs useCheckSigs useDryActivate deployArgM =
                     let remoteBuildArgs =
                             if forceRemoteBuild then ["--remote-build"] else []
@@ -2075,7 +1862,24 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                 printProviderLine "hostenv-provider: aborting deployment because one or more preflight checks failed"
                 Sh.exitWith (ExitFailure 1)
 
-            let sourceUserPresent = environmentUserPresentOnNode deployUser resolveNodeConnection
+            let migrationEnvInfos =
+                    filter
+                        (\envInfo -> envInfo.userName `notElem` skipMigrations && envInfo.migrateBackups /= [])
+                        envInfosFiltered
+            let observationNodes =
+                    S.toList . S.fromList $
+                        targetNodes
+                            ++ if null migrationEnvInfos then [] else discoveryNodes
+            observedResults <-
+                forM observationNodes $
+                    readNodeUsers deployUser resolveNodeConnection
+            let observationErrors = [err | Left err <- observedResults]
+            unless (null observationErrors) $ do
+                forM_ observationErrors $
+                    printProviderErrLine . ("hostenv-provider: error: " <>)
+                Sh.exitWith (ExitFailure 1)
+            let observedNodeUsers =
+                    M.fromList [row | Right row <- observedResults]
 
             let skippedEnvInfos =
                     filter (\envInfo -> envInfo.userName `elem` skipHits) envInfosFiltered
@@ -2087,11 +1891,27 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                     if envInfo.userName `elem` skipMigrations || envInfo.migrateBackups == []
                         then pure (Right Nothing)
                         else do
-                            prevNode <- resolvePrevNode dnsCache dnsPointsToCache sourceFor sourceUserPresent hostenvHostname discoveryNodes envInfo
-                            pure $ case prevNode of
+                            let resolution =
+                                    EnvironmentState.resolveMigrationSourceNode
+                                        envInfo.node
+                                        envInfo.userName
+                                        envInfo.uid
+                                        (sourceFor envInfo.userName)
+                                        observedNodeUsers
+                            case resolution of
+                                Right (Just sourceNode) ->
+                                    case sourceFor envInfo.userName of
+                                        Just _ ->
+                                            printProviderLine
+                                                ("hostenv: migration source for " <> envInfo.userName <> " forced via --migration-source: " <> sourceNode)
+                                        Nothing ->
+                                            printProviderLine
+                                                ("hostenv: migration source for " <> envInfo.userName <> " observed on node: " <> sourceNode)
+                                _ -> pure ()
+                            pure $ case resolution of
                                 Left err -> Left err
-                                Right (Just prev) | prev /= envInfo.node -> Right (Just (envInfo, prev))
-                                _ -> Right Nothing
+                                Right (Just sourceNode) -> Right (Just (envInfo, sourceNode))
+                                Right Nothing -> Right Nothing
 
             let migrationFatalErrors =
                     [ err
@@ -2137,12 +1957,15 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             forM_ migrations runMigration
 
             cleanupResults <-
-                forM targetNodes $
+                forM targetNodes $ \nodeName ->
                     cleanupManagedUsersOnNode
+                        (isNothing mNode)
                         deployUser
                         resolveNodeConnection
                         desiredNodesByUser
+                        (M.findWithDefault M.empty nodeName observedNodeUsers)
                         state
+                        nodeName
             let cleanupFailures = [err | Left err <- cleanupResults]
             unless (null cleanupFailures) $ do
                 forM_ cleanupFailures $
@@ -2188,11 +2011,6 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             deployGuard res args
                             pure (nodeName, res)
 
-            observedNodeRows <-
-                forM targetNodes $
-                    readObservedNodeUsers deployUser resolveNodeConnection
-            let observedNodeUsers = M.fromList (catMaybes observedNodeRows)
-
             -- Environments deployment for the node.
             envDeployRes <- forM (toNamed envInfosFiltered) $ \(envName, envInfo) -> do
                 let target = envInfo.node <> "." <> envInfo.userName
@@ -2224,9 +2042,6 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                 res <- Sh.proc "nix" args Sh.empty
                                 deployGuard res args
                                 pure (envName, res)
-
-            let successfulEnvironments = [envName | (envName, ExitSuccess) <- envDeployRes]
-            reconcileObservedStateNodes statePath desiredNodesByUser successfulEnvironments observedNodeUsers
 
             verificationFatalFailures <-
                 if skipVerification
