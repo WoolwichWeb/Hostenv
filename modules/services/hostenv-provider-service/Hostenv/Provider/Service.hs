@@ -99,16 +99,8 @@ lookupTextList key obj = case KM.lookup key obj of
 nodesForProject :: Text -> Text -> BL.ByteString -> Either Text [Text]
 nodesForProject org project raw = do
   envs <- decodeEnvironments raw
-  let matches =
-        mapMaybe extractEnv (KM.toList envs)
-      nodes = sort (nub (map envNode matches))
-      deps =
-        [ (envNode info, prev)
-        | info <- matches
-        , Just prev <- [info.envPrevNode]
-        , prev /= info.envNode
-        ]
-  Right (orderNodes nodes deps)
+  let matches = mapMaybe extractEnv (KM.toList envs)
+  Right (sort (nub (map envNode matches)))
   where
     extractEnv (_kEnv, vEnv) = case vEnv of
       Object envObj -> do
@@ -222,7 +214,6 @@ nodesForProjectWithDnsWith pointsTo org project raw = do
                         )
                     )
 
-data EnvNodeInfo = EnvNodeInfo
 data EnvNodeInfo = EnvNodeInfo
   { envNode :: Text
   , envPrevNode :: Maybe Text

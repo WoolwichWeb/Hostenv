@@ -953,14 +953,13 @@ in
       plan.environments.${user1}.virtualHosts ? "alias.example"
     ) "aliases from state should be preserved";
 
-  provider-plan-previous-node =
+  provider-plan-no-previous-node =
     let
       plan = lib.importJSON planWithState;
-      prev = plan.environments.${user1}.previousNode or null;
     in
-    asserts.assertTrue "provider-plan-previous-node" (
-      prev == null
-    ) "previousNode should be null so DNS discovery can be used";
+    asserts.assertTrue "provider-plan-no-previous-node" (
+      !(plan.environments.${user1} ? previousNode)
+    ) "plan should not encode historical node placement";
 
   provider-plan-flake-inputs =
     let
