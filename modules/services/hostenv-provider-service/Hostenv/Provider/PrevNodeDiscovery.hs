@@ -9,12 +9,9 @@ module Hostenv.Provider.PrevNodeDiscovery (
     ProbeOutcome (..),
     DiscoverySkip (..),
     DiscoveryOutcome (..),
-    DeclaredPrevNodeSource (..),
-    DeclaredPrevNodeResolution (..),
     canonicalHostInDomain,
     discoveryNodeNames,
     previousNodeCandidates,
-    resolveDeclaredPrevNode,
     probeHosts,
     probeHost,
     classifyProbe,
@@ -113,31 +110,6 @@ data DiscoveryOutcome
       DiscoveryAmbiguous Hostname [NodeName]
     deriving (Eq, Show)
 
-{- | Identifies where a declared previous-node value came from.
-A declared previous node is the machine from which data should be copied or
-migrated.
--}
-data DeclaredPrevNodeSource
-    = -- | The value came from a migration-source override supplied by the caller.
-      MigrationSourceOverride
-    | -- | The value came from the previousNode field in the evaluated plan.
-      PlanPreviousNode
-    deriving (Eq, Show)
-
--- | Describes what a declared previous-node value means for migration.
-data DeclaredPrevNodeResolution
-    = -- | No previous-node value was declared.
-      NoDeclaredPrevNode
-    | {- | A declared previous-node value names the current node, so there is no
-      previous node to migrate from.
-      -}
-      DeclaredCurrentNode DeclaredPrevNodeSource Text
-    | {- | A declared previous-node value names another node that can be used as
-      the migration source.
-      -}
-      DeclaredPreviousNode DeclaredPrevNodeSource Text
-    deriving (Eq, Show)
-
 mkHostname :: Text -> Hostname
 mkHostname = Hostname . normalizeHost
 
@@ -165,29 +137,7 @@ previousNodeCandidates :: NodeName -> [NodeName] -> [NodeName]
 previousNodeCandidates currentNode =
     filter (/= mkNodeName (nodeNameText currentNode)) . normalizeNodeNames
 
-{- | Resolve a previous-node value declared by the caller or in the plan.
-A caller-supplied migration source takes precedence over the previousNode field
-in the evaluated plan. The result distinguishes a missing value, the current
-node, and another node that can serve as the migration source.
--}
-resolveDeclaredPrevNode :: Text -> Maybe Text -> Maybe Text -> DeclaredPrevNodeResolution
-resolveDeclaredPrevNode currentNode explicitSource configuredPrevNode =
-    case pickSource of
-        Nothing -> NoDeclaredPrevNode
-        Just (source, sourceNode)
-            | mkNodeName sourceNode == mkNodeName currentNode ->
-                DeclaredCurrentNode source sourceNode
-            | otherwise ->
-                DeclaredPreviousNode source sourceNode
-  where
-    pickSource =
-        case explicitSource of
-            Just sourceNode -> Just (MigrationSourceOverride, sourceNode)
-            Nothing ->
-                case configuredPrevNode of
-                    Just sourceNode -> Just (PlanPreviousNode, sourceNode)
-                    Nothing -> Nothing
-
+{- | Build the candidate node list for previous-node discovery.
 {- | Build the candidate node list for previous-node discovery.
   This includes current plan nodes, persisted nodeConnections from state,
   and any nodes attached to the currently parsed environments.

@@ -29,11 +29,10 @@ main = do
   testGitHubSig
   testGitLabToken
   testPlanParsing
-  testNodeOrderWithMigrations
   testNodeOrderWithDnsSkipsNonMigratingEnvDiscovery
   testSingleNodePlanSkipsDns
   testNodeOrderWithDnsFallsBackToVhosts
-  testNodeOrderWithDnsIncludesStateOnlyPreviousNode
+  testNodeOrderWithDnsIncludesConnectionCandidate
   testRepeatedDnsChecksAreCached
   testProjectHashSelection
   testPrevNodeDiscoveryResolution
@@ -74,16 +73,7 @@ testPlanParsing = do
         Left err -> assert False ("nodesForProject failed: " <> show err)
         Right nodes -> assert (nodes == ["node-a", "node-b"]) "plan parsing should return matching nodes"
 
-testNodeOrderWithMigrations :: IO ()
-testNodeOrderWithMigrations = do
-  let planJson =
-        BLC.pack
-          "{\"environments\":{\"env-a\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-main\"},\"node\":\"node-b\",\"previousNode\":\"node-a\"},\"env-b\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-dev\"},\"node\":\"node-a\"}}}"
-  case nodesForProject "acme" "site" planJson of
-    Left err -> assert False ("nodesForProject failed: " <> show err)
-    Right nodes ->
-      assert (nodes == ["node-b", "node-a"]) "migration ordering should deploy destination before source"
-
+testNodeOrderWithDnsSkipsNonMigratingEnvDiscovery :: IO ()
 testNodeOrderWithDnsSkipsNonMigratingEnvDiscovery :: IO ()
 testNodeOrderWithDnsSkipsNonMigratingEnvDiscovery = do
   let planJson =
@@ -142,8 +132,8 @@ testNodeOrderWithDnsFallsBackToVhosts = do
         "dns discovery should probe canonical host first and then configured vhosts"
 
 
-testNodeOrderWithDnsIncludesStateOnlyPreviousNode :: IO ()
-testNodeOrderWithDnsIncludesStateOnlyPreviousNode = do
+testNodeOrderWithDnsIncludesConnectionCandidate :: IO ()
+testNodeOrderWithDnsIncludesConnectionCandidate = do
   let planJson =
         BLC.pack
           "{\"hostenvHostname\":\"hosting.test\",\"nodes\":{\"node-c\":{}},\"nodeConnections\":{\"node-a\":{}},\"environments\":{\"env-a\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-main\"},\"node\":\"node-c\",\"migrations\":[\"db\"]}}}"
@@ -155,11 +145,11 @@ testNodeOrderWithDnsIncludesStateOnlyPreviousNode = do
   case result of
     Left err -> assert False ("nodesForProjectWithDnsWith failed unexpectedly: " <> show err)
     Right nodes -> do
-      assert (nodes == ["node-c", "node-a"]) "state-only previous node should be ordered after destination"
+      assert (nodes == ["node-c", "node-a"]) "nodeConnections candidate should be ordered after destination"
       calls <- readIORef callsRef
       assert
         (("env-a.hosting.test", "node-a.hosting.test") `elem` calls)
-        "dns discovery should probe state-only nodeConnections candidates"
+        "dns discovery should probe nodeConnections candidates"
 
 testRepeatedDnsChecksAreCached :: IO ()
 testRepeatedDnsChecksAreCached = do
@@ -247,22 +237,6 @@ testPrevNodeDiscoveryResolution = do
         == [NodeName "node-c"]
     )
     "previousNodeCandidates should normalize names and exclude the current node"
-  assert
-    ( resolveDeclaredPrevNode "node-b" Nothing (Just "node-a")
-        == DeclaredPreviousNode PlanPreviousNode "node-a"
-    )
-    "plan previousNode should resolve before DNS discovery"
-  assert
-    ( resolveDeclaredPrevNode "node-b" (Just "node-c") (Just "node-a")
-        == DeclaredPreviousNode MigrationSourceOverride "node-c"
-    )
-    "--migration-source should take precedence over plan previousNode"
-  assert
-    ( resolveDeclaredPrevNode "node-b" (Just "NODE-B.") (Just "node-a")
-        == DeclaredCurrentNode MigrationSourceOverride "NODE-B."
-    )
-    "a declared current node should mean that no migration is needed"
-
   assert
     ( classifyProbe (NodeName "node-b") (Probe (Hostname "env-main-a1b2c3.hosting.test") [])
         == ProbeSkipped ProbeNoMatches
