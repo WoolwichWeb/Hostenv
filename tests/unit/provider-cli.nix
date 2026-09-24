@@ -120,7 +120,11 @@ in
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
       case "$target" in
         *old-node.hosting.test*)
-          printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+          if [ "''${UID_DRIFT:-0}" = 1 ]; then
+            printf 'acme-prod:x:2999:100::/home/acme-prod:/bin/sh\n'
+          else
+            printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+          fi
           ;;
         *retired-node.hosting.test*)
           printf 'retired-prod:x:2001:100::/home/retired-prod:/bin/sh\n'
@@ -192,6 +196,18 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$log"
+
+      # Stable Hostenv UIDs are global identity. Drift must abort before any
+      # system or environment deployment can make the situation worse.
+      : > "$log"
+      : > "$sshLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" SSH_LOG="$sshLog" UID_DRIFT=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "UID drift was reported as success"
+        exit 1
+      fi
+      test ! -s "$log"
+      ! ${pkgs.gnugrep}/bin/grep -Fq "loginctl disable-linger" "$sshLog"
 
       # A source-only deployment can observe that this is a moved environment,
       # but cannot prove the destination participates in the same transaction.
