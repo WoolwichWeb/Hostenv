@@ -39,6 +39,13 @@ in
               env = envs.drupal6;
               hostenvNixosModule = cfgTop.flake.modules.nixos.hostenv-top-level;
             };
+
+            # This is intentionally a package rather than a normal flake check:
+            # it boots two VMs and exercises the destructive migration boundary.
+            provider-migration-lifecycle-vm-test =
+              import ../../tests/integration/provider-migration-vm.nix {
+                inherit pkgs;
+              };
           };
         }
       );
