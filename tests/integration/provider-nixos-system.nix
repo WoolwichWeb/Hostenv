@@ -261,6 +261,7 @@ let
       extraConfig = "add_header X-Node-Only yes;";
     };
   };
+
   nixosSystem = providerFlake.lib.provider.nixosSystem;
   deployOutputs = providerFlake.lib.provider.deployOutputs {
     inherit
@@ -459,7 +460,6 @@ let
     && lib.strings.hasInfix "systemctl --user restart" secretRestartService.script;
   requiredSecretsInPlanOk =
     generatedPlan.environments.${envName}.requiredSecretFiles == [ "laravel_env" ];
-  wheelGroupExists = systemEval.config.users.groups ? wheel;
   wheelGroupExists = systemEval.config.users.groups ? wheel;
   wheelPasswordless =
     let
