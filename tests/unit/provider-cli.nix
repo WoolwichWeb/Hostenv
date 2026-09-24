@@ -48,6 +48,7 @@ in
     work="$TMPDIR/provider"
     fakeBin="$TMPDIR/bin"
     log="$TMPDIR/nix.log"
+    sshLog="$TMPDIR/ssh.log"
     mkdir -p "$work/generated" "$fakeBin"
 
     cat > "$work/generated/plan.json" <<'EOF'
@@ -103,6 +104,12 @@ in
     set -euo pipefail
     script="$(cat)"
     target="$*"
+    if [ -n "''${SSH_LOG:-}" ]; then
+      {
+        printf 'target=%s\n' "$target"
+        printf '%s\n' "$script"
+      } >> "$SSH_LOG"
+    fi
 
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/etc/os-release"; then
       printf 'ID=nixos\n'
@@ -171,10 +178,15 @@ in
       # input/reservation file and must remain byte-for-byte unchanged.
       cp generated/state.json "$TMPDIR/state-before.json"
       : > "$log"
-      PATH="$fakeBin:$PATH" NIX_LOG="$log" \
+      : > "$sshLog"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" SSH_LOG="$sshLog" \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
 
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
+      ${pkgs.gnugrep}/bin/grep -Fq "loginctl disable-linger 'acme-prod'" "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq "user@2000.service" "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq "loginctl disable-linger 'retired-prod'" "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq "user@2001.service" "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
@@ -184,12 +196,14 @@ in
       # but cannot prove the destination participates in the same transaction.
       # It must fail before deploy-rs can remove the source account.
       : > "$log"
-      if PATH="$fakeBin:$PATH" NIX_LOG="$log" \
+      : > "$sshLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" SSH_LOG="$sshLog" \
         ${cliPkg}/bin/hostenv-provider deploy --node old-node --remote-build --skip-verification; then
         echo "node-filtered moved-source deployment was reported as success"
         exit 1
       fi
       test ! -s "$log"
+      ! ${pkgs.gnugrep}/bin/grep -Fq "loginctl disable-linger" "$sshLog"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
     )
 
