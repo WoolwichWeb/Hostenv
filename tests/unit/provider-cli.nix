@@ -104,12 +104,12 @@ in
     script="$(cat)"
     target="$*"
 
-    if printf '%s\n' "$script" | grep -Fq "/etc/os-release"; then
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/etc/os-release"; then
       printf 'ID=nixos\n'
       exit 0
     fi
 
-    if printf '%s\n' "$script" | grep -Fq "'getent' 'passwd'"; then
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
       case "$target" in
         *old-node.hosting.test*)
           printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
@@ -174,7 +174,7 @@ in
       PATH="$fakeBin:$PATH" NIX_LOG="$log" \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
 
-      cmp "$TMPDIR/state-before.json" generated/state.json
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
@@ -190,7 +190,7 @@ in
         exit 1
       fi
       test ! -s "$log"
-      cmp "$TMPDIR/state-before.json" generated/state.json
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
     )
 
     echo ok > "$out"
