@@ -688,6 +688,13 @@ in
 
       PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NODE_EMPTY=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      rm generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "existing provider planned without its previous inventory plan"
+        exit 1
+      fi
     )
 
     echo ok > "$out"
