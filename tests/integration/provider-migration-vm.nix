@@ -317,7 +317,12 @@ pkgs.testers.runNixOSTest {
             "${cliPkg}/bin/hostenv-provider deploy "
             "--remote-build --skip-verification"
         )
-        controller.fail("FAIL_DEST_ENV=1 " + move_command)
+        controller.fail(
+            move_command.replace(
+                "FAKE_MODE=move ",
+                "FAKE_MODE=move FAIL_DEST_ENV=1 ",
+            )
+        )
 
         old.succeed("getent passwd ${user}")
         old.succeed("test -e /var/lib/systemd/linger/${user}")
