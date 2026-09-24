@@ -94,18 +94,6 @@ let
   replanned = mkPlan { statePath = baseline.state; };
   replannedPlan = lib.importJSON replanned.plan;
   replannedState = lib.importJSON replanned.state;
-  legacyPendingState = persistedState // {
-    ${mainUser} = persistedState.${mainUser} // {
-      node = "node-a";
-      present = true;
-      pendingCleanupNodes = [ "old-node" ];
-    };
-  };
-  legacyPending = mkPlan {
-    statePath = pkgs.writeText "state-with-legacy-pending-cleanup.json" (builtins.toJSON legacyPendingState);
-  };
-  legacyPendingPlan = lib.importJSON legacyPending.plan;
-  legacyPendingOutputState = lib.importJSON legacyPending.state;
   withoutState = mkPlan { statePath = null; };
   missingState = mkPlan { statePath = providerRoot + "/generated/absent.json"; };
   noStatePlan = lib.importJSON withoutState.plan;
@@ -214,14 +202,6 @@ in
     && replannedState.${mainUser}.node == "old-node"
     && !(replannedState.${testingUser} ? node)
   ) "re-running plan before deployment must preserve the last observed placement and pending cleanup";
-
-  provider-plan-legacy-pending-state-collapses = asserts.assertTrue "provider-plan-legacy-pending-state-collapses" (
-    legacyPendingPlan.environments.${mainUser}.previousNode == "old-node"
-    && legacyPendingPlan.nodes ? old-node
-    && legacyPendingOutputState.${mainUser}.node == "old-node"
-    && !(legacyPendingOutputState.${mainUser} ? present)
-    && !(legacyPendingOutputState.${mainUser} ? pendingCleanupNodes)
-  ) "temporary MR 36 workflow fields must collapse back into the observed node placement";
 
   provider-plan-optional-state = asserts.assertTrue "provider-plan-optional-state" (
     lib.importJSON missingState.plan == noStatePlan

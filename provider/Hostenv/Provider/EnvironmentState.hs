@@ -13,10 +13,9 @@ where
 import Data.Aeson qualified as A
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
-import Data.Foldable (toList)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
-import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Scientific (floatingOrInteger)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -84,17 +83,12 @@ reconcileObservedNodesInState desiredNodes successfulEnvironments observedNodes 
 
     reconcileEntry key = \case
         A.Object entry ->
-            let cleaned = KM.delete pendingKey (KM.delete presentKey entry)
-                legacyPending = lookupTextList pendingKey entry
-                oldNode =
-                    case listToMaybe legacyPending of
-                        Just node -> Just node
-                        Nothing -> lookupText nodeKey entry
+            let oldNode = lookupText nodeKey entry
                 userName = fromMaybe (K.toText key) (lookupText userNameKey entry)
              in case lookupInteger uidKey entry of
-                    Nothing -> A.Object cleaned
+                    Nothing -> A.Object entry
                     Just uid ->
-                        A.Object (setNode (chooseNode userName uid oldNode) cleaned)
+                        A.Object (setNode (chooseNode userName uid oldNode) entry)
         value -> value
 
     chooseNode userName uid oldNode =
@@ -137,12 +131,6 @@ lookupText key object =
     case KM.lookup key object of
         Just (A.String value) -> Just value
         _ -> Nothing
-
-lookupTextList :: K.Key -> KM.KeyMap A.Value -> [Text]
-lookupTextList key object =
-    case KM.lookup key object of
-        Just (A.Array values) -> mapMaybe asText (toList values)
-        _ -> []
 
 lookupInteger :: K.Key -> KM.KeyMap A.Value -> Maybe Integer
 lookupInteger key object =

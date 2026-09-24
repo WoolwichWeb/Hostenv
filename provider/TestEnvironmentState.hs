@@ -25,12 +25,6 @@ nodeFor name state = do
     A.String node <- KM.lookup (K.fromString "node") entry
     pure node
 
-entryHas :: Text -> Text -> KM.KeyMap A.Value -> Bool
-entryHas name field state =
-    case KM.lookup (K.fromText name) state of
-        Just (A.Object entry) -> KM.member (K.fromText field) entry
-        _ -> False
-
 main :: IO ()
 main = do
     let state =
@@ -39,35 +33,24 @@ main = do
                 , ("partial", A.object ["userName" A..= ("partial" :: Text), "uid" A..= (2002 :: Integer), "node" A..= ("old-node" :: Text)])
                 , ("retired", A.object ["userName" A..= ("retired" :: Text), "uid" A..= (2003 :: Integer), "node" A..= ("old-node" :: Text)])
                 , ("new", A.object ["userName" A..= ("new" :: Text), "uid" A..= (2004 :: Integer)])
-                , ("legacy", A.object
-                    [ "userName" A..= ("legacy" :: Text)
-                    , "uid" A..= (2005 :: Integer)
-                    , "node" A..= ("new-node" :: Text)
-                    , "present" A..= True
-                    , "pendingCleanupNodes" A..= (["old-node"] :: [Text])
-                    ])
                 ]
     let desired =
             M.fromList
                 [ ("moved", "new-node")
                 , ("partial", "new-node")
                 , ("new", "new-node")
-                , ("legacy", "new-node")
                 ]
     let observed =
             M.fromList
                 [ ("old-node", M.fromList [("partial", 2002)])
-                , ("new-node", M.fromList [("moved", 2001), ("partial", 2002), ("new", 2004), ("legacy", 2005)])
+                , ("new-node", M.fromList [("moved", 2001), ("partial", 2002), ("new", 2004)])
                 ]
-    let updated = reconcileObservedNodesInState desired ["moved", "new", "legacy"] observed state
+    let updated = reconcileObservedNodesInState desired ["moved", "new"] observed state
 
     assertEqual "moved advances when old is absent and destination exists" (Just "new-node") (nodeFor "moved" updated)
     assertEqual "failed environment deploy keeps old placement" (Just "old-node") (nodeFor "partial" updated)
     assertEqual "retired placement clears when old account is absent" Nothing (nodeFor "retired" updated)
     assertEqual "new environment records observed destination" (Just "new-node") (nodeFor "new" updated)
-    assertEqual "legacy pending cleanup collapses to observed placement" (Just "new-node") (nodeFor "legacy" updated)
-    assertEqual "legacy present field removed" False (entryHas "legacy" "present" updated)
-    assertEqual "legacy pending field removed" False (entryHas "legacy" "pendingCleanupNodes" updated)
 
     let destinationOnly = M.fromList [("new-node", M.fromList [("partial", 2002)])]
     let conservative = reconcileObservedNodesInState desired [] destinationOnly state

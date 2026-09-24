@@ -116,43 +116,9 @@ let
         else
           true;
 
-      rawState = removeAttrs (
+      state = removeAttrs (
         if statePath == null || !(builtins.pathExists statePath) then { } else lib.importJSON statePath
       ) [ "_description" ];
-
-      # state.node is the last placement observed after deployment. Planning
-      # must not advance it merely because the desired node changed.
-      #
-      # Earlier revisions of MR 36 briefly persisted workflow fields. Collapse
-      # those back into the observed placement so worktrees that evaluated that
-      # revision recover without carrying the temporary state model forward.
-      state = lib.mapAttrs (
-        _: entry:
-        if !builtins.isAttrs entry then
-          entry
-        else
-          let
-            pendingCleanupNodes =
-              if builtins.isList (entry.pendingCleanupNodes or null) then
-                entry.pendingCleanupNodes
-              else
-                [ ];
-            recoveredNode =
-              if
-                pendingCleanupNodes != [ ]
-                && builtins.isString (builtins.head pendingCleanupNodes)
-                && builtins.head pendingCleanupNodes != ""
-              then
-                builtins.head pendingCleanupNodes
-              else
-                entry.node or null;
-            cleaned = removeAttrs entry [ "node" "present" "pendingCleanupNodes" ];
-          in
-          cleaned
-          // lib.optionalAttrs (builtins.isString recoveredNode && recoveredNode != "") {
-            node = recoveredNode;
-          }
-      ) rawState;
 
       lockData =
         if builtins.pathExists lockPath then
