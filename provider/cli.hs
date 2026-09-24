@@ -1721,7 +1721,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             -- System profiles come from plan.nodes, not plan.environments.
             -- A node may intentionally have no current environments while it
             -- receives one final system deployment to retire lingering users.
-            let systemTargetNodes = planSystemTargetNodes plan mNode
+            let targetNodes = planSystemTargetNodes plan mNode
             let deployArgs useCheckSigs useDryActivate deployArgM =
                     let remoteBuildArgs =
                             if forceRemoteBuild then ["--remote-build"] else []
@@ -1745,7 +1745,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                 printProviderLine "hostenv-provider: --dry-run enabled; skipping migrations, signing, and deploy preflight checks"
                 let dryArgs = deployArgs False True
                 systemDeployRes <-
-                    forM systemTargetNodes $ \nodeName -> do
+                    forM targetNodes $ \nodeName -> do
                         let target = nodeName <> ".system"
                         let args = dryArgs (Just target)
                         printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
@@ -1778,7 +1778,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             let remoteBuildMap = planNodeRemoteBuild plan
             let usesRemoteBuild nodeName = forceRemoteBuild || nodeUsesRemoteBuild remoteBuildMap nodeName
             let requiresLocalPush nodeName = not (usesRemoteBuild nodeName)
-            let nodesRequiringLocalPush = filter requiresLocalPush systemTargetNodes
+            let nodesRequiringLocalPush = filter requiresLocalPush targetNodes
             let trustedPublicKeys = planTrustedPublicKeys plan
             let localPushSet = S.fromList nodesRequiringLocalPush
 
@@ -1809,12 +1809,12 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
 
             when forceRemoteBuild $
                 printProviderLine "hostenv-provider: --remote-build enabled; skipping local signing trust checks for all nodes"
-            forM_ systemTargetNodes $ \nodeName ->
+            forM_ targetNodes $ \nodeName ->
                 when (not forceRemoteBuild && not (S.member nodeName localPushSet)) $
                     printProviderLine ("hostenv-provider: node " <> nodeName <> " uses remoteBuild=true; skipping local signing trust check")
 
             preflightFailures <- fmap catMaybes $
-                forM systemTargetNodes $ \nodeName -> do
+                forM targetNodes $ \nodeName -> do
                     let requiresTrustedKey = S.member nodeName localPushSet
                     runNodeDeployPreflight
                         resolveNodeConnection
@@ -1914,7 +1914,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             -- cowardly refuse to deploy environments where the system deploy
             -- failed to complete.
             systemDeployRes <-
-                forM systemTargetNodes $ \nodeName -> do
+                forM targetNodes $ \nodeName -> do
                     let target = nodeName <> ".system"
                     let targetInstallable = deployProfilePathInstallable nodeName "system"
                     signRes <-
