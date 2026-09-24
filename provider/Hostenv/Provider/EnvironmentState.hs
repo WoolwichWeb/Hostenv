@@ -1,12 +1,10 @@
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Hostenv.Provider.EnvironmentState
     ( NodeUsers
     , managedUsersToRetire
-    , movedUsersOnNode
     , parsePasswdUsers
-    , reconcileObservedNodesInState
+    , resolveMigrationSourceNode
     )
 where
 
@@ -41,22 +39,55 @@ managedUsersToRetire nodeName desiredNodes observedUsers =
             else Nothing
     retireCandidate _ = Nothing
 
-movedUsersOnNode ::
+resolveMigrationSourceNode ::
     Text ->
-    Map Text Text ->
-    KM.KeyMap A.Value ->
-    [Text]
-movedUsersOnNode nodeName desiredNodes =
-    mapMaybe movedCandidate . KM.toList
+    Text ->
+    Integer ->
+    Maybe Text ->
+    NodeUsers ->
+    Either Text (Maybe Text)
+resolveMigrationSourceNode currentNode userName uid explicitSource observedNodes =
+    case explicitSource of
+        Just sourceNode
+            | sourceNode == currentNode -> Right Nothing
+            | userPresent sourceNode -> Right (Just sourceNode)
+            | otherwise ->
+                Left
+                    ( "migration source "
+                        <> sourceNode
+                        <> " does not contain Hostenv user "
+                        <> userName
+                        <> " with UID "
+                        <> T.pack (show uid)
+                    )
+        Nothing ->
+            case matchingSources of
+                [] -> Right Nothing
+                [sourceNode] -> Right (Just sourceNode)
+                sources ->
+                    Left
+                        ( "Hostenv user "
+                            <> userName
+                            <> " with UID "
+                            <> T.pack (show uid)
+                            <> " exists on more than one possible migration source: "
+                            <> T.intercalate ", " sources
+                            <> ". Set --migration-source "
+                            <> userName
+                            <> "=<node>."
+                        )
   where
-    movedCandidate (key, A.Object entry) = do
-        stateNode <- lookupText (K.fromString "node") entry
-        let userName = fromMaybe (K.toText key) (lookupText (K.fromString "userName") entry)
-        desiredNode <- M.lookup userName desiredNodes
-        if stateNode == nodeName && desiredNode /= nodeName
-            then Just userName
-            else Nothing
-    movedCandidate _ = Nothing
+    userPresent nodeName =
+        case M.lookup nodeName observedNodes >>= M.lookup userName of
+            Just observedUid -> observedUid == uid
+            Nothing -> False
+
+    matchingSources =
+        [ nodeName
+        | (nodeName, users) <- M.toList observedNodes
+        , nodeName /= currentNode
+        , M.lookup userName users == Just uid
+        ]
 
 parsePasswdUsers :: Text -> Map Text Integer
 parsePasswdUsers =
@@ -69,56 +100,6 @@ parsePasswdUsers =
                     Right (uid, trailing) | T.null trailing -> Just (name, uid)
                     _ -> Nothing
             _ -> Nothing
-
-reconcileObservedNodesInState ::
-    Map Text Text ->
-    [Text] ->
-    NodeUsers ->
-    KM.KeyMap A.Value ->
-    KM.KeyMap A.Value
-reconcileObservedNodesInState desiredNodes successfulEnvironments observedNodes =
-    KM.mapWithKey reconcileEntry
-  where
-    successful = M.fromList [(name, ()) | name <- successfulEnvironments]
-
-    reconcileEntry key = \case
-        A.Object entry ->
-            let oldNode = lookupText nodeKey entry
-                userName = fromMaybe (K.toText key) (lookupText userNameKey entry)
-             in case lookupInteger uidKey entry of
-                    Nothing -> A.Object entry
-                    Just uid ->
-                        A.Object (setNode (chooseNode userName uid oldNode) entry)
-        value -> value
-
-    chooseNode userName uid oldNode =
-        case M.lookup userName desiredNodes of
-            Just desiredNode
-                | M.member userName successful -> Just desiredNode
-                | otherwise -> oldNode
-            Nothing ->
-                case oldNode of
-                    Just node | userPresent node userName uid == Just False -> Nothing
-                    _ -> oldNode
-
-    userPresent node userName uid =
-        fmap
-            (\users -> M.lookup userName users == Just uid)
-            (M.lookup node observedNodes)
-
-    setNode maybeNode entry =
-        case maybeNode of
-            Nothing -> KM.delete nodeKey entry
-            Just node -> KM.insert nodeKey (A.String node) entry
-
-nodeKey :: K.Key
-nodeKey = K.fromString "node"
-
-uidKey :: K.Key
-uidKey = K.fromString "uid"
-
-userNameKey :: K.Key
-userNameKey = K.fromString "userName"
 
 lookupText :: K.Key -> KM.KeyMap A.Value -> Maybe Text
 lookupText key object =

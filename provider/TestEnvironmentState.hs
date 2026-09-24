@@ -1,12 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import Data.Aeson qualified as A
-import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.Map.Strict qualified as M
 import Data.Text (Text)
 import Data.Text.IO qualified as TIO
-import Hostenv.Provider.EnvironmentState (managedUsersToRetire, movedUsersOnNode, parsePasswdUsers, reconcileObservedNodesInState)
+import Hostenv.Provider.EnvironmentState (managedUsersToRetire, parsePasswdUsers, resolveMigrationSourceNode)
 import System.Exit (exitFailure)
 
 assertEqual :: (Eq a, Show a) => Text -> a -> a -> IO ()
@@ -19,70 +18,57 @@ assertEqual label expected actual =
             print actual
             exitFailure
 
-nodeFor :: Text -> KM.KeyMap A.Value -> Maybe Text
-nodeFor name state = do
-    A.Object entry <- KM.lookup (K.fromText name) state
-    A.String node <- KM.lookup (K.fromString "node") entry
-    pure node
-
 main :: IO ()
 main = do
     let state =
             KM.fromList
-                [ ("moved", A.object ["userName" A..= ("moved" :: Text), "uid" A..= (2001 :: Integer), "node" A..= ("old-node" :: Text)])
-                , ("partial", A.object ["userName" A..= ("partial" :: Text), "uid" A..= (2002 :: Integer), "node" A..= ("old-node" :: Text)])
-                , ("retired", A.object ["userName" A..= ("retired" :: Text), "uid" A..= (2003 :: Integer), "node" A..= ("old-node" :: Text)])
-                , ("new", A.object ["userName" A..= ("new" :: Text), "uid" A..= (2004 :: Integer)])
+                [ ("moved", A.object ["userName" A..= ("moved" :: Text), "uid" A..= (2001 :: Integer)])
+                , ("retired", A.object ["userName" A..= ("retired" :: Text), "uid" A..= (2003 :: Integer)])
+                , ("wrong-uid", A.object ["userName" A..= ("wrong-uid" :: Text), "uid" A..= (2004 :: Integer)])
                 ]
-    let desired =
+    let desired = M.fromList [("moved", "new-node")]
+    let oldUsers =
             M.fromList
-                [ ("moved", "new-node")
-                , ("partial", "new-node")
-                , ("new", "new-node")
+                [ ("moved", 2001)
+                , ("retired", 2003)
+                , ("wrong-uid", 9999)
                 ]
-    let observed =
-            M.fromList
-                [ ("old-node", M.fromList [("partial", 2002)])
-                , ("new-node", M.fromList [("moved", 2001), ("partial", 2002), ("new", 2004)])
-                ]
-    let updated = reconcileObservedNodesInState desired ["moved", "new"] observed state
-
-    assertEqual "moved advances when old is absent and destination exists" (Just "new-node") (nodeFor "moved" updated)
-    assertEqual "failed environment deploy keeps old placement" (Just "old-node") (nodeFor "partial" updated)
-    assertEqual "retired placement clears when old account is absent" Nothing (nodeFor "retired" updated)
-    assertEqual "new environment records observed destination" (Just "new-node") (nodeFor "new" updated)
-
-    let destinationOnly = M.fromList [("new-node", M.fromList [("partial", 2002)])]
-    let conservative = reconcileObservedNodesInState desired [] destinationOnly state
-    assertEqual "unobserved old node keeps prior placement" (Just "old-node") (nodeFor "partial" conservative)
-
-    let oldStillPresent =
-            reconcileObservedNodesInState
-                desired
-                ["partial"]
-                (M.fromList
-                    [ ("old-node", M.fromList [("partial", 2002)])
-                    , ("new-node", M.fromList [("partial", 2002)])
-                    ])
-                state
-    assertEqual
-        "successful environment deploy advances placement even when old cleanup failed"
-        (Just "new-node")
-        (nodeFor "partial" oldStillPresent)
 
     assertEqual
         "managed users to retire"
         [("moved", 2001), ("retired", 2003)]
-        (managedUsersToRetire
-            "old-node"
-            desired
-            (M.fromList [("moved", 2001), ("partial", 2002), ("retired", 2003), ("wrong-uid", 9999)])
-            state)
+        (managedUsersToRetire "old-node" desired oldUsers state)
+
+    let observed =
+            M.fromList
+                [ ("old-node", M.fromList [("moved", 2001)])
+                , ("new-node", M.empty)
+                ]
+    assertEqual
+        "observed migration source"
+        (Right (Just "old-node"))
+        (resolveMigrationSourceNode "new-node" "moved" 2001 Nothing observed)
 
     assertEqual
-        "moved users on node"
-        ["moved", "partial"]
-        (movedUsersOnNode "old-node" desired state)
+        "no migration source"
+        (Right Nothing)
+        (resolveMigrationSourceNode "new-node" "new" 2002 Nothing observed)
+
+    assertEqual
+        "explicit current node means no migration"
+        (Right Nothing)
+        (resolveMigrationSourceNode "new-node" "moved" 2001 (Just "new-node") observed)
+
+    assertEqual
+        "explicit source validates UID"
+        (Left "migration source old-node does not contain Hostenv user moved with UID 9999")
+        (resolveMigrationSourceNode "new-node" "moved" 9999 (Just "old-node") observed)
+
+    let ambiguous = M.insert "other-node" (M.fromList [("moved", 2001)]) observed
+    assertEqual
+        "ambiguous observed migration source"
+        (Left "Hostenv user moved with UID 2001 exists on more than one possible migration source: old-node, other-node. Set --migration-source moved=<node>.")
+        (resolveMigrationSourceNode "new-node" "moved" 2001 Nothing ambiguous)
 
     assertEqual
         "passwd parser"

@@ -116,9 +116,17 @@ let
         else
           true;
 
-      state = removeAttrs (
+      rawState = removeAttrs (
         if statePath == null || !(builtins.pathExists statePath) then { } else lib.importJSON statePath
       ) [ "_description" ];
+
+      # State contains durable reservations only. Node placement is observed
+      # from the provider nodes at deployment time, so discard historical
+      # `node` fields written by older Hostenv versions.
+      state = lib.mapAttrs (
+        _: entry:
+        if builtins.isAttrs entry then removeAttrs entry [ "node" ] else entry
+      ) rawState;
 
       lockData =
         if builtins.pathExists lockPath then
@@ -279,21 +287,16 @@ let
         idx: env:
         let
           previous = state.${env.hostenv.userName} or { };
-          stateNode = previous.node or null;
         in
         env
         // {
           uid = if (previous.uid or null) != null then previous.uid else nextUid + idx;
-          previousNode =
-            if builtins.isString stateNode && stateNode != "" && stateNode != env.node then stateNode else null;
         }
       ) validatedEnvironments;
 
       nodeConnections =
         let
-          # Remember old nodes too: migrations may still need to contact them.
           namesFromEnvs = map (env: env.node) environmentsWithUid;
-          namesFromState = map (env: env.node or null) (builtins.attrValues state);
           knownNodes = lib.filter (name: builtins.isString name && name != "" && name != "default") (
             lib.unique (
               builtins.attrNames nodeSystems
@@ -301,7 +304,6 @@ let
               ++ builtins.attrNames nodeSshPorts
               ++ builtins.attrNames nodeSshOpts
               ++ namesFromEnvs
-              ++ namesFromState
             )
           );
         in
@@ -550,9 +552,8 @@ let
               Persistent state to retain across deployments. Should be committed to version control.
             '';
           }
-          # Preserve the last observed node placement and any extra durable
-          # fields. Deployment reconciles node; planning only updates identity
-          # and hostname reservations.
+          # Preserve retired identities and extra durable fields. Node
+          # placement is intentionally absent: deploy derives it from the nodes.
           // lib.recursiveUpdate state identityState
         );
 
