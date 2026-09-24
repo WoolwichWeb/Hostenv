@@ -155,11 +155,17 @@ in each node's own `nodes/<node>/configuration.nix`.
 
 ## State
 
-Keep `generated/state.json` in version control. Hostenv deliberately keeps
-this state small: stable environment UIDs and hostname reservations. Node
-placement is not stored there; deployment observes Hostenv users on the
-provider nodes when deciding migrations and cleanup, and does not modify
-`state.json`.
+Keep both `generated/state.json` and `generated/plan.json` in version
+control. Hostenv deliberately keeps `state.json` small: stable environment
+UIDs and hostname reservations. Node placement is not stored there; deployment
+observes Hostenv users on the provider nodes when deciding migrations and
+cleanup, and does not modify `state.json`.
 
-Do not reset it to `{}` as a troubleshooting step. Removing existing state can
-make Hostenv treat established environments as new ones.
+The previous `plan.json` is retained as generated configuration, not mutable
+deployment state. `hostenv-provider plan` uses its node inventory and
+connection data to enforce the explicit active → retiring → removed lifecycle.
+If a provider already has state reservations but the previous plan is missing,
+planning stops rather than guessing that node removal is safe.
+
+Do not reset state to `{}` or delete the previous generated plan as a
+troubleshooting step.

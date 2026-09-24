@@ -13,8 +13,10 @@ state, and flake used to deploy them.
 6. Run `nix run .#hostenv-provider -- plan`.
 7. Run `nix run .#hostenv-provider -- dns-gate`, then `nix run .#hostenv-provider -- deploy`.
 
-Commit `generated/state.json`. Hostenv uses it only for durable reservations:
-stable environment UIDs and hostname ownership. Deployment leaves it unchanged.
+Commit `generated/state.json` and `generated/plan.json`. Hostenv uses state
+only for durable UID/hostname reservations; the previous generated plan is used
+to validate provider-node inventory transitions. Deployment leaves both
+unchanged.
 
 When draining a provider node, keep it in `provider.nodeSystems`, remove it
 from `provider.nodeFor`, and set
