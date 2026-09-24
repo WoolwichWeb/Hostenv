@@ -1770,7 +1770,9 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             deployGuard res args
                             pure (envName, res)
 
-                let failures = any (\(_, code) -> code /= ExitSuccess) envDeployRes
+                let systemDeploymentFailures = any (\(_, code) -> code /= ExitSuccess) systemDeployRes
+                let environmentDeploymentFailures = any (\(_, code) -> code /= ExitSuccess) envDeployRes
+                let failures = systemDeploymentFailures || environmentDeploymentFailures
                 when failures $ printProviderLine "hostenv-provider: dry-run deployment completed with errors"
                 Sh.exitWith $ if failures then ExitFailure 1 else ExitSuccess
 
@@ -2037,7 +2039,9 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                                                         printProviderLine ("hostenv-provider: warning: verification failures ignored for " <> envName <> " (deploymentVerification.enforce=false)")
                                                                                         pure Nothing
 
-            let deploymentFailures = any (\(_, code) -> code /= ExitSuccess) envDeployRes
+            let systemDeploymentFailures = any (\(_, code) -> code /= ExitSuccess) systemDeployRes
+            let environmentDeploymentFailures = any (\(_, code) -> code /= ExitSuccess) envDeployRes
+            let deploymentFailures = systemDeploymentFailures || environmentDeploymentFailures
             let verificationFailures = not (null verificationFatalFailures)
             when deploymentFailures $ printProviderLine "hostenv-provider: deployment completed with errors"
             when verificationFailures $

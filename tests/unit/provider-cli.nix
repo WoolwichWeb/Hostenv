@@ -73,6 +73,10 @@ in
     cat > "$fakeBin/nix" <<'EOF'
     #!${pkgs.runtimeShell}
     printf '%s\n' "$*" >> "$NIX_LOG"
+    if [ "''${FAIL_OLD_SYSTEM:-0}" = 1 ] \
+      && printf '%s\n' "$*" | grep -Fq 'generated/.#"old-node"."system"'; then
+      exit 42
+    fi
     exit 0
     EOF
     chmod +x "$fakeBin/nix"
@@ -97,6 +101,16 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'new-node' "$log"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod' "$log"
+      test "$(wc -l < "$log")" -eq 1
+
+      : > "$log"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" FAIL_OLD_SYSTEM=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --dry-run --node old-node; then
+        echo "cleanup-only system deployment failure was reported as success"
+        exit 1
+      fi
+
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
       test "$(wc -l < "$log")" -eq 1
     )
 
