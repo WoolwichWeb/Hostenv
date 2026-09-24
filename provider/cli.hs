@@ -1536,7 +1536,7 @@ validateNodeInventoryTransition planPath statePath newPlanRaw = do
                                 nodeName
                                 M.empty
                                 observedUsers
-                                state
+                                managedIdentities
                     let uidMismatches =
                             EnvironmentState.managedUserUidMismatches
                                 observedUsers
