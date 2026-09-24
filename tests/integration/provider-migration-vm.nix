@@ -209,6 +209,9 @@ let
   '';
 
   commonNode = { ... }: {
+    # Keep the root account unlocked so runtime-installed public keys are
+    # accepted consistently by sshd in the test VMs.
+    users.users.root.initialPassword = "root";
     services.openssh = {
       enable = true;
       settings.PermitRootLogin = "yes";
