@@ -1455,54 +1455,55 @@ cleanupManagedUsersOnNode allowMovedCleanup deployUser nodeConnection desiredNod
                         <> ". Refusing system deployment until the account drift is resolved."
                     )
                 )
-        else if not allowMovedCleanup && not (null movedUsers)
-            then
-                pure
-                    ( Left
-                        ( "node-filtered deployment would retire moved environment user(s) from "
-                            <> nodeName
-                            <> " before their destination is deployed: "
-                            <> T.intercalate ", " movedUsers
-                            <> ". Run an unfiltered deploy to migrate and retire them safely."
-                        )
-                    )
-            else do
-            cleanupResults <-
-                forM retiredUsers $ \(userName, uid) -> do
-                    let lingerPath = "/var/lib/systemd/linger/" <> userName
-                    let unit = "user@" <> T.pack (show uid) <> ".service"
-                    let cleanupCmd =
-                            "set -euo pipefail; "
-                                <> "if getent passwd "
-                                <> shellEscape userName
-                                <> " >/dev/null; then "
-                                <> "sudo loginctl disable-linger "
-                                <> shellEscape userName
-                                <> " || sudo rm -f "
-                                <> shellEscape lingerPath
-                                <> "; else sudo rm -f "
-                                <> shellEscape lingerPath
-                                <> "; fi; "
-                                <> "if systemctl is-active --quiet "
-                                <> shellEscape unit
-                                <> "; then sudo systemctl stop "
-                                <> shellEscape unit
-                                <> "; fi"
-                    printProviderLine ("hostenv-provider: retiring Hostenv user " <> userName <> " from " <> nodeName)
-                    code <- runRemote target ["bash", "-lc", cleanupCmd]
-                    pure (userName, code)
-            let failures = [(name, code) | (name, code) <- cleanupResults, code /= ExitSuccess]
-            if null failures
-                then pure (Right ())
-                else
+        else
+            if not allowMovedCleanup && not (null movedUsers)
+                then
                     pure
                         ( Left
-                            ( "failed to retire Hostenv user(s) on "
+                            ( "node-filtered deployment would retire moved environment user(s) from "
                                 <> nodeName
-                                <> ": "
-                                <> T.intercalate ", " (map fst failures)
+                                <> " before their destination is deployed: "
+                                <> T.intercalate ", " movedUsers
+                                <> ". Run an unfiltered deploy to migrate and retire them safely."
                             )
                         )
+                else do
+                    cleanupResults <-
+                        forM retiredUsers $ \(userName, uid) -> do
+                            let lingerPath = "/var/lib/systemd/linger/" <> userName
+                            let unit = "user@" <> T.pack (show uid) <> ".service"
+                            let cleanupCmd =
+                                    "set -euo pipefail; "
+                                        <> "if getent passwd "
+                                        <> shellEscape userName
+                                        <> " >/dev/null; then "
+                                        <> "sudo loginctl disable-linger "
+                                        <> shellEscape userName
+                                        <> " || sudo rm -f "
+                                        <> shellEscape lingerPath
+                                        <> "; else sudo rm -f "
+                                        <> shellEscape lingerPath
+                                        <> "; fi; "
+                                        <> "if systemctl is-active --quiet "
+                                        <> shellEscape unit
+                                        <> "; then sudo systemctl stop "
+                                        <> shellEscape unit
+                                        <> "; fi"
+                            printProviderLine ("hostenv-provider: retiring Hostenv user " <> userName <> " from " <> nodeName)
+                            code <- runRemote target ["bash", "-lc", cleanupCmd]
+                            pure (userName, code)
+                    let failures = [(name, code) | (name, code) <- cleanupResults, code /= ExitSuccess]
+                    if null failures
+                        then pure (Right ())
+                        else
+                            pure
+                                ( Left
+                                    ( "failed to retire Hostenv user(s) on "
+                                        <> nodeName
+                                        <> ": "
+                                        <> T.intercalate ", " (map fst failures)
+                                    )
+                                )
 
 runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
 runMigrationBackup deployUser nodeConnection envInfo prevNode backupName = do
