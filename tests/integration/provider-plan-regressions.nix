@@ -106,6 +106,18 @@ let
     environments = builtins.tryEval (builtins.deepSeq value.environments true);
   };
   allOutputsFail = value: lib.all (result: !result.success) (builtins.attrValues (outputResults value));
+  retiringPlan = mkPlan {
+    nodeStatus.old-node = "retiring";
+  };
+  retiringPlanData = lib.importJSON retiringPlan.plan;
+  retiringScheduled = builtins.tryEval (builtins.deepSeq (mkPlan {
+    nodeFor.default = "old-node";
+    nodeStatus.old-node = "retiring";
+  }).plan true);
+  unknownStatusNode = builtins.tryEval (builtins.deepSeq (mkPlan {
+    nodeStatus.missing-node = "retiring";
+  }).plan true);
+
   stateConflict = mkPlan {
     statePath = pkgs.writeText "conflicting-state.json" (builtins.toJSON {
       other = { uid = 6001; virtualHosts = [ "main.example" ]; };
@@ -197,6 +209,21 @@ in
       (builtins.attrValues plan.environments)
     && !(plan.nodes ? retired-node)
   ) "every configured provider node must remain deployable even when it has no current environments";
+
+  provider-plan-retiring-node-status = asserts.assertTrue "provider-plan-retiring-node-status" (
+    retiringPlanData.nodeStatus.old-node == "retiring"
+    && retiringPlanData.nodeStatus.node-a == "active"
+    && retiringPlanData.nodes ? old-node
+    && retiringPlanData.nodeConnections ? old-node
+  ) "retiring nodes must remain in provider inventory and deployment routing";
+
+  provider-plan-retiring-node-not-scheduled = asserts.assertTrue "provider-plan-retiring-node-not-scheduled" (
+    !retiringScheduled.success
+  ) "provider.nodeFor must not schedule environments onto a retiring node";
+
+  provider-plan-node-status-must-reference-inventory = asserts.assertTrue "provider-plan-node-status-must-reference-inventory" (
+    !unknownStatusNode.success
+  ) "provider.nodeStatus entries must reference provider.nodeSystems";
 
   provider-plan-state-is-stable-across-replan = asserts.assertTrue "provider-plan-state-is-stable-across-replan" (
     replannedPlan.nodes ? old-node
