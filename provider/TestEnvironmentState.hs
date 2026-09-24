@@ -42,7 +42,7 @@ main = do
     assertEqual
         "stale managed UID mismatch"
         [("wrong-uid", 2004, 9999)]
-        (managedUserUidMismatches "old-node" desired oldUsers state)
+        (managedUserUidMismatches oldUsers state)
 
     let observed =
             M.fromList

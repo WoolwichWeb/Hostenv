@@ -1438,8 +1438,6 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
     let target = mkSshTarget deployUser (nodeConnection nodeName)
     let uidMismatches =
             EnvironmentState.managedUserUidMismatches
-                nodeName
-                desiredNodes
                 observedUsers
                 state
     let retiredUsers =
@@ -1955,8 +1953,6 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                     | (nodeName, users) <- M.toList observedNodeUsers
                     , (userName, expectedUid, observedUid) <-
                         EnvironmentState.managedUserUidMismatches
-                            nodeName
-                            desiredNodesByUser
                             users
                             state
                     ]

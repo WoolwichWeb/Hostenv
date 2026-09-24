@@ -25,19 +25,17 @@ import Data.Text.Read qualified as TR
 type NodeUsers = Map Text (Map Text Integer)
 
 managedUserUidMismatches ::
-    Text ->
-    Map Text Text ->
     Map Text Integer ->
     KM.KeyMap A.Value ->
     [(Text, Integer, Integer)]
-managedUserUidMismatches nodeName desiredNodes observedUsers =
+managedUserUidMismatches observedUsers =
     sortOn (\(name, _, _) -> name) . mapMaybe mismatchCandidate . KM.toList
   where
     mismatchCandidate (key, A.Object entry) = do
         expectedUid <- lookupInteger (K.fromString "uid") entry
         let userName = fromMaybe (K.toText key) (lookupText (K.fromString "userName") entry)
         observedUid <- M.lookup userName observedUsers
-        if observedUid /= expectedUid && M.lookup userName desiredNodes /= Just nodeName
+        if observedUid /= expectedUid
             then Just (userName, expectedUid, observedUid)
             else Nothing
     mismatchCandidate _ = Nothing
