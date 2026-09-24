@@ -1411,16 +1411,15 @@ readNodeUsers deployUser nodeConnection nodeName = do
                     )
                 )
 
-cleanupManagedUsersOnNode ::
-    Bool ->
+prepareManagedUserCleanupOnNode ::
     Text ->
     (Text -> NodeConnection) ->
     M.Map Text Text ->
     M.Map Text Integer ->
     KM.KeyMap A.Value ->
     Text ->
-    IO (Either Text ())
-cleanupManagedUsersOnNode allowMovedCleanup deployUser nodeConnection desiredNodes observedUsers state nodeName = do
+    IO (Either Text [(Text, Integer)])
+prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedUsers state nodeName = do
     let target = mkSshTarget deployUser (nodeConnection nodeName)
     let uidMismatches =
             EnvironmentState.managedUserUidMismatches
@@ -1434,11 +1433,6 @@ cleanupManagedUsersOnNode allowMovedCleanup deployUser nodeConnection desiredNod
                 desiredNodes
                 observedUsers
                 state
-    let movedUsers =
-            [ userName
-            | (userName, _) <- retiredUsers
-            , M.member userName desiredNodes
-            ]
     if not (null uidMismatches)
         then
             pure
@@ -1458,56 +1452,70 @@ cleanupManagedUsersOnNode allowMovedCleanup deployUser nodeConnection desiredNod
                         <> ". Refusing system deployment until the account drift is resolved."
                     )
                 )
-        else
-            if not allowMovedCleanup && not (null movedUsers)
-                then
+        else do
+            cleanupResults <-
+                forM retiredUsers $ \(userName, uid) -> do
+                    let lingerPath = "/var/lib/systemd/linger/" <> userName
+                    let unit = "user@" <> T.pack (show uid) <> ".service"
+                    let cleanupCmd =
+                            "set -euo pipefail; "
+                                <> "if getent passwd "
+                                <> shellEscape userName
+                                <> " >/dev/null; then "
+                                <> "sudo loginctl disable-linger "
+                                <> shellEscape userName
+                                <> " || sudo rm -f "
+                                <> shellEscape lingerPath
+                                <> "; else sudo rm -f "
+                                <> shellEscape lingerPath
+                                <> "; fi; "
+                                <> "if systemctl is-active --quiet "
+                                <> shellEscape unit
+                                <> "; then sudo systemctl stop "
+                                <> shellEscape unit
+                                <> "; fi"
+                    printProviderLine ("hostenv-provider: preparing retirement of Hostenv user " <> userName <> " from " <> nodeName)
+                    code <- runRemote target ["bash", "-lc", cleanupCmd]
+                    pure ((userName, uid), code)
+            let failures = [userName | ((userName, _), code) <- cleanupResults, code /= ExitSuccess]
+            if null failures
+                then pure (Right retiredUsers)
+                else
                     pure
                         ( Left
-                            ( "node-filtered deployment would retire moved environment user(s) from "
+                            ( "failed to prepare Hostenv user retirement on "
                                 <> nodeName
-                                <> " before their destination is deployed: "
-                                <> T.intercalate ", " movedUsers
-                                <> ". Run an unfiltered deploy to migrate and retire them safely."
+                                <> ": "
+                                <> T.intercalate ", " failures
                             )
                         )
-                else do
-                    cleanupResults <-
-                        forM retiredUsers $ \(userName, uid) -> do
-                            let lingerPath = "/var/lib/systemd/linger/" <> userName
-                            let unit = "user@" <> T.pack (show uid) <> ".service"
-                            let cleanupCmd =
-                                    "set -euo pipefail; "
-                                        <> "if getent passwd "
-                                        <> shellEscape userName
-                                        <> " >/dev/null; then "
-                                        <> "sudo loginctl disable-linger "
-                                        <> shellEscape userName
-                                        <> " || sudo rm -f "
-                                        <> shellEscape lingerPath
-                                        <> "; else sudo rm -f "
-                                        <> shellEscape lingerPath
-                                        <> "; fi; "
-                                        <> "if systemctl is-active --quiet "
-                                        <> shellEscape unit
-                                        <> "; then sudo systemctl stop "
-                                        <> shellEscape unit
-                                        <> "; fi"
-                            printProviderLine ("hostenv-provider: retiring Hostenv user " <> userName <> " from " <> nodeName)
-                            code <- runRemote target ["bash", "-lc", cleanupCmd]
-                            pure (userName, code)
-                    let failures = [(name, code) | (name, code) <- cleanupResults, code /= ExitSuccess]
-                    if null failures
-                        then pure (Right ())
-                        else
-                            pure
-                                ( Left
-                                    ( "failed to retire Hostenv user(s) on "
-                                        <> nodeName
-                                        <> ": "
-                                        <> T.intercalate ", " (map fst failures)
-                                    )
-                                )
 
+rollbackManagedUserCleanupOnNode ::
+    Text ->
+    (Text -> NodeConnection) ->
+    Text ->
+    [(Text, Integer)] ->
+    IO ()
+rollbackManagedUserCleanupOnNode deployUser nodeConnection nodeName users = do
+    let target = mkSshTarget deployUser (nodeConnection nodeName)
+    forM_ users $ \(userName, uid) -> do
+        let unit = "user@" <> T.pack (show uid) <> ".service"
+        let rollbackCmd =
+                "if getent passwd "
+                    <> shellEscape userName
+                    <> " >/dev/null; then "
+                    <> "sudo loginctl enable-linger "
+                    <> shellEscape userName
+                    <> " >/dev/null 2>&1 || true; "
+                    <> "sudo systemctl start "
+                    <> shellEscape unit
+                    <> " >/dev/null 2>&1 || true; "
+                    <> "fi"
+        printProviderLine ("hostenv-provider: restoring Hostenv user manager after failed system deployment: " <> userName <> " on " <> nodeName)
+        _ <- runRemote target ["bash", "-lc", rollbackCmd]
+        pure ()
+
+runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
 runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
 runMigrationBackup deployUser nodeConnection envInfo prevNode backupName = do
     let sourceTarget = mkSshTarget deployUser (nodeConnection prevNode)
