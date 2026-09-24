@@ -1516,7 +1516,6 @@ rollbackManagedUserCleanupOnNode deployUser nodeConnection nodeName users = do
         pure ()
 
 runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
-runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
 runMigrationBackup deployUser nodeConnection envInfo prevNode backupName = do
     let sourceTarget = mkSshTarget deployUser (nodeConnection prevNode)
     let sourceHost = sourceTarget.targetHost
