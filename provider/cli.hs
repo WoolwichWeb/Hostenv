@@ -1474,7 +1474,6 @@ cleanupManagedUsersOnNode allowMovedCleanup deployUser nodeConnection desiredNod
                         )
 
 runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
-runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
 runMigrationBackup deployUser nodeConnection envInfo prevNode backupName = do
     let sourceTarget = mkSshTarget deployUser (nodeConnection prevNode)
     let sourceHost = sourceTarget.targetHost
@@ -1599,7 +1598,6 @@ writeRestorePlan deployUser nodeConnection envInfo prevNode snapshots = do
     let runtimeDir = envInfo.runtimeDir
     let restoreDir = runtimeDir <> "/restore"
     let restorePath = restoreDir <> "/plan.json"
-    let envUser = envInfo.userName
     let ownerSpec = T.pack (show envInfo.uid)
     let runtimeGroup = "users"
     let groupSpec = ownerSpec
@@ -1743,7 +1741,6 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                 Left err -> error ("failed to parse " <> T.unpack statePath <> ": " <> err)
                 Right value -> pure (value :: KM.KeyMap A.Value)
 
-            let deployArgs useCheckSigs useDryActivate deployArgM =
             let deployArgs useCheckSigs useDryActivate deployArgM =
                     let remoteBuildArgs =
                             if forceRemoteBuild then ["--remote-build"] else []
