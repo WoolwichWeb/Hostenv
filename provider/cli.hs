@@ -1463,7 +1463,7 @@ validateNodeInventoryTransition planPath statePath newPlanRaw = do
                             <> " is missing for an existing provider. Restore the previous generated plan from version control before planning inventory changes."
                         )
         else do
-                previousRaw <- BL.readFile (T.unpack planPath)
+            previousRaw <- BL.readFile (T.unpack planPath)
             previousPlan <-
                 case A.eitherDecode' previousRaw of
                     Left err ->
@@ -1474,7 +1474,7 @@ validateNodeInventoryTransition planPath statePath newPlanRaw = do
                     Left err ->
                         error ("hostenv-provider: generated plan is invalid JSON: " <> err)
                     Right value -> pure (value :: KM.KeyMap A.Value)
-    
+
             let removedNodes =
                     planSystemTargetNodes previousPlan Nothing
                         \\ planSystemTargetNodes newPlan Nothing
@@ -1494,14 +1494,14 @@ validateNodeInventoryTransition planPath statePath newPlanRaw = do
                         Left err ->
                             error ("hostenv-provider: cannot validate removed nodes because " <> T.unpack statePath <> " is invalid JSON: " <> err)
                         Right value -> pure (value :: KM.KeyMap A.Value)
-    
+
                 let deployUser = planDeployUser previousPlan
                 let oldHostname =
                         fromMaybe
                             (error ("hostenv-provider: hostenvHostname missing from previous " <> T.unpack planPath))
                             (lookupText (K.fromString "hostenvHostname") previousPlan)
                 let resolveOldConnection = nodeConnectionFor previousPlan oldHostname
-    
+
                 forM_ removedNodes $ \nodeName -> do
                     unless (planNodeStatus previousPlan nodeName == "retiring") $
                         error
@@ -1511,7 +1511,7 @@ validateNodeInventoryTransition planPath statePath newPlanRaw = do
                                 <> T.unpack nodeName
                                 <> " = \"retiring\", move/retire its environments, deploy the cleanup, then run plan again."
                             )
-    
+
                     observedResult <- readNodeUsers deployUser resolveOldConnection nodeName
                     observedUsers <-
                         case observedResult of
@@ -1523,7 +1523,7 @@ validateNodeInventoryTransition planPath statePath newPlanRaw = do
                                         <> T.unpack err
                                     )
                             Right (_, users) -> pure users
-    
+
                     let managedUsers =
                             EnvironmentState.managedUsersToRetire
                                 nodeName
@@ -1548,7 +1548,7 @@ validateNodeInventoryTransition planPath statePath newPlanRaw = do
                                     )
                                 <> ". Deploy migrations/retirements until the node is clean, then run plan again."
                             )
-    
+
 prepareManagedUserCleanupOnNode ::
     Text ->
     (Text -> NodeConnection) ->
