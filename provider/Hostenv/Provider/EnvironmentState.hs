@@ -73,17 +73,14 @@ parsePasswdUsers =
 
 reconcileObservedNodesInState ::
     Map Text Text ->
+    [Text] ->
     NodeUsers ->
     KM.KeyMap A.Value ->
     KM.KeyMap A.Value
-reconcileObservedNodesInState desiredNodes observedNodes =
+reconcileObservedNodesInState desiredNodes successfulEnvironments observedNodes =
     KM.mapWithKey reconcileEntry
   where
-    nodeKey = K.fromString "node"
-    presentKey = K.fromString "present"
-    pendingKey = K.fromString "pendingCleanupNodes"
-    uidKey = K.fromString "uid"
-    userNameKey = K.fromString "userName"
+    successful = M.fromList [(name, ()) | name <- successfulEnvironments]
 
     reconcileEntry key = \case
         A.Object entry ->
@@ -102,22 +99,13 @@ reconcileObservedNodesInState desiredNodes observedNodes =
 
     chooseNode userName uid oldNode =
         case M.lookup userName desiredNodes of
+            Just desiredNode
+                | M.member userName successful -> Just desiredNode
+                | otherwise -> oldNode
             Nothing ->
                 case oldNode of
                     Just node | userPresent node userName uid == Just False -> Nothing
                     _ -> oldNode
-            Just desiredNode
-                | oldNode == Just desiredNode -> Just desiredNode
-                | otherwise ->
-                    case userPresent desiredNode userName uid of
-                        Just True ->
-                            case oldNode of
-                                Nothing -> Just desiredNode
-                                Just previousNode ->
-                                    case userPresent previousNode userName uid of
-                                        Just False -> Just desiredNode
-                                        _ -> oldNode
-                        _ -> oldNode
 
     userPresent node userName uid =
         fmap
@@ -129,23 +117,42 @@ reconcileObservedNodesInState desiredNodes observedNodes =
             Nothing -> KM.delete nodeKey entry
             Just node -> KM.insert nodeKey (A.String node) entry
 
-    lookupText key object =
-        case KM.lookup key object of
-            Just (A.String value) -> Just value
-            _ -> Nothing
+nodeKey :: K.Key
+nodeKey = K.fromString "node"
 
-    lookupTextList key object =
-        case KM.lookup key object of
-            Just (A.Array values) -> mapMaybe asText (toList values)
-            _ -> []
+presentKey :: K.Key
+presentKey = K.fromString "present"
 
-    lookupInteger key object =
-        case KM.lookup key object of
-            Just (A.Number value) ->
-                case floatingOrInteger value :: Either Double Integer of
-                    Right integer -> Just integer
-                    Left _ -> Nothing
-            _ -> Nothing
+pendingKey :: K.Key
+pendingKey = K.fromString "pendingCleanupNodes"
 
-    asText (A.String value) = Just value
-    asText _ = Nothing
+uidKey :: K.Key
+uidKey = K.fromString "uid"
+
+userNameKey :: K.Key
+userNameKey = K.fromString "userName"
+
+lookupText :: K.Key -> KM.KeyMap A.Value -> Maybe Text
+lookupText key object =
+    case KM.lookup key object of
+        Just (A.String value) -> Just value
+        _ -> Nothing
+
+lookupTextList :: K.Key -> KM.KeyMap A.Value -> [Text]
+lookupTextList key object =
+    case KM.lookup key object of
+        Just (A.Array values) -> mapMaybe asText (toList values)
+        _ -> []
+
+lookupInteger :: K.Key -> KM.KeyMap A.Value -> Maybe Integer
+lookupInteger key object =
+    case KM.lookup key object of
+        Just (A.Number value) ->
+            case floatingOrInteger value :: Either Double Integer of
+                Right integer -> Just integer
+                Left _ -> Nothing
+        _ -> Nothing
+
+asText :: A.Value -> Maybe Text
+asText (A.String value) = Just value
+asText _ = Nothing

@@ -59,10 +59,10 @@ main = do
                 [ ("old-node", M.fromList [("partial", 2002)])
                 , ("new-node", M.fromList [("moved", 2001), ("partial", 2002), ("new", 2004), ("legacy", 2005)])
                 ]
-    let updated = reconcileObservedNodesInState desired observed state
+    let updated = reconcileObservedNodesInState desired ["moved", "new", "legacy"] observed state
 
     assertEqual "moved advances when old is absent and destination exists" (Just "new-node") (nodeFor "moved" updated)
-    assertEqual "partial move keeps old placement while both accounts exist" (Just "old-node") (nodeFor "partial" updated)
+    assertEqual "failed environment deploy keeps old placement" (Just "old-node") (nodeFor "partial" updated)
     assertEqual "retired placement clears when old account is absent" Nothing (nodeFor "retired" updated)
     assertEqual "new environment records observed destination" (Just "new-node") (nodeFor "new" updated)
     assertEqual "legacy pending cleanup collapses to observed placement" (Just "new-node") (nodeFor "legacy" updated)
@@ -70,8 +70,22 @@ main = do
     assertEqual "legacy pending field removed" False (entryHas "legacy" "pendingCleanupNodes" updated)
 
     let destinationOnly = M.fromList [("new-node", M.fromList [("partial", 2002)])]
-    let conservative = reconcileObservedNodesInState desired destinationOnly state
+    let conservative = reconcileObservedNodesInState desired [] destinationOnly state
     assertEqual "unobserved old node keeps prior placement" (Just "old-node") (nodeFor "partial" conservative)
+
+    let oldStillPresent =
+            reconcileObservedNodesInState
+                desired
+                ["partial"]
+                (M.fromList
+                    [ ("old-node", M.fromList [("partial", 2002)])
+                    , ("new-node", M.fromList [("partial", 2002)])
+                    ])
+                state
+    assertEqual
+        "successful environment deploy advances placement even when old cleanup failed"
+        (Just "new-node")
+        (nodeFor "partial" oldStillPresent)
 
     assertEqual
         "managed users to retire"

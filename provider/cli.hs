@@ -333,8 +333,8 @@ prettyJson raw = do
         ExitFailure c ->
             error ("jq failed while formatting JSON (exit " <> show c <> "): " <> err)
 
-reconcileObservedStateNodes :: Text -> M.Map Text Text -> EnvironmentState.NodeUsers -> IO ()
-reconcileObservedStateNodes statePath desiredNodes observedNodeUsers =
+reconcileObservedStateNodes :: Text -> M.Map Text Text -> [Text] -> EnvironmentState.NodeUsers -> IO ()
+reconcileObservedStateNodes statePath desiredNodes successfulEnvironments observedNodeUsers =
     unless (M.null observedNodeUsers) $ do
         stateExists <- Sh.testfile (fromString (T.unpack statePath))
         when stateExists $ do
@@ -342,7 +342,7 @@ reconcileObservedStateNodes statePath desiredNodes observedNodeUsers =
             state <- case A.eitherDecode' raw of
                 Left err -> error ("failed to parse " <> T.unpack statePath <> ": " <> err)
                 Right value -> pure (value :: KM.KeyMap A.Value)
-            let updated = EnvironmentState.reconcileObservedNodesInState desiredNodes observedNodeUsers state
+            let updated = EnvironmentState.reconcileObservedNodesInState desiredNodes successfulEnvironments observedNodeUsers state
             currentPretty <- prettyJson raw
             updatedPretty <- prettyJson (A.encode (A.Object updated))
             when (currentPretty /= updatedPretty) $ do
@@ -2192,7 +2192,6 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                 forM targetNodes $
                     readObservedNodeUsers deployUser resolveNodeConnection
             let observedNodeUsers = M.fromList (catMaybes observedNodeRows)
-            reconcileObservedStateNodes statePath desiredNodesByUser observedNodeUsers
 
             -- Environments deployment for the node.
             envDeployRes <- forM (toNamed envInfosFiltered) $ \(envName, envInfo) -> do
@@ -2225,6 +2224,9 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                 res <- Sh.proc "nix" args Sh.empty
                                 deployGuard res args
                                 pure (envName, res)
+
+            let successfulEnvironments = [envName | (envName, ExitSuccess) <- envDeployRes]
+            reconcileObservedStateNodes statePath desiredNodesByUser successfulEnvironments observedNodeUsers
 
             verificationFatalFailures <-
                 if skipVerification
