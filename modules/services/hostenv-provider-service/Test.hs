@@ -74,7 +74,6 @@ testPlanParsing = do
         Right nodes -> assert (nodes == ["node-a", "node-b"]) "plan parsing should return matching nodes"
 
 testNodeOrderWithDnsSkipsNonMigratingEnvDiscovery :: IO ()
-testNodeOrderWithDnsSkipsNonMigratingEnvDiscovery :: IO ()
 testNodeOrderWithDnsSkipsNonMigratingEnvDiscovery = do
   let planJson =
         BLC.pack

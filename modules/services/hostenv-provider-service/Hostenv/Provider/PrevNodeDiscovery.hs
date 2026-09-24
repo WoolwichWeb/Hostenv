@@ -138,9 +138,8 @@ previousNodeCandidates currentNode =
     filter (/= mkNodeName (nodeNameText currentNode)) . normalizeNodeNames
 
 {- | Build the candidate node list for previous-node discovery.
-{- | Build the candidate node list for previous-node discovery.
-  This includes current plan nodes, persisted nodeConnections from state,
-  and any nodes attached to the currently parsed environments.
+  This includes current plan nodes, configured nodeConnections, and any nodes
+  attached to the currently parsed environments.
 -}
 discoveryNodeNames :: KM.KeyMap A.Value -> [Text] -> [Text]
 discoveryNodeNames plan envNodes =

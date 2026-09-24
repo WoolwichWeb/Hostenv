@@ -394,7 +394,6 @@ toNamed :: [EnvInfo] -> [(Text, EnvInfo)]
 toNamed = map (\e -> (e.userName, e))
 
 instance A.FromJSON EnvInfo where
-instance A.FromJSON EnvInfo where
     parseJSON = A.withObject "EnvInfo" $ \o -> do
         hostenvObj <- o .: "hostenv"
         userName <- hostenvObj .: "userName"
