@@ -63,11 +63,11 @@ hard requirement: do not remove a node while it still owns Hostenv
 environments.
 
 Source retirement is a finalization step: Hostenv first migrates data, deploys
-the destination system, and successfully activates the destination
-environment. Only then does it disable lingering/stop the old user manager and
-deploy the source system configuration that removes the account. If a source
-system deployment fails, Hostenv attempts to restore the old user manager so a
-retry remains possible.
+the destination system, successfully activates the destination environment, and
+passes any enforced deployment verification. Only then does it disable
+lingering/stop the old user manager and deploy the source system configuration
+that removes the account. If a source system deployment fails, Hostenv attempts
+to restore the old user manager so a retry remains possible.
 
 `--skip-migrations` and ignored migration failures protect their source
 accounts for that run. Hostenv may defer the corresponding source-node system
