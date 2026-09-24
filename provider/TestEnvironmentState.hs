@@ -65,9 +65,14 @@ main = do
         (resolveMigrationSourceNode "new-node" "new" 2002 Nothing observed)
 
     assertEqual
-        "explicit current node means no migration"
-        (Right Nothing)
+        "explicit current node cannot suppress an observed source"
+        (Left "migration source override for moved names its destination node new-node, but the same Hostenv user with UID 2001 is still present on source node(s): old-node. Use --skip-migrations moved only when intentionally deploying without migration.")
         (resolveMigrationSourceNode "new-node" "moved" 2001 (Just "new-node") observed)
+
+    assertEqual
+        "explicit current node is harmless when no source exists"
+        (Right Nothing)
+        (resolveMigrationSourceNode "new-node" "new" 2002 (Just "new-node") observed)
 
     assertEqual
         "explicit source validates UID"

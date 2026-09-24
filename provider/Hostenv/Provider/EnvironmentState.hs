@@ -75,7 +75,23 @@ resolveMigrationSourceNode ::
 resolveMigrationSourceNode currentNode userName uid explicitSource observedNodes =
     case explicitSource of
         Just sourceNode
-            | sourceNode == currentNode -> Right Nothing
+            | sourceNode == currentNode ->
+                case matchingSources of
+                    [] -> Right Nothing
+                    sources ->
+                        Left
+                            ( "migration source override for "
+                                <> userName
+                                <> " names its destination node "
+                                <> currentNode
+                                <> ", but the same Hostenv user with UID "
+                                <> T.pack (show uid)
+                                <> " is still present on source node(s): "
+                                <> T.intercalate ", " sources
+                                <> ". Use --skip-migrations "
+                                <> userName
+                                <> " only when intentionally deploying without migration."
+                            )
             | userPresent sourceNode -> Right (Just sourceNode)
             | otherwise ->
                 Left
