@@ -1741,23 +1741,45 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             unless (null duplicateOverrides) $
                 error ("duplicate --migration-source overrides for: " <> T.unpack (T.intercalate ", " duplicateOverrides))
 
-            -- Gets the @EnvInfo@s and deployment verification specs from JSON.
-            envRowsSub <- forM (KM.elems envs) $ \env -> case iparseEither parseJSON env of
-                -- Using lists here (so the type becomes @[[(EnvInfo, Verify.EnvVerificationSpec)]]@) as
-                -- they're easy to @concat@ later.
-                Left err -> printProviderLine ("hostenv-provider: error reading from plan JSON at '" <> T.pack (show $ fst err) <> " - '" <> T.pack (snd err) <> "'") >> pure []
-                Right envInfo -> do
-                    verificationSpec <- case env of
-                        A.Object envObj ->
-                            case Verify.parseEnvVerificationSpec envObj of
-                                Left parseErr -> do
-                                    printProviderLine ("hostenv-provider: warning: invalid deploymentVerification for " <> envInfo.userName <> "; using defaults (" <> parseErr <> ")")
-                                    pure Verify.defaultEnvVerificationSpec
-                                Right spec -> pure spec
-                        _ -> pure Verify.defaultEnvVerificationSpec
-                    pure [(envInfo, verificationSpec)]
+            -- Reconciliation is destructive: the desired environment set must
+            -- decode atomically before any node observation or cleanup begins.
+            envRowsParsed <- forM (KM.elems envs) $ \env ->
+                case iparseEither parseJSON env of
+                    Left err ->
+                        pure
+                            ( Left
+                                ( "error reading from plan JSON at '"
+                                    <> T.pack (show $ fst err)
+                                    <> " - '"
+                                    <> T.pack (snd err)
+                                    <> "'"
+                                )
+                            )
+                    Right envInfo ->
+                        case env of
+                            A.Object envObj ->
+                                case Verify.parseEnvVerificationSpec envObj of
+                                    Left parseErr ->
+                                        pure
+                                            ( Left
+                                                ( "invalid deploymentVerification for "
+                                                    <> envInfo.userName
+                                                    <> " ("
+                                                    <> parseErr
+                                                    <> ")"
+                                                )
+                                            )
+                                    Right spec -> pure (Right (envInfo, spec))
+                            _ -> pure (Right (envInfo, Verify.defaultEnvVerificationSpec))
 
-            let envRows = concat envRowsSub
+            let envParseErrors = [err | Left err <- envRowsParsed]
+            unless (null envParseErrors) $ do
+                forM_ envParseErrors $
+                    printProviderErrLine . ("hostenv-provider: error: " <>)
+                printProviderErrLine "hostenv-provider: error: refusing deployment because generated/plan.json is incomplete or invalid"
+                Sh.exitWith (ExitFailure 1)
+
+            let envRows = [row | Right row <- envRowsParsed]
             let desiredNodesByUser = M.fromList [(envInfo.userName, envInfo.node) | (envInfo, _) <- envRows]
 
             -- Filter environments to node requested by the user.
