@@ -64,6 +64,7 @@ in
             "userName": "acme-prod",
             "runtimeDir": "/run/hostenv/user/acme-prod"
           },
+          "uid": 2000,
           "node": "new-node",
           "virtualHosts": {}
         }
