@@ -383,8 +383,9 @@ data EnvInfo = EnvInfo
     , node :: Text
     , migrateBackups :: [Text]
     , runtimeDir :: Text
+    , hostname :: Text
+    , vhosts :: [Text]
     , uid :: Integer
-    , knownIdentity :: Bool
     }
 
 -- Note: check the nix code that generates plan.json
@@ -399,18 +400,21 @@ instance A.FromJSON EnvInfo where
         hostenvObj <- o .: "hostenv"
         userName <- hostenvObj .: "userName"
         runtimeDir <- hostenvObj .: "runtimeDir"
+        hostname <- hostenvObj .: "hostname"
         node <- o .: "node"
         migrateBackups <- o .:? "migrations" .!= []
+        vhostsObj <- o .:? "virtualHosts" .!= (KM.empty :: KM.KeyMap A.Value)
+        let vhosts = map K.toText (KM.keys vhostsObj)
         uid <- o .: "uid"
-        knownIdentity <- o .: "knownIdentity"
         pure $
             EnvInfo
                 { userName = userName
                 , node = node
                 , migrateBackups = migrateBackups
                 , runtimeDir = runtimeDir
+                , hostname = hostname
+                , vhosts = vhosts
                 , uid = uid
-                , knownIdentity = knownIdentity
                 }
 
 data Snapshot = Snapshot {snapId :: Text}
@@ -1372,6 +1376,21 @@ planConnectionNodes plan =
         (map K.toText . KM.keys)
         (lookupObj (K.fromString "nodeConnections") plan)
 
+dnsRemovedInventoryHint :: Text -> [Text] -> EnvInfo -> IO (Maybe Text)
+dnsRemovedInventoryHint hostenvHostname inventoryNodes envInfo = do
+    cnames <- digRRRaw Nothing envInfo.hostname "CNAME"
+    let domain = normalizeDnsName hostenvHostname
+    let suffix = "." <> domain
+    let inventory = S.fromList (map normalizeDnsName inventoryNodes)
+    let nodeFromTarget target =
+            let normalized = normalizeDnsName target
+             in case T.stripSuffix suffix normalized of
+                    Just nodeName
+                        | not (T.null nodeName)
+                        , not (S.member nodeName inventory) -> Just nodeName
+                    _ -> Nothing
+    pure (listToMaybe (mapMaybe nodeFromTarget cnames))
+
 nodeUsesRemoteBuild :: KM.KeyMap A.Value -> Text -> Bool
 nodeUsesRemoteBuild remoteBuildMap nodeName =
     fromMaybe False (lookupBool (K.fromText nodeName) remoteBuildMap)
@@ -1937,61 +1956,53 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                     if envInfo.userName `elem` skipMigrations || envInfo.migrateBackups == []
                         then pure (Right Nothing)
                         else do
-                            let observedPlacements =
-                                    EnvironmentState.observedNodesForUser
+                            let resolution =
+                                    EnvironmentState.resolveMigrationSourceNode
+                                        envInfo.node
                                         envInfo.userName
                                         envInfo.uid
+                                        (sourceFor envInfo.userName)
                                         observedNodeUsers
-                            let missingKnownIdentity =
-                                    envInfo.knownIdentity && null observedPlacements
-                            if missingKnownIdentity
-                                then
-                                    pure
-                                        ( Left
-                                            ( "existing environment "
-                                                <> envInfo.userName
-                                                <> " (UID "
-                                                <> T.pack (show envInfo.uid)
-                                                <> ") was not found on any configured provider node. "
-                                                <> "If this environment is being moved, keep its source node in provider.nodeSystems "
-                                                <> "until migration and source retirement complete. "
-                                                <> "Use --skip-migrations "
-                                                <> envInfo.userName
-                                                <> " only when intentionally initializing it without its previous data."
+                            case resolution of
+                                Right (Just sourceNode)
+                                    | sourceNode `notElem` inventoryNodes ->
+                                        pure
+                                            ( Left
+                                                ( "migration source "
+                                                    <> sourceNode
+                                                    <> " for "
+                                                    <> envInfo.userName
+                                                    <> " is reachable but is not in provider.nodeSystems. "
+                                                    <> "Keep source nodes in provider inventory until migration and retirement complete."
+                                                )
                                             )
-                                        )
-                                else do
-                                    let resolution =
-                                            EnvironmentState.resolveMigrationSourceNode
-                                                envInfo.node
-                                                envInfo.userName
-                                                envInfo.uid
-                                                (sourceFor envInfo.userName)
-                                                observedNodeUsers
-                                    case resolution of
-                                        Right (Just sourceNode)
-                                            | sourceNode `notElem` inventoryNodes ->
-                                                pure
-                                                    ( Left
-                                                        ( "migration source "
-                                                            <> sourceNode
-                                                            <> " for "
-                                                            <> envInfo.userName
-                                                            <> " is reachable but is not in provider.nodeSystems. "
-                                                            <> "Keep source nodes in provider inventory until migration and retirement complete."
-                                                        )
-                                                    )
-                                        Right (Just sourceNode) -> do
-                                            case sourceFor envInfo.userName of
-                                                Just _ ->
-                                                    printProviderLine
-                                                        ("hostenv: migration source for " <> envInfo.userName <> " forced via --migration-source: " <> sourceNode)
-                                                Nothing ->
-                                                    printProviderLine
-                                                        ("hostenv: migration source for " <> envInfo.userName <> " observed on node: " <> sourceNode)
-                                            pure (Right (Just (envInfo, sourceNode)))
-                                        Right Nothing -> pure (Right Nothing)
-                                        Left err -> pure (Left err)
+                                Right (Just sourceNode) -> do
+                                    case sourceFor envInfo.userName of
+                                        Just _ ->
+                                            printProviderLine
+                                                ("hostenv: migration source for " <> envInfo.userName <> " forced via --migration-source: " <> sourceNode)
+                                        Nothing ->
+                                            printProviderLine
+                                                ("hostenv: migration source for " <> envInfo.userName <> " observed on node: " <> sourceNode)
+                                    pure (Right (Just (envInfo, sourceNode)))
+                                Right Nothing -> do
+                                    removedNodeHint <-
+                                        dnsRemovedInventoryHint
+                                            hostenvHostname
+                                            inventoryNodes
+                                            envInfo
+                                    pure $ case removedNodeHint of
+                                        Just removedNode ->
+                                            Left
+                                                ( "DNS for "
+                                                    <> envInfo.hostname
+                                                    <> " points to provider node "
+                                                    <> removedNode
+                                                    <> ", but that node is not in provider.nodeSystems. "
+                                                    <> "Restore the source node to provider inventory until migration and retirement complete."
+                                                )
+                                        Nothing -> Right Nothing
+                                Left err -> pure (Left err)
 
             let migrationFatalErrors =
                     [ err
