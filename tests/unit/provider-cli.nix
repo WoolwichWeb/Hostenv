@@ -63,10 +63,10 @@ in
         "acme-prod": {
           "hostenv": {
             "userName": "acme-prod",
-            "runtimeDir": "/run/hostenv/user/acme-prod"
+            "runtimeDir": "/run/hostenv/user/acme-prod",
+            "hostname": "acme-prod.hosting.test"
           },
           "uid": 2000,
-          "knownIdentity": true,
           "node": "new-node",
           "virtualHosts": {}
         }
@@ -232,10 +232,10 @@ in
         "acme-prod": {
           "hostenv": {
             "userName": "acme-prod",
-            "runtimeDir": "/run/hostenv/user/acme-prod"
+            "runtimeDir": "/run/hostenv/user/acme-prod",
+            "hostname": "acme-prod.hosting.test"
           },
           "uid": 2000,
-          "knownIdentity": true,
           "node": "new-node",
           "migrations": [ "demo-migrate" ],
           "virtualHosts": {}
@@ -402,10 +402,10 @@ in
         "fresh-prod": {
           "hostenv": {
             "userName": "fresh-prod",
-            "runtimeDir": "/run/hostenv/user/fresh-prod"
+            "runtimeDir": "/run/hostenv/user/fresh-prod",
+            "hostname": "fresh-prod.hosting.test"
           },
           "uid": 3000,
-          "knownIdentity": false,
           "node": "new-node",
           "migrations": [ "demo-migrate" ],
           "virtualHosts": {}
@@ -449,6 +449,15 @@ in
     EOF
     chmod +x "$fakeBin/ssh"
 
+    cat > "$fakeBin/dig" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    if [ "''${DNS_STRANDED:-0}" = 1 ]; then
+      printf 'old-node.hosting.test.\n'
+    fi
+    EOF
+    chmod +x "$fakeBin/dig"
+
     (
       cd "$work"
 
@@ -460,11 +469,19 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."fresh-prod"' "$log"
       test "$(wc -l < "$log")" -eq 2
 
-      ${pkgs.gnused}/bin/sed -i 's/"knownIdentity": false/"knownIdentity": true/' generated/plan.json
+      # A reservation in state.json must not make a fresh environment look
+      # previously deployed: the same no-source deployment remains valid.
       : > "$log"
-      if PATH="$fakeBin:$PATH" NIX_LOG="$log" \
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."fresh-prod"' "$log"
+
+      # If DNS explicitly identifies a provider node that has been removed from
+      # inventory, do not silently reinterpret the deployment as fresh.
+      : > "$log"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STRANDED=1 \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
-        echo "missing known environment was incorrectly treated as new"
+        echo "environment pointing at a removed provider node was treated as fresh"
         exit 1
       fi
       test ! -s "$log"
