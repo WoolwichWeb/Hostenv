@@ -131,6 +131,11 @@ in
     ${ghc}/bin/runghc -i${src} ${src}/TestPrevNodeDiscovery.hs
     echo ok > "$out"
   '';
+  provider-cli-retired-user-state = pkgs.runCommand "provider-cli-retired-user-state" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestRetiredUserState.hs
+    echo ok > "$out"
+  '';
   provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDeployVerification.hs

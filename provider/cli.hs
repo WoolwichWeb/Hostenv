@@ -33,6 +33,7 @@ import Hostenv.Provider.DeployGuidance (FlakeKeyStatus (..), localTrustSetupLine
 import Hostenv.Provider.DeployPreflight qualified as Preflight
 import Hostenv.Provider.DeployVerification (NodeConnection (..), nodeConnectionFor)
 import Hostenv.Provider.DeployVerification qualified as Verify
+import Hostenv.Provider.RetiredUserState (clearPendingCleanupNodesInState)
 import Hostenv.Provider.DnsBackoff (backoffDelays)
 import Hostenv.Provider.DnsGateFilter (
     DnsGateItem (..),
@@ -339,16 +340,7 @@ clearPendingCleanupNodes statePath successfulNodes =
         state <- case A.eitherDecode' raw of
             Left err -> error ("failed to parse " <> T.unpack statePath <> ": " <> err)
             Right value -> pure (value :: KM.KeyMap A.Value)
-        let successful = S.fromList successfulNodes
-        let clearEntry = \case
-                A.Object entry ->
-                    let pending =
-                            filter
-                                (`S.notMember` successful)
-                                (lookupTextList (K.fromString "pendingCleanupNodes") entry)
-                     in A.Object (KM.insert (K.fromString "pendingCleanupNodes") (A.toJSON pending) entry)
-                value -> value
-        let updated = KM.map clearEntry state
+        let updated = clearPendingCleanupNodesInState successfulNodes state
         pretty <- prettyJson (A.encode (A.Object updated))
         BL.writeFile (T.unpack statePath) pretty
         _ <- Sh.procs "git" ["add", statePath] Sh.empty
