@@ -1362,6 +1362,13 @@ planSystemTargetNodes plan mNode =
             Nothing -> nodeNames
             Just nodeName -> filter (== nodeName) nodeNames
 
+planConnectionNodes :: KM.KeyMap A.Value -> [Text]
+planConnectionNodes plan =
+    maybe
+        []
+        (map K.toText . KM.keys)
+        (lookupObj (K.fromString "nodeConnections") plan)
+
 nodeUsesRemoteBuild :: KM.KeyMap A.Value -> Text -> Bool
 nodeUsesRemoteBuild remoteBuildMap nodeName =
     fromMaybe False (lookupBool (K.fromText nodeName) remoteBuildMap)
@@ -1713,7 +1720,11 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             let sourceHits = filter (\(envName, _) -> any (\e -> e.userName == envName) envInfosFiltered) migrationSources
             let sourceMisses = map fst migrationSources \\ map fst sourceHits
             let sourceFor envName = lookup envName migrationSources
-            let discoveryNodes = planSystemTargetNodes plan Nothing
+            let discoveryNodes =
+                    S.toList . S.fromList $
+                        planConnectionNodes plan
+                            ++ planSystemTargetNodes plan Nothing
+                            ++ map snd sourceHits
 
             -- Perform data migrations if the environment has moved node.
             case mNode of
