@@ -1946,9 +1946,23 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                         Right _ -> pure Nothing
                                         Left err -> do
                                             printProviderLine ("hostenv-provider: warning: migration failed for " <> envInfo.userName <> ": " <> T.pack (displayException err))
-                                            pure (Just envInfo.userName)
+                                            pure (Just (envInfo.userName, prevNode))
+                            let unsafeFailures =
+                                    filter
+                                        (\(_, sourceNode) -> sourceNode `elem` targetNodes)
+                                        failures
+                            unless (null unsafeFailures) $ do
+                                printProviderErrLine
+                                    ( "hostenv-provider: error: cannot ignore migration failure while its source node is being deployed; "
+                                        <> "that system deployment could remove the source account: "
+                                        <> T.intercalate ", " [envName <> "@" <> sourceNode | (envName, sourceNode) <- unsafeFailures]
+                                    )
+                                Sh.exitWith (ExitFailure 1)
                             when (not (null failures)) $
-                                printProviderLine ("hostenv-provider: warning: ignored migration failures for " <> T.intercalate ", " failures)
+                                printProviderLine
+                                    ( "hostenv-provider: warning: ignored migration failures for "
+                                        <> T.intercalate ", " [envName | (envName, _) <- failures]
+                                    )
                         else
                             forM_ migrations runMigration
 
