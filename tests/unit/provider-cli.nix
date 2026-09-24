@@ -209,6 +209,21 @@ in
       test ! -s "$log"
       ! ${pkgs.gnugrep}/bin/grep -Fq "loginctl disable-linger" "$sshLog"
 
+      # A malformed environment entry must abort before reconciliation can
+      # misclassify its live account as retired.
+      cp generated/plan.json "$TMPDIR/valid-plan.json"
+      ${pkgs.jq}/bin/jq 'del(.environments["acme-prod"].hostenv.hostname)'         generated/plan.json > "$TMPDIR/malformed-plan.json"
+      mv "$TMPDIR/malformed-plan.json" generated/plan.json
+      : > "$log"
+      : > "$sshLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" SSH_LOG="$sshLog"         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "malformed environment plan was reported as success"
+        exit 1
+      fi
+      test ! -s "$log"
+      ! ${pkgs.gnugrep}/bin/grep -Fq "loginctl disable-linger" "$sshLog"
+      mv "$TMPDIR/valid-plan.json" generated/plan.json
+
       # A source-only deployment can observe that this is a moved environment,
       # but cannot prove the destination participates in the same transaction.
       # It must fail before deploy-rs can remove the source account.
@@ -370,6 +385,18 @@ in
     (
       cd "$work"
       cp generated/state.json "$TMPDIR/state-before.json"
+
+      # Pointing --migration-source at the destination must not suppress a
+      # real observed source. --skip-migrations is the explicit no-migrate path.
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog"         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification           --migration-source acme-prod=new-node; then
+        echo "destination migration-source override suppressed an observed source"
+        exit 1
+      fi
+      test ! -s "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
 
       : > "$nixLog"
       : > "$sshLog"
