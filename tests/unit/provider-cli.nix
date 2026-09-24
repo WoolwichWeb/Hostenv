@@ -238,6 +238,25 @@ in
           "uid": 2000,
           "node": "new-node",
           "migrations": [ "demo-migrate" ],
+          "deploymentVerification": {
+            "enable": true,
+            "enforce": true,
+            "checks": [
+              {
+                "name": "destination-health",
+                "request": {
+                  "virtualHost": "acme-prod.example.test",
+                  "timeoutSeconds": 1
+                },
+                "constraints": [
+                  {
+                    "rule": "stdoutRegexMustMatch",
+                    "value": "healthy"
+                  }
+                ]
+              }
+            ]
+          },
           "virtualHosts": {}
         }
       }
@@ -320,6 +339,18 @@ in
     EOF
     chmod +x "$fakeBin/ssh"
 
+    cat > "$fakeBin/curl" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    if [ "''${VERIFY_FAIL:-0}" = 1 ]; then
+      body="unhealthy"
+    else
+      body="healthy"
+    fi
+    printf '%s\n__HOSTENV_PROVIDER_HTTP_STATUS__:200\n__HOSTENV_PROVIDER_EFFECTIVE_URL__:http://acme-prod.example.test/\n' "$body"
+    EOF
+    chmod +x "$fakeBin/curl"
+
     (
       cd "$work"
       cp generated/state.json "$TMPDIR/state-before.json"
@@ -334,6 +365,22 @@ in
       fi
 
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
+
+      # Activation alone is not enough to retire the source when verification
+      # is enforced. A failed destination health check must leave the source
+      # account and source system untouched.
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" VERIFY_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build; then
+        echo "enforced destination verification failure was reported as success"
+        exit 1
+      fi
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
@@ -354,7 +401,7 @@ in
       : > "$sshLog"
       : > "$eventLog"
       PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" \
-        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build
 
       dest_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
       dest_env_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."acme-prod"' "$eventLog" | head -n1 | cut -d: -f1)"
