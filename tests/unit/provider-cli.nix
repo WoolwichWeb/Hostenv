@@ -98,6 +98,35 @@ in
     EOF
     chmod +x "$fakeBin/nix"
 
+    cat > "$fakeBin/ssh" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    script="$(cat)"
+    target="$*"
+
+    if printf '%s\n' "$script" | grep -Fq "/etc/os-release"; then
+      printf 'ID=nixos\n'
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | grep -Fq "'getent' 'passwd'"; then
+      case "$target" in
+        *old-node.hosting.test*)
+          printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+          ;;
+        *retired-node.hosting.test*)
+          printf 'retired-prod:x:2001:100::/home/retired-prod:/bin/sh\n'
+          ;;
+      esac
+      exit 0
+    fi
+
+    # Cleanup commands are intentionally not executed by this unit test. Their
+    # presence and ordering is exercised through the CLI's SSH boundary.
+    exit 0
+    EOF
+    chmod +x "$fakeBin/ssh"
+
     (
       cd "$work"
 
@@ -137,6 +166,31 @@ in
 
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
       test "$(wc -l < "$log")" -eq 1
+
+      # Real deploys observe node passwd state, but state.json itself is an
+      # input/reservation file and must remain byte-for-byte unchanged.
+      cp generated/state.json "$TMPDIR/state-before.json"
+      : > "$log"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
+
+      cmp "$TMPDIR/state-before.json" generated/state.json
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$log"
+
+      # A source-only deployment can observe that this is a moved environment,
+      # but cannot prove the destination participates in the same transaction.
+      # It must fail before deploy-rs can remove the source account.
+      : > "$log"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" \
+        ${cliPkg}/bin/hostenv-provider deploy --node old-node --remote-build --skip-verification; then
+        echo "node-filtered moved-source deployment was reported as success"
+        exit 1
+      fi
+      test ! -s "$log"
+      cmp "$TMPDIR/state-before.json" generated/state.json
     )
 
     echo ok > "$out"
