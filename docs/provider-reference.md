@@ -101,9 +101,11 @@ in each node's own `nodes/<node>/configuration.nix`.
 
 ## State
 
-Keep `generated/state.json` in version control. Hostenv uses it to preserve
-stable environment UIDs, remember node moves, and keep hostname reservations
-between plans.
+Keep `generated/state.json` in version control. Hostenv deliberately keeps
+this state small: stable environment UIDs, the last node placement observed
+during deployment, and hostname reservations. Planning does not mark a move as
+complete; deployment reconciles the recorded node from the accounts actually
+present on the affected nodes.
 
 Do not reset it to `{}` as a troubleshooting step. Removing existing state can
 make Hostenv treat established environments as new ones.

@@ -54,8 +54,21 @@ in
     {
       "hostenvHostname": "hosting.test",
       "nodes": {
-        "old-node": {},
-        "new-node": {}
+        "old-node": {
+          "provider": {
+            "retiredUsers": {
+              "acme-prod": { "uid": 2000 }
+            }
+          }
+        },
+        "new-node": {},
+        "retired-node": {
+          "provider": {
+            "retiredUsers": {
+              "retired-prod": { "uid": 2001 }
+            }
+          }
+        }
       },
       "environments": {
         "acme-prod": {
@@ -73,8 +86,8 @@ in
     cat > "$fakeBin/nix" <<'EOF'
     #!${pkgs.runtimeShell}
     printf '%s\n' "$*" >> "$NIX_LOG"
-    if [ "''${FAIL_OLD_SYSTEM:-0}" = 1 ] \
-      && printf '%s\n' "$*" | grep -Fq 'generated/.#"old-node"."system"'; then
+    if [ "''${FAIL_RETIRED_SYSTEM:-0}" = 1 ] \
+      && printf '%s\n' "$*" | grep -Fq 'generated/.#"retired-node"."system"'; then
       exit 42
     fi
     exit 0
@@ -90,27 +103,36 @@ in
 
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$log"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."acme-prod"' "$log"
-      test "$(wc -l < "$log")" -eq 3
+      test "$(wc -l < "$log")" -eq 4
+
+      : > "$log"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" \
+        ${cliPkg}/bin/hostenv-provider deploy --dry-run --node old-node; then
+        echo "node-filtered deploy retired a moved source user"
+        exit 1
+      fi
+      test ! -s "$log"
 
       : > "$log"
       PATH="$fakeBin:$PATH" NIX_LOG="$log" \
-        ${cliPkg}/bin/hostenv-provider deploy --dry-run --node old-node
+        ${cliPkg}/bin/hostenv-provider deploy --dry-run --node retired-node
 
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'new-node' "$log"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod' "$log"
       test "$(wc -l < "$log")" -eq 1
 
       : > "$log"
-      if PATH="$fakeBin:$PATH" NIX_LOG="$log" FAIL_OLD_SYSTEM=1 \
-        ${cliPkg}/bin/hostenv-provider deploy --dry-run --node old-node; then
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" FAIL_RETIRED_SYSTEM=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --dry-run --node retired-node; then
         echo "cleanup-only system deployment failure was reported as success"
         exit 1
       fi
 
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
       test "$(wc -l < "$log")" -eq 1
     )
 
@@ -131,9 +153,9 @@ in
     ${ghc}/bin/runghc -i${src} ${src}/TestPrevNodeDiscovery.hs
     echo ok > "$out"
   '';
-  provider-cli-retired-user-state = pkgs.runCommand "provider-cli-retired-user-state" { } ''
+  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
     set -euo pipefail
-    ${ghc}/bin/runghc -i${src} ${src}/TestRetiredUserState.hs
+    ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
     echo ok > "$out"
   '';
   provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''

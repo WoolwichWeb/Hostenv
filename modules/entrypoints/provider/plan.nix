@@ -116,9 +116,43 @@ let
         else
           true;
 
-      state = removeAttrs (
+      rawState = removeAttrs (
         if statePath == null || !(builtins.pathExists statePath) then { } else lib.importJSON statePath
       ) [ "_description" ];
+
+      # state.node is the last placement observed after deployment. Planning
+      # must not advance it merely because the desired node changed.
+      #
+      # Earlier revisions of MR 36 briefly persisted workflow fields. Collapse
+      # those back into the observed placement so worktrees that evaluated that
+      # revision recover without carrying the temporary state model forward.
+      state = lib.mapAttrs (
+        _: entry:
+        if !builtins.isAttrs entry then
+          entry
+        else
+          let
+            pendingCleanupNodes =
+              if builtins.isList (entry.pendingCleanupNodes or null) then
+                entry.pendingCleanupNodes
+              else
+                [ ];
+            recoveredNode =
+              if
+                pendingCleanupNodes != [ ]
+                && builtins.isString (builtins.head pendingCleanupNodes)
+                && builtins.head pendingCleanupNodes != ""
+              then
+                builtins.head pendingCleanupNodes
+              else
+                entry.node or null;
+            cleaned = removeAttrs entry [ "node" "present" "pendingCleanupNodes" ];
+          in
+          cleaned
+          // lib.optionalAttrs (builtins.isString recoveredNode && recoveredNode != "") {
+            node = recoveredNode;
+          }
+      ) rawState;
 
       lockData =
         if builtins.pathExists lockPath then
@@ -279,85 +313,42 @@ let
         idx: env:
         let
           previous = state.${env.hostenv.userName} or { };
-          previousWasPresent = previous.present or true;
           stateNode = previous.node or null;
-          pendingCleanupNodes = previous.pendingCleanupNodes or [ ];
-          previousNodes = lib.filter
-            (node: builtins.isString node && node != "" && node != env.node)
-            (lib.unique (
-              pendingCleanupNodes
-              ++ lib.optional previousWasPresent stateNode
-            ));
         in
         env
         // {
           uid = if (previous.uid or null) != null then previous.uid else nextUid + idx;
-          # Keep the old placement available across repeated planning until its
-          # pending cleanup has actually succeeded.
-          previousNode = if previousNodes == [ ] then null else builtins.head previousNodes;
+          previousNode =
+            if builtins.isString stateNode && stateNode != "" && stateNode != env.node then stateNode else null;
         }
       ) validatedEnvironments;
 
-      currentEnvironmentsByUser = builtins.listToAttrs (
-        map (env: {
-          name = env.hostenv.userName;
-          value = env;
-        }) environmentsWithUid
-      );
+      # User accounts that still need processing on a node. The node recorded in
+      # state is deliberately the last observed placement, not the desired one,
+      # so repeated planning cannot erase outstanding cleanup.
+      retiredUsersForNode =
+        let
+          currentEnvironmentsByUser = builtins.listToAttrs (
+            map (env: {
+              name = env.hostenv.userName;
+              value = env;
+            }) environmentsWithUid
+          );
 
-      # Planning is allowed to advance the desired node immediately, but cleanup
-      # of an old placement must survive until deploy records success. `present`
-      # distinguishes a newly removed environment from one whose removal was
-      # already planned, so an empty pending list remains empty after cleanup.
-      nextState = builtins.listToAttrs (
-        map (name:
-          let
-            previous = state.${name} or { };
-            current = currentEnvironmentsByUser.${name} or null;
-            previousWasPresent = previous.present or true;
-            previousNode = previous.node or null;
-            existingPendingCleanupNodes = previous.pendingCleanupNodes or [ ];
-            newlyPendingCleanupNodes = lib.optional (
-              previousWasPresent
-              && builtins.isString previousNode
-              && previousNode != ""
-              && (current == null || current.node != previousNode)
-            ) previousNode;
-            pendingCleanupNodes = builtins.filter
-              (node: current == null || node != current.node)
-              (lib.unique (existingPendingCleanupNodes ++ newlyPendingCleanupNodes));
-            currentState =
-              if current == null then
-                { }
-              else
-                {
-                  userName = current.hostenv.userName;
-                  inherit (current) uid node;
-                  virtualHosts = builtins.attrNames current.virtualHosts;
-                };
-          in
-          {
-            inherit name;
-            value = previous // currentState // {
-              present = current != null;
-              inherit pendingCleanupNodes;
-            };
-          }
-        ) (lib.unique (
-          builtins.attrNames state
-          ++ builtins.attrNames currentEnvironmentsByUser
-        ))
-      );
-
-      # User accounts that still need processing on a node. An unclean removal
-      # can leave a stale user manager and make later deployments fail.
-      retiredUsersForNode = nodeName:
+          retiredEnvs = lib.filterAttrs (
+            name: previous:
+            let
+              current = currentEnvironmentsByUser.${name} or null;
+            in
+            builtins.isInt (previous.uid or null)
+            && builtins.isString (previous.node or null)
+            && previous.node != ""
+            && (current == null || current.node != previous.node)
+          ) state;
+        in
+        nodeName:
         lib.mapAttrs (_: env: { uid = env.uid; }) (
-          lib.filterAttrs
-            (_: env:
-              builtins.isInt (env.uid or null)
-              && builtins.elem nodeName (env.pendingCleanupNodes or [ ]))
-            nextState
+          lib.filterAttrs (_: env: env.node == nodeName) retiredEnvs
         );
 
       # State is retained indefinitely, so do not resurrect nodes that are no
@@ -371,10 +362,7 @@ let
         let
           # Remember old nodes too: migrations may still need to contact them.
           namesFromEnvs = map (env: env.node) environmentsWithUid;
-          namesFromState = map (env: env.node or null) (builtins.attrValues nextState);
-          namesFromPendingCleanup = builtins.concatMap
-            (env: env.pendingCleanupNodes or [ ])
-            (builtins.attrValues nextState);
+          namesFromState = map (env: env.node or null) (builtins.attrValues state);
           knownNodes = lib.filter (name: builtins.isString name && name != "" && name != "default") (
             lib.unique (
               builtins.attrNames nodeSystems
@@ -383,7 +371,6 @@ let
               ++ builtins.attrNames nodeSshOpts
               ++ namesFromEnvs
               ++ namesFromState
-              ++ namesFromPendingCleanup
             )
           );
         in
@@ -615,13 +602,28 @@ let
         pkgs.writers.writeJSON "plan.json" configAttrs;
 
       generatedState =
+        let
+          identityState = builtins.listToAttrs (
+            map (env: {
+              name = env.hostenv.userName;
+              value = {
+                userName = env.hostenv.userName;
+                inherit (env) uid;
+                virtualHosts = builtins.attrNames env.virtualHosts;
+              };
+            }) environmentsWithUid
+          );
+        in
         pkgs.writers.writeJSON "state.json" (
           {
             _description = ''
               Persistent state to retain across deployments. Should be committed to version control.
             '';
           }
-          // nextState
+          # Preserve the last observed node placement and any extra durable
+          # fields. Deployment reconciles node; planning only updates identity
+          # and hostname reservations.
+          // lib.recursiveUpdate state identityState
         );
 
     in

@@ -94,20 +94,18 @@ let
   replanned = mkPlan { statePath = baseline.state; };
   replannedPlan = lib.importJSON replanned.plan;
   replannedState = lib.importJSON replanned.state;
-  cleanedMovedState = state // {
-    ${mainUser} = state.${mainUser} // { pendingCleanupNodes = [ ]; };
+  legacyPendingState = persistedState // {
+    ${mainUser} = persistedState.${mainUser} // {
+      node = "node-a";
+      present = true;
+      pendingCleanupNodes = [ "old-node" ];
+    };
   };
-  afterMovedCleanup = mkPlan {
-    statePath = pkgs.writeText "state-after-moved-cleanup.json" (builtins.toJSON cleanedMovedState);
+  legacyPending = mkPlan {
+    statePath = pkgs.writeText "state-with-legacy-pending-cleanup.json" (builtins.toJSON legacyPendingState);
   };
-  afterMovedCleanupPlan = lib.importJSON afterMovedCleanup.plan;
-  cleanedRetiredState = state // {
-    retiredOnActiveNode = state.retiredOnActiveNode // { pendingCleanupNodes = [ ]; };
-  };
-  afterRetiredCleanup = mkPlan {
-    statePath = pkgs.writeText "state-after-retired-cleanup.json" (builtins.toJSON cleanedRetiredState);
-  };
-  afterRetiredCleanupPlan = lib.importJSON afterRetiredCleanup.plan;
+  legacyPendingPlan = lib.importJSON legacyPending.plan;
+  legacyPendingOutputState = lib.importJSON legacyPending.state;
   withoutState = mkPlan { statePath = null; };
   missingState = mkPlan { statePath = providerRoot + "/generated/absent.json"; };
   noStatePlan = lib.importJSON withoutState.plan;
@@ -185,16 +183,13 @@ in
   ) "default paths should read the provider's state and lock, never its existing plan.json";
 
   provider-plan-state-retention = asserts.assertTrue "provider-plan-state-retention" (
-    builtins.removeAttrs state.retired [ "present" "pendingCleanupNodes" ] == persistedState.retired
-    && state.retired.present == false
-    && state.retired.pendingCleanupNodes == [ "retired-node" ]
+    state.retired == persistedState.retired
     && state.${mainUser}.retainedField == "keep this field"
-    && state.${mainUser}.node == "node-a"
-    && state.${mainUser}.present == true
-    && state.${mainUser}.pendingCleanupNodes == [ "old-node" ]
+    && state.${mainUser}.node == "old-node"
     && state.${mainUser}.uid == 2501
     && state.${testingUser}.uid > 4501
-  ) "planning must retain retired users, pending cleanup, and extra state fields without reassigning existing UIDs";
+    && !(state.${testingUser} ? node)
+  ) "planning must retain durable user identity and the last observed node placement";
 
   provider-plan-state-node-history = asserts.assertTrue "provider-plan-state-node-history" (
     plan.environments.${mainUser}.previousNode == "old-node"
@@ -215,18 +210,20 @@ in
     && !(plan.nodes ? retired-node)
   ) "a configured node with only retired users must remain in the plan long enough to receive cleanup";
 
-  provider-plan-pending-cleanup-survives-replan = asserts.assertTrue "provider-plan-pending-cleanup-survives-replan" (
+  provider-plan-move-survives-replan = asserts.assertTrue "provider-plan-move-survives-replan" (
     replannedPlan.nodes.old-node.provider.retiredUsers.${mainUser}.uid == 2501
     && replannedPlan.environments.${mainUser}.previousNode == "old-node"
-    && replannedState.${mainUser}.node == "node-a"
-    && replannedState.${mainUser}.pendingCleanupNodes == [ "old-node" ]
-    && replannedState.retiredOnActiveNode.pendingCleanupNodes == [ "node-a" ]
-  ) "re-running plan before deployment must preserve pending moved and retired user cleanup";
+    && replannedState.${mainUser}.node == "old-node"
+    && !(replannedState.${testingUser} ? node)
+  ) "re-running plan before deployment must preserve the last observed placement and pending cleanup";
 
-  provider-plan-cleared-cleanup-stays-cleared = asserts.assertTrue "provider-plan-cleared-cleanup-stays-cleared" (
-    !(afterMovedCleanupPlan.nodes ? old-node)
-    && !(afterRetiredCleanupPlan.nodes.node-a.provider.retiredUsers ? retiredOnActiveNode)
-  ) "successful cleanup removed from state must not be recreated by later planning";
+  provider-plan-legacy-pending-state-collapses = asserts.assertTrue "provider-plan-legacy-pending-state-collapses" (
+    legacyPendingPlan.environments.${mainUser}.previousNode == "old-node"
+    && legacyPendingPlan.nodes.old-node.provider.retiredUsers.${mainUser}.uid == 2501
+    && legacyPendingOutputState.${mainUser}.node == "old-node"
+    && !(legacyPendingOutputState.${mainUser} ? present)
+    && !(legacyPendingOutputState.${mainUser} ? pendingCleanupNodes)
+  ) "temporary MR 36 workflow fields must collapse back into the observed node placement";
 
   provider-plan-optional-state = asserts.assertTrue "provider-plan-optional-state" (
     lib.importJSON missingState.plan == noStatePlan
