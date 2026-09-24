@@ -291,18 +291,24 @@ let
       unknownStatusNodes =
         lib.filter (node: !(builtins.hasAttr node nodeSystems)) (builtins.attrNames nodeStatus);
 
+      configuredSchedulingNodes =
+        lib.filter
+          (node: builtins.isString node && node != "" && node != "default")
+          (lib.unique (builtins.attrValues nodeFor));
+
+      unknownSchedulingNodes =
+        lib.filter (node: !(builtins.hasAttr node nodeSystems)) configuredSchedulingNodes;
+
       scheduledRetiringNodes =
         lib.filter
-          (node:
-            builtins.isString node
-            && node != ""
-            && node != "default"
-            && (effectiveNodeStatus.${node} or "active") == "retiring")
-          (lib.unique (builtins.attrValues nodeFor));
+          (node: (effectiveNodeStatus.${node} or "active") == "retiring")
+          configuredSchedulingNodes;
 
       assertNodeLifecycle =
         if unknownStatusNodes != [ ] then
           throw "provider plan: provider.nodeStatus contains nodes missing from provider.nodeSystems: ${lib.concatStringsSep ", " unknownStatusNodes}"
+        else if unknownSchedulingNodes != [ ] then
+          throw "provider plan: provider.nodeFor selects nodes missing from provider.nodeSystems: ${lib.concatStringsSep ", " unknownSchedulingNodes}"
         else if scheduledRetiringNodes != [ ] then
           throw "provider plan: retiring nodes cannot be selected by provider.nodeFor: ${lib.concatStringsSep ", " scheduledRetiringNodes}"
         else

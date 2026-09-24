@@ -117,6 +117,9 @@ let
   unknownStatusNode = builtins.tryEval (builtins.deepSeq (mkPlan {
     nodeStatus.missing-node = "retiring";
   }).plan true);
+  unknownScheduledNode = builtins.tryEval (builtins.deepSeq (mkPlan {
+    nodeFor.default = "missing-node";
+  }).plan true);
 
   stateConflict = mkPlan {
     statePath = pkgs.writeText "conflicting-state.json" (builtins.toJSON {
@@ -224,6 +227,10 @@ in
   provider-plan-node-status-must-reference-inventory = asserts.assertTrue "provider-plan-node-status-must-reference-inventory" (
     !unknownStatusNode.success
   ) "provider.nodeStatus entries must reference provider.nodeSystems";
+
+  provider-plan-node-for-must-reference-inventory = asserts.assertTrue "provider-plan-node-for-must-reference-inventory" (
+    !unknownScheduledNode.success
+  ) "provider.nodeFor entries must reference provider.nodeSystems";
 
   provider-plan-state-is-stable-across-replan = asserts.assertTrue "provider-plan-state-is-stable-across-replan" (
     replannedPlan.nodes ? old-node
