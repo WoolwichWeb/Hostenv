@@ -38,11 +38,11 @@ let
         inherit sshOpts;
       };
     };
-    environments.\${user} = {
+    environments.${user} = {
       hostenv = {
         userName = user;
-        runtimeDir = "/run/hostenv/user/\${user}";
-        hostname = "\${user}.hosting.test";
+        runtimeDir = "/run/hostenv/user/${user}";
+        hostname = "${user}.hosting.test";
       };
       inherit uid;
       node = "new-node";
@@ -52,7 +52,7 @@ let
   });
 
   moveState = pkgs.writeText "provider-move-state.json" (builtins.toJSON {
-    \${user} = {
+    ${user} = {
       userName = user;
       inherit uid;
       virtualHosts = [ ];
@@ -68,11 +68,11 @@ let
       hostname = "new";
       inherit sshOpts;
     };
-    environments.\${freshUser} = {
+    environments.${freshUser} = {
       hostenv = {
         userName = freshUser;
-        runtimeDir = "/run/hostenv/user/\${freshUser}";
-        hostname = "\${freshUser}.hosting.test";
+        runtimeDir = "/run/hostenv/user/${freshUser}";
+        hostname = "${freshUser}.hosting.test";
       };
       uid = freshUid;
       node = "new-node";
@@ -82,7 +82,7 @@ let
   });
 
   freshState = pkgs.writeText "provider-fresh-state.json" (builtins.toJSON {
-    \${freshUser} = {
+    ${freshUser} = {
       userName = freshUser;
       uid = freshUid;
       virtualHosts = [ ];
@@ -93,7 +93,7 @@ let
     set -euo pipefail
     case " $* " in
       *" snapshots "*)
-        printf '[{"id":"\${snapshotId}"}]\n'
+        printf '[{"id":"${snapshotId}"}]\n'
         ;;
       *)
         exit 0
@@ -104,20 +104,20 @@ let
   fakeDeployNix = pkgs.writeShellScript "hostenv-provider-vm-test-nix" ''
     set -euo pipefail
 
-    : "''\${NIX_LOG:=/tmp/hostenv-provider-nix.log}"
+    : "''${NIX_LOG:=/tmp/hostenv-provider-nix.log}"
     printf '%s\n' "$*" >> "$NIX_LOG"
 
     ssh_node() {
       node="$1"
       shift
       exec_ssh=(
-        \${pkgs.openssh}/bin/ssh
+        ${pkgs.openssh}/bin/ssh
         -o BatchMode=yes
         -o StrictHostKeyChecking=no
         -o UserKnownHostsFile=/dev/null
         "root@$node"
       )
-      "''\${exec_ssh[@]}" "$@"
+      "''${exec_ssh[@]}" "$@"
     }
 
     ensure_user() {
@@ -137,64 +137,64 @@ let
     args="$*"
     case "$args" in
       *'generated/.#"new-node"."system"'*)
-        case "''\${FAKE_MODE:-move}" in
+        case "''${FAKE_MODE:-move}" in
           move)
-            ensure_user new '\${user}' '\${toString uid}'
+            ensure_user new '${user}' '${toString uid}'
             ;;
           fresh)
-            ensure_user new '\${freshUser}' '\${toString freshUid}'
+            ensure_user new '${freshUser}' '${toString freshUid}'
             ;;
           *)
-            echo "unknown FAKE_MODE: ''\${FAKE_MODE:-}" >&2
+            echo "unknown FAKE_MODE: ''${FAKE_MODE:-}" >&2
             exit 2
             ;;
         esac
         ;;
 
-      *'generated/.#"new-node"."\${user}"'*)
-        if [ "''\${FAIL_DEST_ENV:-0}" = 1 ]; then
+      *'generated/.#"new-node"."${user}"'*)
+        if [ "''${FAIL_DEST_ENV:-0}" = 1 ]; then
           exit 41
         fi
 
-        restore_plan="/run/hostenv/user/\${user}/restore/plan.json"
+        restore_plan="/run/hostenv/user/${user}/restore/plan.json"
         restore_json="$(ssh_node new cat "$restore_plan")"
-        printf '%s\n' "$restore_json" | \${pkgs.gnugrep}/bin/grep -Fq '"sourceNode":"old-node"'
-        printf '%s\n' "$restore_json" | \${pkgs.gnugrep}/bin/grep -Fq '"demo-migrate":"\${snapshotId}"'
+        printf '%s\n' "$restore_json" | ${pkgs.gnugrep}/bin/grep -Fq '"sourceNode":"old-node"'
+        printf '%s\n' "$restore_json" | ${pkgs.gnugrep}/bin/grep -Fq '"demo-migrate":"${snapshotId}"'
 
-        tmp="$(\${pkgs.coreutils}/bin/mktemp)"
-        \${pkgs.openssh}/bin/scp \
+        tmp="$(${pkgs.coreutils}/bin/mktemp)"
+        ${pkgs.openssh}/bin/scp \
           -o BatchMode=yes \
           -o StrictHostKeyChecking=no \
           -o UserKnownHostsFile=/dev/null \
-          "root@old:/home/\${user}/data/sentinel.txt" "$tmp"
-        ssh_node new "install -d -o '\${user}' -g '\${user}' '/home/\${user}/data'"
-        \${pkgs.openssh}/bin/scp \
+          "root@old:/home/${user}/data/sentinel.txt" "$tmp"
+        ssh_node new "install -d -o '${user}' -g '${user}' '/home/${user}/data'"
+        ${pkgs.openssh}/bin/scp \
           -o BatchMode=yes \
           -o StrictHostKeyChecking=no \
           -o UserKnownHostsFile=/dev/null \
-          "$tmp" "root@new:/home/\${user}/data/sentinel.txt"
-        \${pkgs.coreutils}/bin/rm -f "$tmp"
+          "$tmp" "root@new:/home/${user}/data/sentinel.txt"
+        ${pkgs.coreutils}/bin/rm -f "$tmp"
         ssh_node new "
-          chown '\${user}:\${user}' '/home/\${user}/data/sentinel.txt'
-          touch '/home/\${user}/activated'
-          chown '\${user}:\${user}' '/home/\${user}/activated'
+          chown '${user}:${user}' '/home/${user}/data/sentinel.txt'
+          touch '/home/${user}/activated'
+          chown '${user}:${user}' '/home/${user}/activated'
           rm -f '$restore_plan'
         "
         ;;
 
-      *'generated/.#"new-node"."\${freshUser}"'*)
+      *'generated/.#"new-node"."${freshUser}"'*)
         ssh_node new "
-          test \"\$(id -u '\${freshUser}')\" = '\${toString freshUid}'
-          touch '/home/\${freshUser}/activated'
-          chown '\${freshUser}:\${freshUser}' '/home/\${freshUser}/activated'
+          test \"\$(id -u '${freshUser}')\" = '${toString freshUid}'
+          touch '/home/${freshUser}/activated'
+          chown '${freshUser}:${freshUser}' '/home/${freshUser}/activated'
         "
         ;;
 
       *'generated/.#"old-node"."system"'*)
-        if [ "''\${FAIL_SOURCE_SYSTEM:-0}" = 1 ]; then
+        if [ "''${FAIL_SOURCE_SYSTEM:-0}" = 1 ]; then
           exit 42
         fi
-        ssh_node old "userdel '\${user}'"
+        ssh_node old "userdel '${user}'"
         ;;
 
       *)
@@ -227,7 +227,7 @@ pkgs.testers.runNixOSTest {
     old = { ... }: {
       imports = [ commonNode ];
 
-      users.users.\${user} = {
+      users.users.${user} = {
         isNormalUser = true;
         inherit uid;
         createHome = true;
@@ -238,7 +238,7 @@ pkgs.testers.runNixOSTest {
         description = "Hostenv migration test backup";
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "\${pkgs.coreutils}/bin/true";
+          ExecStart = "${pkgs.coreutils}/bin/true";
         };
       };
     };
@@ -268,14 +268,14 @@ pkgs.testers.runNixOSTest {
     controller.wait_for_unit("multi-user.target")
     old.wait_for_unit("sshd.service")
     new.wait_for_unit("sshd.service")
-    old.wait_for_unit("user@\${toString uid}.service")
+    old.wait_for_unit("user@${toString uid}.service")
 
     with subtest("prepare controller SSH and source backup service"):
         controller.succeed(
             "install -d -m 0700 /root/.ssh /root/provider/generated /root/fake-bin"
         )
         controller.succeed(
-            "\${pkgs.openssh}/bin/ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519"
+            "${pkgs.openssh}/bin/ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519"
         )
         public_key = controller.succeed("cat /root/.ssh/id_ed25519.pub").strip()
 
@@ -288,25 +288,25 @@ pkgs.testers.runNixOSTest {
             )
             machine.succeed("chmod 0600 /root/.ssh/authorized_keys")
 
-        controller.succeed("ln -s \${fakeDeployNix} /root/fake-bin/nix")
-        controller.succeed("ln -s \${fakeDig} /root/fake-bin/dig")
+        controller.succeed("ln -s ${fakeDeployNix} /root/fake-bin/nix")
+        controller.succeed("ln -s ${fakeDig} /root/fake-bin/dig")
 
-        old.succeed("install -d -o \${user} -g users /home/\${user}/data")
+        old.succeed("install -d -o ${user} -g users /home/${user}/data")
         old.succeed(
-            "printf 'hello-from-old-node\\\\n' > /home/\${user}/data/sentinel.txt"
+            "printf 'hello-from-old-node\\\\n' > /home/${user}/data/sentinel.txt"
         )
-        old.succeed("chown \${user}:users /home/\${user}/data/sentinel.txt")
-        old.succeed("install -d -o \${user} -g users /home/\${user}/.local/bin")
+        old.succeed("chown ${user}:users /home/${user}/data/sentinel.txt")
+        old.succeed("install -d -o ${user} -g users /home/${user}/.local/bin")
         old.succeed(
-            "install -m 0755 -o \${user} -g users "
-            "\${snapshotWrapper} /home/\${user}/.local/bin/restic-demo-migrate"
+            "install -m 0755 -o ${user} -g users "
+            "${snapshotWrapper} /home/${user}/.local/bin/restic-demo-migrate"
         )
-        old.succeed("test -e /var/lib/systemd/linger/\${user}")
-        old.succeed("systemctl is-active --quiet user@\${toString uid}.service")
+        old.succeed("test -e /var/lib/systemd/linger/${user}")
+        old.succeed("systemctl is-active --quiet user@${toString uid}.service")
 
     with subtest("destination activation failure leaves source recoverable"):
-        controller.succeed("cp \${movePlan} /root/provider/generated/plan.json")
-        controller.succeed("cp \${moveState} /root/provider/generated/state.json")
+        controller.succeed("cp ${movePlan} /root/provider/generated/plan.json")
+        controller.succeed("cp ${moveState} /root/provider/generated/state.json")
         controller.succeed(": > /tmp/move-nix.log")
 
         move_command = (
@@ -314,17 +314,17 @@ pkgs.testers.runNixOSTest {
             "PATH=/root/fake-bin:$PATH "
             "NIX_LOG=/tmp/move-nix.log "
             "FAKE_MODE=move "
-            "\${cliPkg}/bin/hostenv-provider deploy "
+            "${cliPkg}/bin/hostenv-provider deploy "
             "--remote-build --skip-verification"
         )
         controller.fail("FAIL_DEST_ENV=1 " + move_command)
 
-        old.succeed("getent passwd \${user}")
-        old.succeed("test -e /var/lib/systemd/linger/\${user}")
-        old.succeed("systemctl is-active --quiet user@\${toString uid}.service")
-        old.succeed("grep -qx 'hello-from-old-node' /home/\${user}/data/sentinel.txt")
-        new.succeed("test \"$(id -u \${user})\" = '\${toString uid}'")
-        new.succeed("test -f /run/hostenv/user/\${user}/restore/plan.json")
+        old.succeed("getent passwd ${user}")
+        old.succeed("test -e /var/lib/systemd/linger/${user}")
+        old.succeed("systemctl is-active --quiet user@${toString uid}.service")
+        old.succeed("grep -qx 'hello-from-old-node' /home/${user}/data/sentinel.txt")
+        new.succeed("test \"$(id -u ${user})\" = '${toString uid}'")
+        new.succeed("test -f /run/hostenv/user/${user}/restore/plan.json")
         controller.fail(
             "grep -Fq 'generated/.#\\\"old-node\\\".\\\"system\\\"' /tmp/move-nix.log"
         )
@@ -333,20 +333,20 @@ pkgs.testers.runNixOSTest {
         controller.succeed(": > /tmp/move-nix.log")
         controller.succeed(move_command)
 
-        old.fail("getent passwd \${user}")
-        old.fail("test -e /var/lib/systemd/linger/\${user}")
-        old.fail("systemctl is-active --quiet user@\${toString uid}.service")
-        new.succeed("getent passwd \${user}")
-        new.succeed("test -f /home/\${user}/activated")
-        new.succeed("grep -qx 'hello-from-old-node' /home/\${user}/data/sentinel.txt")
-        new.fail("test -f /run/hostenv/user/\${user}/restore/plan.json")
+        old.fail("getent passwd ${user}")
+        old.fail("test -e /var/lib/systemd/linger/${user}")
+        old.fail("systemctl is-active --quiet user@${toString uid}.service")
+        new.succeed("getent passwd ${user}")
+        new.succeed("test -f /home/${user}/activated")
+        new.succeed("grep -qx 'hello-from-old-node' /home/${user}/data/sentinel.txt")
+        new.fail("test -f /run/hostenv/user/${user}/restore/plan.json")
         controller.succeed(
             "grep -Fq 'generated/.#\\\"old-node\\\".\\\"system\\\"' /tmp/move-nix.log"
         )
 
     with subtest("fresh migration-capable environment deploys from reservation only"):
-        controller.succeed("cp \${freshPlan} /root/provider/generated/plan.json")
-        controller.succeed("cp \${freshState} /root/provider/generated/state.json")
+        controller.succeed("cp ${freshPlan} /root/provider/generated/plan.json")
+        controller.succeed("cp ${freshState} /root/provider/generated/state.json")
         controller.succeed(": > /tmp/fresh-nix.log")
 
         fresh_command = (
@@ -354,15 +354,15 @@ pkgs.testers.runNixOSTest {
             "PATH=/root/fake-bin:$PATH "
             "NIX_LOG=/tmp/fresh-nix.log "
             "FAKE_MODE=fresh "
-            "\${cliPkg}/bin/hostenv-provider deploy "
+            "${cliPkg}/bin/hostenv-provider deploy "
             "--remote-build --skip-verification"
         )
         controller.succeed(fresh_command)
 
-        new.succeed("test \"$(id -u \${freshUser})\" = '\${toString freshUid}'")
-        new.succeed("test -f /home/\${freshUser}/activated")
+        new.succeed("test \"$(id -u ${freshUser})\" = '${toString freshUid}'")
+        new.succeed("test -f /home/${freshUser}/activated")
         controller.succeed(
-            "grep -Fq 'generated/.#\\\"new-node\\\".\\\"\${freshUser}\\\"' /tmp/fresh-nix.log"
+            "grep -Fq 'generated/.#\\\"new-node\\\".\\\"${freshUser}\\\"' /tmp/fresh-nix.log"
         )
         controller.succeed("test \"$(wc -l < /tmp/fresh-nix.log)\" -eq 2")
   '';
