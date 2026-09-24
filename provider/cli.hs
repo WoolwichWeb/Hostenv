@@ -332,6 +332,28 @@ prettyJson raw = do
         ExitFailure c ->
             error ("jq failed while formatting JSON (exit " <> show c <> "): " <> err)
 
+clearPendingCleanupNodes :: Text -> [Text] -> IO ()
+clearPendingCleanupNodes statePath successfulNodes =
+    unless (null successfulNodes) $ do
+        raw <- BL.readFile (T.unpack statePath)
+        state <- case A.eitherDecode' raw of
+            Left err -> error ("failed to parse " <> T.unpack statePath <> ": " <> err)
+            Right value -> pure (value :: KM.KeyMap A.Value)
+        let successful = S.fromList successfulNodes
+        let clearEntry = \case
+                A.Object entry ->
+                    let pending =
+                            filter
+                                (`S.notMember` successful)
+                                (lookupTextList (K.fromString "pendingCleanupNodes") entry)
+                     in A.Object (KM.insert (K.fromString "pendingCleanupNodes") (A.toJSON pending) entry)
+                value -> value
+        let updated = KM.map clearEntry state
+        pretty <- prettyJson (A.encode (A.Object updated))
+        BL.writeFile (T.unpack statePath) pretty
+        _ <- Sh.procs "git" ["add", statePath] Sh.empty
+        pure ()
+
 withTempBytesFile :: String -> BL.ByteString -> (FilePath -> IO a) -> IO a
 withTempBytesFile template content action = do
     tmpDir <- Dir.getTemporaryDirectory
@@ -1937,6 +1959,9 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             res <- Sh.proc "nix" args Sh.empty
                             deployGuard res args
                             pure (nodeName, res)
+
+            let successfulSystemNodes = [nodeName | (nodeName, ExitSuccess) <- systemDeployRes]
+            clearPendingCleanupNodes "generated/state.json" successfulSystemNodes
 
             -- Environments deployment for the node.
             envDeployRes <- forM (toNamed envInfosFiltered) $ \(envName, envInfo) -> do
