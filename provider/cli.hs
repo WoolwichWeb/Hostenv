@@ -1419,6 +1419,12 @@ cleanupManagedUsersOnNode ::
     IO (Either Text ())
 cleanupManagedUsersOnNode allowMovedCleanup deployUser nodeConnection desiredNodes observedUsers state nodeName = do
     let target = mkSshTarget deployUser (nodeConnection nodeName)
+    let uidMismatches =
+            EnvironmentState.managedUserUidMismatches
+                nodeName
+                desiredNodes
+                observedUsers
+                state
     let retiredUsers =
             EnvironmentState.managedUsersToRetire
                 nodeName
@@ -1430,18 +1436,37 @@ cleanupManagedUsersOnNode allowMovedCleanup deployUser nodeConnection desiredNod
             | (userName, _) <- retiredUsers
             , M.member userName desiredNodes
             ]
-    if not allowMovedCleanup && not (null movedUsers)
+    if not (null uidMismatches)
         then
             pure
                 ( Left
-                    ( "node-filtered deployment would retire moved environment user(s) from "
+                    ( "Hostenv-managed user UID mismatch on "
                         <> nodeName
-                        <> " before their destination is deployed: "
-                        <> T.intercalate ", " movedUsers
-                        <> ". Run an unfiltered deploy to migrate and retire them safely."
+                        <> ": "
+                        <> T.intercalate
+                            ", "
+                            [ userName
+                                <> " observed="
+                                <> T.pack (show observedUid)
+                                <> " expected="
+                                <> T.pack (show expectedUid)
+                            | (userName, expectedUid, observedUid) <- uidMismatches
+                            ]
+                        <> ". Refusing system deployment until the account drift is resolved."
                     )
                 )
-        else do
+        else if not allowMovedCleanup && not (null movedUsers)
+            then
+                pure
+                    ( Left
+                        ( "node-filtered deployment would retire moved environment user(s) from "
+                            <> nodeName
+                            <> " before their destination is deployed: "
+                            <> T.intercalate ", " movedUsers
+                            <> ". Run an unfiltered deploy to migrate and retire them safely."
+                        )
+                    )
+            else do
             cleanupResults <-
                 forM retiredUsers $ \(userName, uid) -> do
                     let lingerPath = "/var/lib/systemd/linger/" <> userName

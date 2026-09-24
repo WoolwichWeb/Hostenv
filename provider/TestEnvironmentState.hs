@@ -5,7 +5,7 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.Map.Strict qualified as M
 import Data.Text (Text)
 import Data.Text.IO qualified as TIO
-import Hostenv.Provider.EnvironmentState (managedUsersToRetire, parsePasswdUsers, resolveMigrationSourceNode)
+import Hostenv.Provider.EnvironmentState (managedUserUidMismatches, managedUsersToRetire, parsePasswdUsers, resolveMigrationSourceNode)
 import System.Exit (exitFailure)
 
 assertEqual :: (Eq a, Show a) => Text -> a -> a -> IO ()
@@ -38,6 +38,11 @@ main = do
         "managed users to retire"
         [("moved", 2001), ("retired", 2003)]
         (managedUsersToRetire "old-node" desired oldUsers state)
+
+    assertEqual
+        "stale managed UID mismatch"
+        [("wrong-uid", 2004, 9999)]
+        (managedUserUidMismatches "old-node" desired oldUsers state)
 
     let observed =
             M.fromList

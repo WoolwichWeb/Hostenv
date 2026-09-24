@@ -2,6 +2,7 @@
 
 module Hostenv.Provider.EnvironmentState
     ( NodeUsers
+    , managedUserUidMismatches
     , managedUsersToRetire
     , parsePasswdUsers
     , resolveMigrationSourceNode
@@ -21,6 +22,24 @@ import Data.Text qualified as T
 import Data.Text.Read qualified as TR
 
 type NodeUsers = Map Text (Map Text Integer)
+
+managedUserUidMismatches ::
+    Text ->
+    Map Text Text ->
+    Map Text Integer ->
+    KM.KeyMap A.Value ->
+    [(Text, Integer, Integer)]
+managedUserUidMismatches nodeName desiredNodes observedUsers =
+    sortOn (\(name, _, _) -> name) . mapMaybe mismatchCandidate . KM.toList
+  where
+    mismatchCandidate (key, A.Object entry) = do
+        expectedUid <- lookupInteger (K.fromString "uid") entry
+        let userName = fromMaybe (K.toText key) (lookupText (K.fromString "userName") entry)
+        observedUid <- M.lookup userName observedUsers
+        if observedUid /= expectedUid && M.lookup userName desiredNodes /= Just nodeName
+            then Just (userName, expectedUid, observedUid)
+            else Nothing
+    mismatchCandidate _ = Nothing
 
 managedUsersToRetire ::
     Text ->
