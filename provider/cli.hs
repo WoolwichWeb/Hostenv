@@ -2285,7 +2285,8 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
 
             let systemDeploymentFailures = any (\(_, code) -> code /= ExitSuccess) systemDeployRes
             let environmentDeploymentFailures = any (\(_, code) -> code /= ExitSuccess) envDeployRes
-            let deploymentFailures = systemDeploymentFailures || environmentDeploymentFailures
+            let finalizationFailures = not (null unsafePending)
+            let deploymentFailures = systemDeploymentFailures || environmentDeploymentFailures || finalizationFailures
             let verificationFailures = not (null verificationFatalFailures)
             when deploymentFailures $ printProviderLine "hostenv-provider: deployment completed with errors"
             when verificationFailures $
