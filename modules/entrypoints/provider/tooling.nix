@@ -95,7 +95,7 @@ in
           inherit pkgs system sopsSecretKeys;
           inherit (cfg)
             letsEncrypt deployPublicKeys deployUser nixSigning hostenvHostname
-            nodeFor nodeSystems nodeAddresses nodeSshPorts nodeSshOpts
+            nodeFor nodeSystems nodeStatus nodeAddresses nodeSshPorts nodeSshOpts
             nodeRemoteBuild nodeMagicRollback nodeAutoRollback nodeModules
             secretsFile cloudflare generatedFlake deploy serviceResolution cache;
         };

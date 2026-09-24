@@ -21,6 +21,7 @@ let
       nodeModules ? [ ],
       statePath ? (if inputs ? self then inputs.self + /generated/state.json else null),
       nodeSystems ? { },
+      nodeStatus ? { },
       # Server address overrides, particularly for SSH bastions, private IPs, or management hosts.
       nodeAddresses ? { },
       nodeSshPorts ? { },
@@ -282,6 +283,31 @@ let
         else
           evaluatedEnvironments;
 
+      effectiveNodeStatus =
+        lib.genAttrs (builtins.attrNames nodeSystems) (
+          node: nodeStatus.${node} or "active"
+        );
+
+      unknownStatusNodes =
+        lib.filter (node: !(builtins.hasAttr node nodeSystems)) (builtins.attrNames nodeStatus);
+
+      scheduledRetiringNodes =
+        lib.filter
+          (node:
+            builtins.isString node
+            && node != ""
+            && node != "default"
+            && (effectiveNodeStatus.${node} or "active") == "retiring")
+          (lib.unique (builtins.attrValues nodeFor));
+
+      assertNodeLifecycle =
+        if unknownStatusNodes != [ ] then
+          throw "provider plan: provider.nodeStatus contains nodes missing from provider.nodeSystems: ${lib.concatStringsSep ", " unknownStatusNodes}"
+        else if scheduledRetiringNodes != [ ] then
+          throw "provider plan: retiring nodes cannot be selected by provider.nodeFor: ${lib.concatStringsSep ", " scheduledRetiringNodes}"
+        else
+          true;
+
       # Assign unique UIDs to new environments, reusing persisted state when present.
       environmentsWithUid = lib.imap0 (
         idx: env:
@@ -441,6 +467,7 @@ let
               nodeRemoteBuild
               nodeConnections
               ;
+            nodeStatus = effectiveNodeStatus;
             nixSigning.trustedPublicKeys = nixSigning.trustedPublicKeys or [ ];
             environments = { };
 
@@ -558,7 +585,7 @@ let
         );
 
     in
-    assert (assertProjectInputs && assertUnsupportedProviderServiceOptions);
+    assert (assertProjectInputs && assertUnsupportedProviderServiceOptions && assertNodeLifecycle);
     {
       flake = generatedFlakeFile;
       plan = generatedConfig;
