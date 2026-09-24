@@ -343,7 +343,7 @@ in
     #!${pkgs.runtimeShell}
     set -euo pipefail
     if [ "''${VERIFY_FAIL:-0}" = 1 ]; then
-      body="unhealthy"
+      body="broken"
     else
       body="healthy"
     fi
