@@ -1495,7 +1495,15 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
             let failures = [userName | ((userName, _), code) <- cleanupResults, code /= ExitSuccess]
             if null failures
                 then pure (Right retiredUsers)
-                else
+                else do
+                    -- A node may retire more than one account. If any cleanup
+                    -- command fails, undo the preparation for every account we
+                    -- attempted so the node remains retryable as a whole.
+                    rollbackManagedUserCleanupOnNode
+                        deployUser
+                        nodeConnection
+                        nodeName
+                        (map fst cleanupResults)
                     pure
                         ( Left
                             ( "failed to prepare Hostenv user retirement on "
