@@ -985,7 +985,16 @@ runPlan dryRun = do
 
     unless dryRun $ do
         Sh.mktree (fromString (T.unpack dest))
+        previousPlanExists <- Dir.doesFileExist (T.unpack planDest)
         stateExists <- Sh.testfile (fromString (T.unpack stateDest))
+        when (previousPlanExists && not stateExists) $
+            error
+                ( "hostenv-provider: "
+                    <> T.unpack stateDest
+                    <> " is missing while "
+                    <> T.unpack planDest
+                    <> " already exists; refusing to recreate provider identity state"
+                )
         unless stateExists $ do
             BLC.writeFile (T.unpack stateDest) "{}\n"
             _ <- Sh.procs "git" ["add", stateDest] Sh.empty
