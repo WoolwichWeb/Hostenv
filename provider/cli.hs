@@ -384,7 +384,6 @@ data EnvInfo = EnvInfo
     , migrateBackups :: [Text]
     , runtimeDir :: Text
     , hostname :: Text
-    , vhosts :: [Text]
     , uid :: Integer
     }
 
@@ -403,8 +402,6 @@ instance A.FromJSON EnvInfo where
         hostname <- hostenvObj .: "hostname"
         node <- o .: "node"
         migrateBackups <- o .:? "migrations" .!= []
-        vhostsObj <- o .:? "virtualHosts" .!= (KM.empty :: KM.KeyMap A.Value)
-        let vhosts = map K.toText (KM.keys vhostsObj)
         uid <- o .: "uid"
         pure $
             EnvInfo
@@ -413,7 +410,6 @@ instance A.FromJSON EnvInfo where
                 , migrateBackups = migrateBackups
                 , runtimeDir = runtimeDir
                 , hostname = hostname
-                , vhosts = vhosts
                 , uid = uid
                 }
 
