@@ -1371,6 +1371,17 @@ planNodeRemoteBuild :: KM.KeyMap A.Value -> KM.KeyMap A.Value
 planNodeRemoteBuild plan =
     fromMaybe KM.empty (lookupObj (K.fromString "nodeRemoteBuild") plan)
 
+planSystemTargetNodes :: KM.KeyMap A.Value -> Maybe Text -> [Text]
+planSystemTargetNodes plan mNode =
+    let nodeNames =
+            maybe
+                []
+                (map K.toText . KM.keys)
+                (lookupObj (K.fromString "nodes") plan)
+     in case mNode of
+            Nothing -> nodeNames
+            Just nodeName -> filter (== nodeName) nodeNames
+
 nodeUsesRemoteBuild :: KM.KeyMap A.Value -> Text -> Bool
 nodeUsesRemoteBuild remoteBuildMap nodeName =
     fromMaybe False (lookupBool (K.fromText nodeName) remoteBuildMap)
@@ -1707,7 +1718,10 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             when ignoreMigrationErrors $
                 printProviderLine "hostenv-provider: warning: migration errors will be ignored; deployments may proceed with stale data"
 
-            let targetNodes = uniqueNodeNames envInfosFiltered
+            -- System profiles come from plan.nodes, not plan.environments.
+            -- A node may intentionally have no current environments while it
+            -- receives one final system deployment to retire lingering users.
+            let systemTargetNodes = planSystemTargetNodes plan mNode
             let deployArgs useCheckSigs useDryActivate deployArgM =
                     let remoteBuildArgs =
                             if forceRemoteBuild then ["--remote-build"] else []
@@ -1731,7 +1745,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                 printProviderLine "hostenv-provider: --dry-run enabled; skipping migrations, signing, and deploy preflight checks"
                 let dryArgs = deployArgs False True
                 systemDeployRes <-
-                    forM targetNodes $ \nodeName -> do
+                    forM systemTargetNodes $ \nodeName -> do
                         let target = nodeName <> ".system"
                         let args = dryArgs (Just target)
                         printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
@@ -1764,7 +1778,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             let remoteBuildMap = planNodeRemoteBuild plan
             let usesRemoteBuild nodeName = forceRemoteBuild || nodeUsesRemoteBuild remoteBuildMap nodeName
             let requiresLocalPush nodeName = not (usesRemoteBuild nodeName)
-            let nodesRequiringLocalPush = filter requiresLocalPush targetNodes
+            let nodesRequiringLocalPush = filter requiresLocalPush systemTargetNodes
             let trustedPublicKeys = planTrustedPublicKeys plan
             let localPushSet = S.fromList nodesRequiringLocalPush
 
@@ -1795,12 +1809,12 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
 
             when forceRemoteBuild $
                 printProviderLine "hostenv-provider: --remote-build enabled; skipping local signing trust checks for all nodes"
-            forM_ targetNodes $ \nodeName ->
+            forM_ systemTargetNodes $ \nodeName ->
                 when (not forceRemoteBuild && not (S.member nodeName localPushSet)) $
                     printProviderLine ("hostenv-provider: node " <> nodeName <> " uses remoteBuild=true; skipping local signing trust check")
 
             preflightFailures <- fmap catMaybes $
-                forM targetNodes $ \nodeName -> do
+                forM systemTargetNodes $ \nodeName -> do
                     let requiresTrustedKey = S.member nodeName localPushSet
                     runNodeDeployPreflight
                         resolveNodeConnection
@@ -1900,7 +1914,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             -- cowardly refuse to deploy environments where the system deploy
             -- failed to complete.
             systemDeployRes <-
-                forM targetNodes $ \nodeName -> do
+                forM systemTargetNodes $ \nodeName -> do
                     let target = nodeName <> ".system"
                     let targetInstallable = deployProfilePathInstallable nodeName "system"
                     signRes <-

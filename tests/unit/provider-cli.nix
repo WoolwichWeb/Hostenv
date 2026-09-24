@@ -41,6 +41,67 @@ in
     done
     echo ok > "$out"
   '';
+
+  provider-cli-cleanup-only-system-targets = pkgs.runCommand "provider-cli-cleanup-only-system-targets" { } ''
+    set -euo pipefail
+
+    work="$TMPDIR/provider"
+    fakeBin="$TMPDIR/bin"
+    log="$TMPDIR/nix.log"
+    mkdir -p "$work/generated" "$fakeBin"
+
+    cat > "$work/generated/plan.json" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "nodes": {
+        "old-node": {},
+        "new-node": {}
+      },
+      "environments": {
+        "acme-prod": {
+          "hostenv": {
+            "userName": "acme-prod",
+            "runtimeDir": "/run/hostenv/user/acme-prod"
+          },
+          "node": "new-node",
+          "virtualHosts": {}
+        }
+      }
+    }
+    EOF
+
+    cat > "$fakeBin/nix" <<'EOF'
+    #!${pkgs.runtimeShell}
+    printf '%s\n' "$*" >> "$NIX_LOG"
+    exit 0
+    EOF
+    chmod +x "$fakeBin/nix"
+
+    (
+      cd "$work"
+
+      : > "$log"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" \
+        ${cliPkg}/bin/hostenv-provider deploy --dry-run
+
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$log"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."acme-prod"' "$log"
+      test "$(wc -l < "$log")" -eq 3
+
+      : > "$log"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" \
+        ${cliPkg}/bin/hostenv-provider deploy --dry-run --node old-node
+
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'new-node' "$log"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod' "$log"
+      test "$(wc -l < "$log")" -eq 1
+    )
+
+    echo ok > "$out"
+  '';
   provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
