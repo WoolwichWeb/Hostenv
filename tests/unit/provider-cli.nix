@@ -343,6 +343,17 @@ in
       : > "$sshLog"
       : > "$eventLog"
       PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification --skip-migrations acme-prod
+
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
+
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
 
       dest_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
