@@ -13,9 +13,8 @@ state, and flake used to deploy them.
 6. Run `nix run .#hostenv-provider -- plan`.
 7. Run `nix run .#hostenv-provider -- dns-gate`, then `nix run .#hostenv-provider -- deploy`.
 
-Commit `generated/state.json`. Hostenv uses it only for durable environment
-identity: stable UIDs, the last observed node placement, and hostname
-reservations.
+Commit `generated/state.json`. Hostenv uses it only for durable reservations:
+stable environment UIDs and hostname ownership. Deployment leaves it unchanged.
 
 ## Runtime secrets
 

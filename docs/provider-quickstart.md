@@ -76,8 +76,8 @@ nix run .#hostenv-provider -- plan
 This writes the deployment files under `generated/`.
 
 Commit `generated/state.json` to the provider repository. Hostenv keeps only
-durable environment identity there: stable UIDs, the last node placement
-observed during deployment, and hostname reservations.
+durable reservations there: stable environment UIDs and hostname ownership.
+Deployment does not modify this file.
 
 ## 6. Check DNS
 

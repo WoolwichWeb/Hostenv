@@ -171,20 +171,22 @@ in
   ) "default paths should read the provider's state and lock, never its existing plan.json";
 
   provider-plan-state-retention = asserts.assertTrue "provider-plan-state-retention" (
-    state.retired == persistedState.retired
+    state.retired == removeAttrs persistedState.retired [ "node" ]
     && state.${mainUser}.retainedField == "keep this field"
-    && state.${mainUser}.node == "old-node"
     && state.${mainUser}.uid == 2501
     && state.${testingUser}.uid > 4501
+    && !(state.${mainUser} ? node)
+    && !(state.retired ? node)
+    && !(state.retiredOnActiveNode ? node)
     && !(state.${testingUser} ? node)
-  ) "planning must retain durable user identity and the last observed node placement";
+  ) "planning must retain durable reservations while removing historical node placement";
 
-  provider-plan-state-node-history = asserts.assertTrue "provider-plan-state-node-history" (
-    plan.environments.${mainUser}.previousNode == "old-node"
-    && plan.environments.${testingUser}.previousNode == null
+  provider-plan-state-has-no-placement-history = asserts.assertTrue "provider-plan-state-has-no-placement-history" (
+    !(plan.environments.${mainUser} ? previousNode)
+    && !(plan.environments.${testingUser} ? previousNode)
     && plan.nodeConnections ? old-node
-    && plan.nodeConnections ? retired-node
-  ) "previous and retired nodes must remain available to migration routing";
+    && !(plan.nodeConnections ? retired-node)
+  ) "migration routing must come from configured nodes rather than placement history in state";
 
   provider-plan-all-configured-nodes = asserts.assertTrue "provider-plan-all-configured-nodes" (
     plan.nodes ? node-a
@@ -196,12 +198,11 @@ in
     && !(plan.nodes ? retired-node)
   ) "every configured provider node must remain deployable even when it has no current environments";
 
-  provider-plan-move-survives-replan = asserts.assertTrue "provider-plan-move-survives-replan" (
+  provider-plan-state-is-stable-across-replan = asserts.assertTrue "provider-plan-state-is-stable-across-replan" (
     replannedPlan.nodes ? old-node
-    && replannedPlan.environments.${mainUser}.previousNode == "old-node"
-    && replannedState.${mainUser}.node == "old-node"
-    && !(replannedState.${testingUser} ? node)
-  ) "re-running plan before deployment must preserve the last observed placement and pending cleanup";
+    && !(replannedPlan.environments.${mainUser} ? previousNode)
+    && replannedState == state
+  ) "re-running plan must preserve durable reservations without introducing deployment history";
 
   provider-plan-optional-state = asserts.assertTrue "provider-plan-optional-state" (
     lib.importJSON missingState.plan == noStatePlan

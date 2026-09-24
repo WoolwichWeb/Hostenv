@@ -76,13 +76,11 @@ in
       "acme-prod": {
         "userName": "acme-prod",
         "uid": 2000,
-        "node": "old-node",
         "virtualHosts": []
       },
       "retired-prod": {
         "userName": "retired-prod",
         "uid": 2001,
-        "node": "retired-node",
         "virtualHosts": []
       }
     }
@@ -114,12 +112,11 @@ in
       test "$(wc -l < "$log")" -eq 4
 
       : > "$log"
-      if PATH="$fakeBin:$PATH" NIX_LOG="$log" \
-        ${cliPkg}/bin/hostenv-provider deploy --dry-run --node old-node; then
-        echo "node-filtered deploy retired a moved source user"
-        exit 1
-      fi
-      test ! -s "$log"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" \
+        ${cliPkg}/bin/hostenv-provider deploy --dry-run --node old-node
+
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
+      test "$(wc -l < "$log")" -eq 1
 
       : > "$log"
       PATH="$fakeBin:$PATH" NIX_LOG="$log" \

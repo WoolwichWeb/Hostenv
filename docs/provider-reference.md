@@ -102,10 +102,10 @@ in each node's own `nodes/<node>/configuration.nix`.
 ## State
 
 Keep `generated/state.json` in version control. Hostenv deliberately keeps
-this state small: stable environment UIDs, the last node placement observed
-during deployment, and hostname reservations. Planning does not mark a move as
-complete; deployment reconciles the recorded node from the accounts actually
-present on the affected nodes.
+this state small: stable environment UIDs and hostname reservations. Node
+placement is not stored there; deployment observes Hostenv users on the
+provider nodes when deciding migrations and cleanup, and does not modify
+`state.json`.
 
 Do not reset it to `{}` as a troubleshooting step. Removing existing state can
 make Hostenv treat established environments as new ones.
