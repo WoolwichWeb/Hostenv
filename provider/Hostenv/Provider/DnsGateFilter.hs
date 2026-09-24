@@ -15,7 +15,7 @@ import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import Hostenv.Provider.PrevNodeDiscovery qualified as PrevNode
+import Hostenv.Provider.Hostname qualified as Hostname
 
 data DnsGateItem = DnsGateItem
     { dgiEnvName :: Text
@@ -48,7 +48,7 @@ collectDnsGateItems hostenvHostname envs =
             A.Object envObj ->
                 let envName = K.toText kEnv
                     nodeName = lookupText nodeKey envObj
-                    expectedHostFor vh = maybe vh (`PrevNode.canonicalHostInDomain` hostenvHostname) nodeName
+                    expectedHostFor vh = maybe vh (`Hostname.canonicalHostInDomain` hostenvHostname) nodeName
                     vhosts = fromMaybe KM.empty (lookupObj (K.fromString "virtualHosts") envObj)
                  in map
                         (\(vhKey, _) ->
