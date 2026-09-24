@@ -53,12 +53,14 @@ already been deployed; planning a brand-new environment creates its reservation
 before the first deployment. Hostenv therefore decides placement from live
 username+UID matches on inventory nodes, not from reservation age or history.
 
-As an additional guard, when a migration-enabled environment has no live source,
-Hostenv checks its generated Hostenv hostname. If that hostname explicitly
-CNAMEs to `<node>.<hostenvHostname>` and that node is no longer in
+As an additional best-effort guard, when a migration-enabled environment has
+no live source, Hostenv checks its generated Hostenv hostname. If that hostname
+still CNAMEs to `<node>.<hostenvHostname>` and that node is no longer in
 `provider.nodeSystems`, deployment stops and asks you to restore the node to
-inventory. This is a safety signal, not a replacement for the inventory rule:
-do not remove a node while it still owns Hostenv environments.
+inventory. DNS may already have changed by deployment time, so this check
+cannot prove that an absent environment is new. The inventory rule remains the
+hard requirement: do not remove a node while it still owns Hostenv
+environments.
 
 Source retirement is a finalization step: Hostenv first migrates data, deploys
 the destination system, and successfully activates the destination
