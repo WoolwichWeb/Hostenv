@@ -1445,93 +1445,110 @@ readNodeUsers deployUser nodeConnection nodeName = do
 validateNodeInventoryTransition :: Text -> Text -> BL.ByteString -> IO ()
 validateNodeInventoryTransition planPath statePath newPlanRaw = do
     previousPlanExists <- Dir.doesFileExist (T.unpack planPath)
-    when previousPlanExists $ do
-        previousRaw <- BL.readFile (T.unpack planPath)
-        previousPlan <-
-            case A.eitherDecode' previousRaw of
-                Left err ->
-                    error ("hostenv-provider: cannot validate node inventory transition because " <> T.unpack planPath <> " is invalid JSON: " <> err)
-                Right value -> pure (value :: KM.KeyMap A.Value)
-        newPlan <-
-            case A.eitherDecode' newPlanRaw of
-                Left err ->
-                    error ("hostenv-provider: generated plan is invalid JSON: " <> err)
-                Right value -> pure (value :: KM.KeyMap A.Value)
-
-        let removedNodes =
-                planSystemTargetNodes previousPlan Nothing
-                    \\ planSystemTargetNodes newPlan Nothing
-        unless (null removedNodes) $ do
+    if not previousPlanExists
+        then do
             stateExists <- Dir.doesFileExist (T.unpack statePath)
-            unless stateExists $
-                error
-                    ( "hostenv-provider: cannot remove provider node(s) "
-                        <> T.unpack (T.intercalate ", " removedNodes)
-                        <> " because "
-                        <> T.unpack statePath
-                        <> " is missing"
-                    )
-            stateRaw <- BL.readFile (T.unpack statePath)
-            state <-
-                case A.eitherDecode' stateRaw of
-                    Left err ->
-                        error ("hostenv-provider: cannot validate removed nodes because " <> T.unpack statePath <> " is invalid JSON: " <> err)
-                    Right value -> pure (value :: KM.KeyMap A.Value)
-
-            let deployUser = planDeployUser previousPlan
-            let oldHostname =
-                    fromMaybe
-                        (error ("hostenv-provider: hostenvHostname missing from previous " <> T.unpack planPath))
-                        (lookupText (K.fromString "hostenvHostname") previousPlan)
-            let resolveOldConnection = nodeConnectionFor previousPlan oldHostname
-
-            forM_ removedNodes $ \nodeName -> do
-                unless (planNodeStatus previousPlan nodeName == "retiring") $
-                    error
-                        ( "hostenv-provider: refusing to remove provider node "
-                            <> T.unpack nodeName
-                            <> " directly from inventory. Mark provider.nodeStatus."
-                            <> T.unpack nodeName
-                            <> " = \"retiring\", move/retire its environments, deploy the cleanup, then run plan again."
-                        )
-
-                observedResult <- readNodeUsers deployUser resolveOldConnection nodeName
-                observedUsers <-
-                    case observedResult of
+            when stateExists $ do
+                stateRaw <- BL.readFile (T.unpack statePath)
+                state <-
+                    case A.eitherDecode' stateRaw of
                         Left err ->
-                            error
-                                ( "hostenv-provider: refusing to remove retiring node "
-                                    <> T.unpack nodeName
-                                    <> " because Hostenv could not verify that it is clean: "
-                                    <> T.unpack err
-                                )
-                        Right (_, users) -> pure users
-
-                let managedUsers =
-                        EnvironmentState.managedUsersToRetire
-                            nodeName
-                            M.empty
-                            observedUsers
-                            state
-                let uidMismatches =
-                        EnvironmentState.managedUserUidMismatches
-                            observedUsers
-                            state
-                unless (null managedUsers && null uidMismatches) $
+                            error ("hostenv-provider: cannot validate provider inventory because " <> T.unpack statePath <> " is invalid JSON: " <> err)
+                        Right value -> pure (value :: KM.KeyMap A.Value)
+                let reservations = KM.delete (K.fromString "_description") state
+                unless (null (KM.toList reservations)) $
                     error
-                        ( "hostenv-provider: refusing to remove retiring node "
-                            <> T.unpack nodeName
-                            <> " from inventory because it still contains Hostenv-managed environment account(s): "
-                            <> T.unpack
-                                ( T.intercalate
-                                    ", "
-                                    ( map fst managedUsers
-                                        ++ [ userName <> " (UID drift)" | (userName, _, _) <- uidMismatches ]
-                                    )
-                                )
-                            <> ". Deploy migrations/retirements until the node is clean, then run plan again."
+                        ( "hostenv-provider: "
+                            <> T.unpack planPath
+                            <> " is missing for an existing provider. Restore the previous generated plan from version control before planning inventory changes."
                         )
-
+        else do
+                previousRaw <- BL.readFile (T.unpack planPath)
+            previousPlan <-
+                case A.eitherDecode' previousRaw of
+                    Left err ->
+                        error ("hostenv-provider: cannot validate node inventory transition because " <> T.unpack planPath <> " is invalid JSON: " <> err)
+                    Right value -> pure (value :: KM.KeyMap A.Value)
+            newPlan <-
+                case A.eitherDecode' newPlanRaw of
+                    Left err ->
+                        error ("hostenv-provider: generated plan is invalid JSON: " <> err)
+                    Right value -> pure (value :: KM.KeyMap A.Value)
+    
+            let removedNodes =
+                    planSystemTargetNodes previousPlan Nothing
+                        \\ planSystemTargetNodes newPlan Nothing
+            unless (null removedNodes) $ do
+                stateExists <- Dir.doesFileExist (T.unpack statePath)
+                unless stateExists $
+                    error
+                        ( "hostenv-provider: cannot remove provider node(s) "
+                            <> T.unpack (T.intercalate ", " removedNodes)
+                            <> " because "
+                            <> T.unpack statePath
+                            <> " is missing"
+                        )
+                stateRaw <- BL.readFile (T.unpack statePath)
+                state <-
+                    case A.eitherDecode' stateRaw of
+                        Left err ->
+                            error ("hostenv-provider: cannot validate removed nodes because " <> T.unpack statePath <> " is invalid JSON: " <> err)
+                        Right value -> pure (value :: KM.KeyMap A.Value)
+    
+                let deployUser = planDeployUser previousPlan
+                let oldHostname =
+                        fromMaybe
+                            (error ("hostenv-provider: hostenvHostname missing from previous " <> T.unpack planPath))
+                            (lookupText (K.fromString "hostenvHostname") previousPlan)
+                let resolveOldConnection = nodeConnectionFor previousPlan oldHostname
+    
+                forM_ removedNodes $ \nodeName -> do
+                    unless (planNodeStatus previousPlan nodeName == "retiring") $
+                        error
+                            ( "hostenv-provider: refusing to remove provider node "
+                                <> T.unpack nodeName
+                                <> " directly from inventory. Mark provider.nodeStatus."
+                                <> T.unpack nodeName
+                                <> " = \"retiring\", move/retire its environments, deploy the cleanup, then run plan again."
+                            )
+    
+                    observedResult <- readNodeUsers deployUser resolveOldConnection nodeName
+                    observedUsers <-
+                        case observedResult of
+                            Left err ->
+                                error
+                                    ( "hostenv-provider: refusing to remove retiring node "
+                                        <> T.unpack nodeName
+                                        <> " because Hostenv could not verify that it is clean: "
+                                        <> T.unpack err
+                                    )
+                            Right (_, users) -> pure users
+    
+                    let managedUsers =
+                            EnvironmentState.managedUsersToRetire
+                                nodeName
+                                M.empty
+                                observedUsers
+                                state
+                    let uidMismatches =
+                            EnvironmentState.managedUserUidMismatches
+                                observedUsers
+                                state
+                    unless (null managedUsers && null uidMismatches) $
+                        error
+                            ( "hostenv-provider: refusing to remove retiring node "
+                                <> T.unpack nodeName
+                                <> " from inventory because it still contains Hostenv-managed environment account(s): "
+                                <> T.unpack
+                                    ( T.intercalate
+                                        ", "
+                                        ( map fst managedUsers
+                                            ++ [ userName <> " (UID drift)" | (userName, _, _) <- uidMismatches ]
+                                        )
+                                    )
+                                <> ". Deploy migrations/retirements until the node is clean, then run plan again."
+                            )
+    
 prepareManagedUserCleanupOnNode ::
     Text ->
     (Text -> NodeConnection) ->
