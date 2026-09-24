@@ -2191,7 +2191,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                     | (nodeName, movedUsers, protected, blocked) <- pendingNodeDetails
                     , null blocked
                     , not (null movedUsers)
-                    , length protected == length movedUsers
+                    , not (null protected)
                     ]
             let unsafePending =
                     [ (nodeName, blocked)
