@@ -11,6 +11,7 @@ where
 import Data.Aeson qualified as A
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
+import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
 import Data.Maybe (fromMaybe, mapMaybe)
@@ -28,7 +29,7 @@ managedUsersToRetire ::
     KM.KeyMap A.Value ->
     [(Text, Integer)]
 managedUsersToRetire nodeName desiredNodes observedUsers =
-    mapMaybe retireCandidate . KM.toList
+    sortOn fst . mapMaybe retireCandidate . KM.toList
   where
     retireCandidate (key, A.Object entry) = do
         uid <- lookupInteger (K.fromString "uid") entry

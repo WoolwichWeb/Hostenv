@@ -15,7 +15,7 @@ import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import Hostenv.Provider.Hostname qualified as Hostname
+import Data.Text qualified as T
 
 data DnsGateItem = DnsGateItem
     { dgiEnvName :: Text
@@ -48,7 +48,7 @@ collectDnsGateItems hostenvHostname envs =
             A.Object envObj ->
                 let envName = K.toText kEnv
                     nodeName = lookupText nodeKey envObj
-                    expectedHostFor vh = maybe vh (`Hostname.canonicalHostInDomain` hostenvHostname) nodeName
+                    expectedHostFor vh = maybe vh (`canonicalHostInDomain` hostenvHostname) nodeName
                     vhosts = fromMaybe KM.empty (lookupObj (K.fromString "virtualHosts") envObj)
                  in map
                         (\(vhKey, _) ->
@@ -101,3 +101,19 @@ disableAcmeOnNode (Just nodeName) vhostName root =
         pNodeSSL = ["nodes", nodeName, "services", "nginx", "virtualHosts", vhostName, "forceSSL"]
      in setBoolAt pNodeSSL False $
             setBoolAt pNodeEnable False root
+
+canonicalHostInDomain :: Text -> Text -> Text
+canonicalHostInDomain label hostenvHostname =
+    let normalize = T.toLower . T.dropWhileEnd (== '.') . T.strip
+        domain = normalize hostenvHostname
+        labelNorm = normalize label
+        suffix = "." <> domain
+     in if T.null labelNorm
+            then labelNorm
+            else
+                if T.null domain
+                    then labelNorm
+                    else
+                        if T.isSuffixOf suffix labelNorm
+                            then labelNorm
+                            else labelNorm <> suffix
