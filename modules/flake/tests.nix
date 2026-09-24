@@ -39,10 +39,6 @@ in
               env = envs.drupal6;
               hostenvNixosModule = cfgTop.flake.modules.nixos.hostenv-top-level;
             };
-            retired-linger-user-vm-test = import ../../tests/integration/retired-linger-user-vm.nix {
-              inherit pkgs;
-              hostenvUserLifecycleModule = cfgTop.flake.modules.nixos.hostenv-user-lifecycle;
-            };
           };
         }
       );

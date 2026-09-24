@@ -3,6 +3,8 @@
 
 module Hostenv.Provider.EnvironmentState
     ( NodeUsers
+    , managedUsersToRetire
+    , movedUsersOnNode
     , parsePasswdUsers
     , reconcileObservedNodesInState
     )
@@ -21,6 +23,41 @@ import Data.Text qualified as T
 import Data.Text.Read qualified as TR
 
 type NodeUsers = Map Text (Map Text Integer)
+
+managedUsersToRetire ::
+    Text ->
+    Map Text Text ->
+    Map Text Integer ->
+    KM.KeyMap A.Value ->
+    [(Text, Integer)]
+managedUsersToRetire nodeName desiredNodes observedUsers =
+    mapMaybe retireCandidate . KM.toList
+  where
+    retireCandidate (key, A.Object entry) = do
+        uid <- lookupInteger (K.fromString "uid") entry
+        let userName = fromMaybe (K.toText key) (lookupText (K.fromString "userName") entry)
+        observedUid <- M.lookup userName observedUsers
+        if observedUid == uid && M.lookup userName desiredNodes /= Just nodeName
+            then Just (userName, uid)
+            else Nothing
+    retireCandidate _ = Nothing
+
+movedUsersOnNode ::
+    Text ->
+    Map Text Text ->
+    KM.KeyMap A.Value ->
+    [Text]
+movedUsersOnNode nodeName desiredNodes =
+    mapMaybe movedCandidate . KM.toList
+  where
+    movedCandidate (key, A.Object entry) = do
+        stateNode <- lookupText (K.fromString "node") entry
+        let userName = fromMaybe (K.toText key) (lookupText (K.fromString "userName") entry)
+        desiredNode <- M.lookup userName desiredNodes
+        if stateNode == nodeName && desiredNode /= nodeName
+            then Just userName
+            else Nothing
+    movedCandidate _ = Nothing
 
 parsePasswdUsers :: Text -> Map Text Integer
 parsePasswdUsers =

@@ -54,21 +54,9 @@ in
     {
       "hostenvHostname": "hosting.test",
       "nodes": {
-        "old-node": {
-          "provider": {
-            "retiredUsers": {
-              "acme-prod": { "uid": 2000 }
-            }
-          }
-        },
+        "old-node": {},
         "new-node": {},
-        "retired-node": {
-          "provider": {
-            "retiredUsers": {
-              "retired-prod": { "uid": 2001 }
-            }
-          }
-        }
+        "retired-node": {}
       },
       "environments": {
         "acme-prod": {
@@ -79,6 +67,23 @@ in
           "node": "new-node",
           "virtualHosts": {}
         }
+      }
+    }
+    EOF
+
+    cat > "$work/generated/state.json" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "node": "old-node",
+        "virtualHosts": []
+      },
+      "retired-prod": {
+        "userName": "retired-prod",
+        "uid": 2001,
+        "node": "retired-node",
+        "virtualHosts": []
       }
     }
     EOF

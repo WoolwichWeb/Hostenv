@@ -3,7 +3,6 @@ let
   inherit (lib) mkOption types;
   providerNixosModules = [
     config.flake.modules.nixos.provider-common
-    config.flake.modules.nixos.hostenv-user-lifecycle
     config.flake.modules.nixos.hostenv-top-level
     config.flake.modules.nixos.nginx-tuning
     config.flake.modules.nixos.monitoring

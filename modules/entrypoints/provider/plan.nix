@@ -323,41 +323,7 @@ let
         }
       ) validatedEnvironments;
 
-      # User accounts that still need processing on a node. The node recorded in
-      # state is deliberately the last observed placement, not the desired one,
-      # so repeated planning cannot erase outstanding cleanup.
-      retiredUsersForNode =
-        let
-          currentEnvironmentsByUser = builtins.listToAttrs (
-            map (env: {
-              name = env.hostenv.userName;
-              value = env;
-            }) environmentsWithUid
-          );
-
-          retiredEnvs = lib.filterAttrs (
-            name: previous:
-            let
-              current = currentEnvironmentsByUser.${name} or null;
-            in
-            builtins.isInt (previous.uid or null)
-            && builtins.isString (previous.node or null)
-            && previous.node != ""
-            && (current == null || current.node != previous.node)
-          ) state;
-        in
-        nodeName:
-        lib.mapAttrs (_: env: { uid = env.uid; }) (
-          lib.filterAttrs (_: env: env.node == nodeName) retiredEnvs
-        );
-
-      # State is retained indefinitely, so do not resurrect nodes that are no
-      # longer part of the provider. A configured node with no current
-      # environments still needs a deployment if it has users to retire.
-      retiredCleanupNodes = lib.filter (nodeName: retiredUsersForNode nodeName != { }) (
-        builtins.attrNames nodeSystems
-      );
-
+      nodeConnections =
       nodeConnections =
         let
           # Remember old nodes too: migrations may still need to contact them.
@@ -511,19 +477,19 @@ let
             nixSigning.trustedPublicKeys = nixSigning.trustedPublicKeys or [ ];
             environments = { };
 
-            # Seed deployment nodes attrset.
-            # Seed entries are nodes having only retired user accounts,
-            # a corner case where all environments previously on the node
-            # have been retired or moved to another node.
-            nodes = lib.genAttrs retiredCleanupNodes (nodeName: {
+            # Every configured provider node is a deployable system target.
+            # This lets deploy reconcile stale Hostenv accounts from the node's
+            # actual passwd database even when the node has no current
+            # environments.
+            nodes = lib.genAttrs (builtins.attrNames nodeSystems) (_nodeName: {
               provider = {
                 inherit deployPublicKeys deployUser;
                 nixSigning.trustedPublicKeys = nixSigning.trustedPublicKeys or [ ];
-                retiredUsers = retiredUsersForNode nodeName;
               };
 
               # providerNixosSystem derives per-environment packages and
-              # secrets from this attrset. Cleanup-only nodes have neither.
+              # secrets from this attrset. Nodes without environments have
+              # neither.
               users.users = { };
             });
           };
@@ -565,7 +531,6 @@ let
                       provider = {
                         inherit deployPublicKeys deployUser;
                         nixSigning.trustedPublicKeys = nixSigning.trustedPublicKeys or [ ];
-                        retiredUsers = retiredUsersForNode nodeName;
                       };
                       users.groups.${env.hostenv.userName}.gid = env.uid;
                       users.users.${env.hostenv.userName} = {

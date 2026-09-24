@@ -1400,19 +1400,7 @@ planSystemTargetNodes plan mNode =
             Nothing -> nodeNames
             Just nodeName -> filter (== nodeName) nodeNames
 
-planRetiredUserNamesForNode :: KM.KeyMap A.Value -> Text -> [Text]
-planRetiredUserNamesForNode plan nodeName =
-    case lookupObj (K.fromString "nodes") plan >>= KM.lookup (K.fromText nodeName) of
-        Just (A.Object nodeObj) ->
-            case lookupObj (K.fromString "provider") nodeObj of
-                Just providerObj ->
-                    maybe
-                        []
-                        (map K.toText . KM.keys)
-                        (lookupObj (K.fromString "retiredUsers") providerObj)
-                Nothing -> []
-        _ -> []
-
+nodeUsesRemoteBuild :: KM.KeyMap A.Value -> Text -> Bool
 nodeUsesRemoteBuild :: KM.KeyMap A.Value -> Text -> Bool
 nodeUsesRemoteBuild remoteBuildMap nodeName =
     fromMaybe False (lookupBool (K.fromText nodeName) remoteBuildMap)
@@ -1465,6 +1453,88 @@ environmentUserPresentOnNode deployUser nodeConnection nodeName envInfo = do
                                 Just expectedUid -> M.lookup envInfo.userName users == Just expectedUid
                                 Nothing -> M.member envInfo.userName users
                      in pure (Right matches)
+
+cleanupManagedUsersOnNode ::
+    Text ->
+    (Text -> NodeConnection) ->
+    M.Map Text Text ->
+    KM.KeyMap A.Value ->
+    Text ->
+    IO (Either Text (Text, M.Map Text Integer))
+cleanupManagedUsersOnNode deployUser nodeConnection desiredNodes state nodeName = do
+    let target = mkSshTarget deployUser (nodeConnection nodeName)
+    (readCode, passwdOut, readErr) <- runRemoteOutput target ["getent", "passwd"]
+    case readCode of
+        ExitFailure exitCode ->
+            pure
+                ( Left
+                    ( "failed to read passwd database on "
+                        <> nodeName
+                        <> " (exit "
+                        <> T.pack (show exitCode)
+                        <> "): "
+                        <> T.strip readErr
+                    )
+                )
+        ExitSuccess -> do
+            let observedUsers = EnvironmentState.parsePasswdUsers passwdOut
+            let retiredUsers =
+                    EnvironmentState.managedUsersToRetire
+                        nodeName
+                        desiredNodes
+                        observedUsers
+                        state
+            cleanupResults <-
+                forM retiredUsers $ \(userName, uid) -> do
+                    let lingerPath = "/var/lib/systemd/linger/" <> userName
+                    let unit = "user@" <> T.pack (show uid) <> ".service"
+                    let cleanupCmd =
+                            "set -euo pipefail; "
+                                <> "if getent passwd "
+                                <> shellEscape userName
+                                <> " >/dev/null; then "
+                                <> "sudo loginctl disable-linger "
+                                <> shellEscape userName
+                                <> " || sudo rm -f "
+                                <> shellEscape lingerPath
+                                <> "; else sudo rm -f "
+                                <> shellEscape lingerPath
+                                <> "; fi; "
+                                <> "if systemctl is-active --quiet "
+                                <> shellEscape unit
+                                <> "; then sudo systemctl stop "
+                                <> shellEscape unit
+                                <> "; fi"
+                    printProviderLine ("hostenv-provider: retiring Hostenv user " <> userName <> " from " <> nodeName)
+                    code <- runRemote target ["bash", "-lc", cleanupCmd]
+                    pure (userName, code)
+            let failures = [(name, code) | (name, code) <- cleanupResults, code /= ExitSuccess]
+            if null failures
+                then do
+                    (verifyCode, verifyOut, verifyErr) <- runRemoteOutput target ["getent", "passwd"]
+                    case verifyCode of
+                        ExitSuccess ->
+                            pure (Right (nodeName, EnvironmentState.parsePasswdUsers verifyOut))
+                        ExitFailure exitCode ->
+                            pure
+                                ( Left
+                                    ( "failed to re-read passwd database on "
+                                        <> nodeName
+                                        <> " after cleanup (exit "
+                                        <> T.pack (show exitCode)
+                                        <> "): "
+                                        <> T.strip verifyErr
+                                    )
+                                )
+                else
+                    pure
+                        ( Left
+                            ( "failed to retire Hostenv user(s) on "
+                                <> nodeName
+                                <> ": "
+                                <> T.intercalate ", " (map fst failures)
+                            )
+                        )
 
 readObservedNodeUsers :: Text -> (Text -> NodeConnection) -> Text -> IO (Maybe (Text, M.Map Text Integer))
 readObservedNodeUsers deployUser nodeConnection nodeName = do
@@ -1863,6 +1933,10 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             -- A node may intentionally have no current environments while it
             -- receives one final system deployment to retire lingering users.
             let targetNodes = planSystemTargetNodes plan mNode
+            stateRaw <- BL.readFile (T.unpack statePath)
+            state <- case A.eitherDecode' stateRaw of
+                Left err -> error ("failed to parse " <> T.unpack statePath <> ": " <> err)
+                Right value -> pure (value :: KM.KeyMap A.Value)
 
             -- A node-filtered deployment must not remove the source account of
             -- an environment that is moving elsewhere: the destination would
@@ -1872,13 +1946,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                 Nothing -> pure ()
                 Just nodeName -> do
                     let movedCleanupUsers =
-                            filter
-                                (\userName ->
-                                    case M.lookup userName desiredNodesByUser of
-                                        Just desiredNode -> desiredNode /= nodeName
-                                        Nothing -> False
-                                )
-                                (planRetiredUserNamesForNode plan nodeName)
+                            EnvironmentState.movedUsersOnNode nodeName desiredNodesByUser state
                     unless (null movedCleanupUsers) $ do
                         printProviderErrLine
                             ( "hostenv-provider: error: --node "
@@ -2067,6 +2135,19 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                 printProviderLine ("hostenv-provider: warning: ignored migration failures for " <> T.intercalate ", " failures)
                         else
                             forM_ migrations runMigration
+
+            cleanupResults <-
+                forM targetNodes $
+                    cleanupManagedUsersOnNode
+                        deployUser
+                        resolveNodeConnection
+                        desiredNodesByUser
+                        state
+            let cleanupFailures = [err | Left err <- cleanupResults]
+            unless (null cleanupFailures) $ do
+                forM_ cleanupFailures $
+                    printProviderErrLine . ("hostenv-provider: error: " <>)
+                Sh.exitWith (ExitFailure 1)
 
             -- Perform deployment
             --

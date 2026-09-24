@@ -6,7 +6,7 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.Map.Strict qualified as M
 import Data.Text (Text)
 import Data.Text.IO qualified as TIO
-import Hostenv.Provider.EnvironmentState (parsePasswdUsers, reconcileObservedNodesInState)
+import Hostenv.Provider.EnvironmentState (managedUsersToRetire, movedUsersOnNode, parsePasswdUsers, reconcileObservedNodesInState)
 import System.Exit (exitFailure)
 
 assertEqual :: (Eq a, Show a) => Text -> a -> a -> IO ()
@@ -72,6 +72,20 @@ main = do
     let destinationOnly = M.fromList [("new-node", M.fromList [("partial", 2002)])]
     let conservative = reconcileObservedNodesInState desired destinationOnly state
     assertEqual "unobserved old node keeps prior placement" (Just "old-node") (nodeFor "partial" conservative)
+
+    assertEqual
+        "managed users to retire"
+        [("moved", 2001), ("retired", 2003)]
+        (managedUsersToRetire
+            "old-node"
+            desired
+            (M.fromList [("moved", 2001), ("partial", 2002), ("retired", 2003), ("wrong-uid", 9999)])
+            state)
+
+    assertEqual
+        "moved users on node"
+        ["moved", "partial"]
+        (movedUsersOnNode "old-node" desired state)
 
     assertEqual
         "passwd parser"

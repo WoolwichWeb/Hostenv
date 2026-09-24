@@ -198,20 +198,19 @@ in
     && plan.nodeConnections ? retired-node
   ) "previous and retired nodes must remain available to migration routing";
 
-  provider-plan-retired-users = asserts.assertTrue "provider-plan-retired-users" (
-    plan.nodes.node-a.provider.retiredUsers.retiredOnActiveNode.uid == 4502
-    && !(plan.nodes.node-a.provider.retiredUsers ? retired)
-    && !(plan.nodes.node-a.provider.retiredUsers ? ${mainUser})
-    && plan.nodes.old-node.provider.retiredUsers.${mainUser}.uid == 2501
+  provider-plan-all-configured-nodes = asserts.assertTrue "provider-plan-all-configured-nodes" (
+    plan.nodes ? node-a
+    && plan.nodes ? old-node
     && plan.nodes.old-node.users.users == { }
     && lib.all
       (env: env.node != "old-node")
       (builtins.attrValues plan.environments)
     && !(plan.nodes ? retired-node)
-  ) "a configured node with only retired users must remain in the plan long enough to receive cleanup";
+  ) "every configured provider node must remain deployable even when it has no current environments";
 
   provider-plan-move-survives-replan = asserts.assertTrue "provider-plan-move-survives-replan" (
-    replannedPlan.nodes.old-node.provider.retiredUsers.${mainUser}.uid == 2501
+  provider-plan-move-survives-replan = asserts.assertTrue "provider-plan-move-survives-replan" (
+    replannedPlan.nodes ? old-node
     && replannedPlan.environments.${mainUser}.previousNode == "old-node"
     && replannedState.${mainUser}.node == "old-node"
     && !(replannedState.${testingUser} ? node)
@@ -219,7 +218,7 @@ in
 
   provider-plan-legacy-pending-state-collapses = asserts.assertTrue "provider-plan-legacy-pending-state-collapses" (
     legacyPendingPlan.environments.${mainUser}.previousNode == "old-node"
-    && legacyPendingPlan.nodes.old-node.provider.retiredUsers.${mainUser}.uid == 2501
+    && legacyPendingPlan.nodes ? old-node
     && legacyPendingOutputState.${mainUser}.node == "old-node"
     && !(legacyPendingOutputState.${mainUser} ? present)
     && !(legacyPendingOutputState.${mainUser} ? pendingCleanupNodes)

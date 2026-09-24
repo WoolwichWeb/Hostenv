@@ -261,12 +261,6 @@ let
       extraConfig = "add_header X-Node-Only yes;";
     };
   };
-  retiredUser = "acme-demo-retired";
-  retiredUid = 4999;
-  configRetiredUser = lib.recursiveUpdate config {
-    nodes.${nodeName}.provider.retiredUsers.${retiredUser}.uid = retiredUid;
-  };
-
   nixosSystem = providerFlake.lib.provider.nixosSystem;
   deployOutputs = providerFlake.lib.provider.deployOutputs {
     inherit
@@ -348,21 +342,6 @@ let
   };
   systemCacheMissing = nixosSystem {
     config = configCacheMissing;
-    inherit
-      nodeSystems
-      nodesPath
-      secretsFile
-      secretsPath
-      sopsSecretKeys
-      ;
-    node = nodeName;
-    inputs = inputsForSystem;
-    nixpkgs = inputs.nixpkgs;
-    pkgs = pkgsBySystem;
-    localSystem = system;
-  };
-  systemRetiredUser = nixosSystem {
-    config = configRetiredUser;
     inherit
       nodeSystems
       nodesPath
@@ -480,14 +459,7 @@ let
     && lib.strings.hasInfix "systemctl --user restart" secretRestartService.script;
   requiredSecretsInPlanOk =
     generatedPlan.environments.${envName}.requiredSecretFiles == [ "laravel_env" ];
-  retiredUserCleanup =
-    systemRetiredUser.config.system.activationScripts.hostenv-retired-users;
-  retiredUserCleanupOk =
-    lib.elem "hostenv-retired-users"
-      systemRetiredUser.config.system.activationScripts.users.deps
-    && lib.strings.hasInfix "disable-linger" retiredUserCleanup.text
-    && lib.strings.hasInfix "user@${toString retiredUid}.service" retiredUserCleanup.text
-    && lib.strings.hasInfix retiredUser retiredUserCleanup.text;
+  wheelGroupExists = systemEval.config.users.groups ? wheel;
   wheelGroupExists = systemEval.config.users.groups ? wheel;
   wheelPasswordless =
     let
@@ -544,7 +516,6 @@ in
     && secretsOk
     && requiredSecretRestartsUserServicesOk
     && requiredSecretsInPlanOk
-    && retiredUserCleanupOk
     && !missingRequiredSecretEval.success
     && deploySystemSshUserOk
     && deployEnvSshUserOk
