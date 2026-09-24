@@ -279,50 +279,85 @@ let
         idx: env:
         let
           previous = state.${env.hostenv.userName} or { };
+          previousWasPresent = previous.present or true;
           stateNode = previous.node or null;
+          pendingCleanupNodes = previous.pendingCleanupNodes or [ ];
+          previousNodes = lib.filter
+            (node: builtins.isString node && node != "" && node != env.node)
+            (lib.unique (
+              pendingCleanupNodes
+              ++ lib.optional previousWasPresent stateNode
+            ));
         in
         env
         // {
           uid = if (previous.uid or null) != null then previous.uid else nextUid + idx;
-          previousNode =
-            if builtins.isString stateNode && stateNode != "" && stateNode != env.node then stateNode else null;
+          # Keep the old placement available across repeated planning until its
+          # pending cleanup has actually succeeded.
+          previousNode = if previousNodes == [ ] then null else builtins.head previousNodes;
         }
       ) validatedEnvironments;
 
-      # User accounts that will need processing to remove their accounts from
-      # the given node. An unclean removal can cause deployments to fail.
-      retiredUsersForNode =
-        let
-          currentEnvironmentsByUser = builtins.listToAttrs (
-            map (env: {
-              name = env.hostenv.userName;
-              value = env;
-            }) environmentsWithUid
-          );
+      currentEnvironmentsByUser = builtins.listToAttrs (
+        map (env: {
+          name = env.hostenv.userName;
+          value = env;
+        }) environmentsWithUid
+      );
 
-          # If an environment disappears or moves to another node, stop the
-          # lingering user manager on its previous node before NixOS removes that
-          # node's UNIX account.
-          # `state` is useful here as entries are retained after environment
-          # UNIX user accounts are deleted from the node they are deployed to.
-          # This is ostensibly to reserve UIDs, but here state entries are used
-          # to figure out which users have been retired or moved to a different
-          # node.
-          retiredEnvs = lib.filterAttrs (
-            name: previous:
-            let
-              current = currentEnvironmentsByUser.${name} or null;
-            in
-            builtins.isInt (previous.uid or null)
-            && builtins.isString (previous.node or null)
-            && previous.node != ""
-            && (current == null || current.node != previous.node)
-          ) state;
+      # Planning is allowed to advance the desired node immediately, but cleanup
+      # of an old placement must survive until deploy records success. `present`
+      # distinguishes a newly removed environment from one whose removal was
+      # already planned, so an empty pending list remains empty after cleanup.
+      nextState = builtins.listToAttrs (
+        map (name:
+          let
+            previous = state.${name} or { };
+            current = currentEnvironmentsByUser.${name} or null;
+            previousWasPresent = previous.present or true;
+            previousNode = previous.node or null;
+            existingPendingCleanupNodes = previous.pendingCleanupNodes or [ ];
+            newlyPendingCleanupNodes = lib.optional (
+              previousWasPresent
+              && builtins.isString previousNode
+              && previousNode != ""
+              && (current == null || current.node != previousNode)
+            ) previousNode;
+            pendingCleanupNodes = builtins.filter
+              (node: current == null || node != current.node)
+              (lib.unique (existingPendingCleanupNodes ++ newlyPendingCleanupNodes));
+            currentState =
+              if current == null then
+                { }
+              else
+                {
+                  userName = current.hostenv.userName;
+                  inherit (current) uid node;
+                  virtualHosts = builtins.attrNames current.virtualHosts;
+                };
+          in
+          {
+            inherit name;
+            value = previous // currentState // {
+              present = current != null;
+              inherit pendingCleanupNodes;
+            };
+          }
+        ) (lib.unique (
+          builtins.attrNames state
+          ++ builtins.attrNames currentEnvironmentsByUser
+        ))
+      );
 
-        in
-        nodeName:
+      # User accounts that still need processing on a node. An unclean removal
+      # can leave a stale user manager and make later deployments fail.
+      retiredUsersForNode = nodeName:
         lib.mapAttrs (_: env: { uid = env.uid; }) (
-          lib.filterAttrs (_: env: env.node == nodeName) retiredEnvs
+          lib.filterAttrs
+            (_: env:
+              builtins.isInt (env.uid or null)
+              && builtins.elem nodeName (env.pendingCleanupNodes or [ ]))
+            nextState
         );
 
       # State is retained indefinitely, so do not resurrect nodes that are no
@@ -336,7 +371,10 @@ let
         let
           # Remember old nodes too: migrations may still need to contact them.
           namesFromEnvs = map (env: env.node) environmentsWithUid;
-          namesFromState = map (env: env.node or null) (builtins.attrValues state);
+          namesFromState = map (env: env.node or null) (builtins.attrValues nextState);
+          namesFromPendingCleanup = builtins.concatMap
+            (env: env.pendingCleanupNodes or [ ])
+            (builtins.attrValues nextState);
           knownNodes = lib.filter (name: builtins.isString name && name != "" && name != "default") (
             lib.unique (
               builtins.attrNames nodeSystems
@@ -345,6 +383,7 @@ let
               ++ builtins.attrNames nodeSshOpts
               ++ namesFromEnvs
               ++ namesFromState
+              ++ namesFromPendingCleanup
             )
           );
         in
@@ -576,26 +615,13 @@ let
         pkgs.writers.writeJSON "plan.json" configAttrs;
 
       generatedState =
-        let
-          planState = builtins.listToAttrs (
-            map (env: {
-              name = env.hostenv.userName;
-              value = {
-                userName = env.hostenv.userName;
-                inherit (env) uid node;
-                virtualHosts = builtins.attrNames env.virtualHosts;
-              };
-            }) environmentsWithUid
-          );
-        in
         pkgs.writers.writeJSON "state.json" (
           {
             _description = ''
               Persistent state to retain across deployments. Should be committed to version control.
             '';
           }
-          # Preserve retired environments and extra fields in existing entries.
-          // lib.recursiveUpdate state planState
+          // nextState
         );
 
     in
