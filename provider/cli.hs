@@ -1950,6 +1950,31 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             let observedNodeUsers =
                     M.fromList [row | Right row <- observedResults]
 
+            let observedUidDrift =
+                    [ (nodeName, userName, expectedUid, observedUid)
+                    | (nodeName, users) <- M.toList observedNodeUsers
+                    , (userName, expectedUid, observedUid) <-
+                        EnvironmentState.managedUserUidMismatches
+                            nodeName
+                            desiredNodesByUser
+                            users
+                            state
+                    ]
+            unless (null observedUidDrift) $ do
+                forM_ observedUidDrift $ \(nodeName, userName, expectedUid, observedUid) ->
+                    printProviderErrLine
+                        ( "hostenv-provider: error: Hostenv-managed user UID mismatch on "
+                            <> nodeName
+                            <> ": "
+                            <> userName
+                            <> " observed="
+                            <> T.pack (show observedUid)
+                            <> " expected="
+                            <> T.pack (show expectedUid)
+                        )
+                printProviderErrLine "hostenv-provider: error: refusing deployment until account UID drift is resolved"
+                Sh.exitWith (ExitFailure 1)
+
             let skippedEnvInfos =
                     filter (\envInfo -> envInfo.userName `elem` skipHits) envInfosFiltered
             forM_ skippedEnvInfos $
