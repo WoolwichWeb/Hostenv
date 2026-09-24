@@ -41,7 +41,8 @@ in
             };
 
             # This is intentionally a package rather than a normal flake check:
-            # it boots two VMs and exercises the destructive migration boundary.
+            # it boots a controller plus two provider VMs and exercises the
+            # destructive migration boundary through the real provider CLI.
             provider-migration-lifecycle-vm-test =
               import ../../tests/integration/provider-migration-vm.nix {
                 inherit pkgs;
