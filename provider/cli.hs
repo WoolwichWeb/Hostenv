@@ -2114,7 +2114,76 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             deployGuard res args
                             pure (envName, res)
 
-            let deployReadyNodes pendingNodes systemResults envResults successfulEnvironments =
+            when skipVerification $
+                printProviderLine "hostenv-provider: --skip-verification enabled; skipping post-deploy verification checks"
+
+            let verifyDeployedEnvironment envInfo =
+                    if skipVerification
+                        then pure (True, Nothing)
+                        else do
+                            let envName = envInfo.userName
+                            let verificationSpec = verificationSpecFor envName
+                            if not verificationSpec.evEnable || null verificationSpec.evChecks
+                                then pure (True, Nothing)
+                                else do
+                                    let verificationHost = Verify.canonicalNodeHostname hostenvHostname envInfo.node
+                                    let statusSuffix mStatus =
+                                            case mStatus of
+                                                Nothing -> ""
+                                                Just status -> " (HTTP " <> T.pack (show status) <> ")"
+                                    printProviderLine ("hostenv-provider: running deployment verification for " <> envName <> " via " <> verificationHost)
+                                    verificationRes <- try (Verify.runEnvVerification verificationHost verificationSpec) :: IO (Either SomeException [Verify.VerificationCheckResult])
+                                    case verificationRes of
+                                        Left err -> do
+                                            let message = "verification failed for " <> envName <> ": " <> T.pack (displayException err)
+                                            if verificationSpec.evEnforce
+                                                then do
+                                                    printProviderErrLine ("hostenv-provider: error: " <> message)
+                                                    pure (False, Just envName)
+                                                else do
+                                                    printProviderLine ("hostenv-provider: warning: " <> message)
+                                                    pure (True, Nothing)
+                                        Right checkResults -> do
+                                            let failedChecks = filter (not . (.vcrPassed)) checkResults
+                                            forM_ checkResults $ \checkResult ->
+                                                if checkResult.vcrPassed
+                                                    then
+                                                        printProviderLine
+                                                            ( "hostenv-provider: verification check "
+                                                                <> checkResult.vcrName
+                                                                <> " passed for "
+                                                                <> envName
+                                                                <> statusSuffix checkResult.vcrHttpStatus
+                                                            )
+                                                    else
+                                                        printProviderLine
+                                                            ( "hostenv-provider: warning: verification check "
+                                                                <> checkResult.vcrName
+                                                                <> " failed for "
+                                                                <> envName
+                                                                <> statusSuffix checkResult.vcrHttpStatus
+                                                                <> " ("
+                                                                <> T.intercalate "; " checkResult.vcrFailures
+                                                                <> ")"
+                                                            )
+                                            if null failedChecks
+                                                then pure (True, Nothing)
+                                                else
+                                                    if verificationSpec.evEnforce
+                                                        then pure (False, Just envName)
+                                                        else do
+                                                            printProviderLine ("hostenv-provider: warning: verification failures ignored for " <> envName <> " (deploymentVerification.enforce=false)")
+                                                            pure (True, Nothing)
+
+            let deployEnvironmentAndVerify envInfo = do
+                    envResult@(envName, deployCode) <- deployEnvironment envInfo
+                    case deployCode of
+                        ExitFailure _ -> pure (envResult, False, Nothing)
+                        ExitSuccess -> do
+                            (accepted, verificationFailure) <- verifyDeployedEnvironment envInfo
+                            pure (envResult, accepted, verificationFailure)
+
+            let deployReadyNodes pendingNodes systemResults envResults successfulEnvironments verificationFailures =
                     let ready nodeName =
                             let movedUsers = movedSourceUsers nodeName
                                 hasProtectedSource = any (`S.member` protectedSourceUsers) movedUsers
@@ -2123,7 +2192,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                              in not hasProtectedSource && destinationsSucceeded
                         readyNodes = filter ready pendingNodes
                      in if null readyNodes
-                            then pure (pendingNodes, systemResults, envResults, successfulEnvironments)
+                            then pure (pendingNodes, systemResults, envResults, successfulEnvironments, verificationFailures)
                             else do
                                 roundResults <-
                                     forM readyNodes $ \nodeName -> do
@@ -2139,7 +2208,9 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                             Left err -> do
                                                 printProviderErrLine ("hostenv-provider: error: " <> err)
                                                 let failedEnvs =
-                                                        [(envInfo.userName, ExitFailure 1) | envInfo <- envsForNode nodeName]
+                                                        [ ((envInfo.userName, ExitFailure 1), False, Nothing)
+                                                        | envInfo <- envsForNode nodeName
+                                                        ]
                                                 pure (nodeName, ExitFailure 1, failedEnvs)
                                             Right cleanedUsers -> do
                                                 systemCode <- deploySystemNode nodeName
@@ -2151,7 +2222,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                         cleanedUsers
                                                 nodeEnvResults <-
                                                     if systemCode == ExitSuccess
-                                                        then forM (envsForNode nodeName) deployEnvironment
+                                                        then forM (envsForNode nodeName) deployEnvironmentAndVerify
                                                         else do
                                                             forM_ (envsForNode nodeName) $ \envInfo ->
                                                                 printProviderLine
@@ -2161,24 +2232,30 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                                         <> envInfo.userName
                                                                     )
                                                             pure
-                                                                [(envInfo.userName, ExitFailure 1) | envInfo <- envsForNode nodeName]
+                                                                [ ((envInfo.userName, ExitFailure 1), False, Nothing)
+                                                                | envInfo <- envsForNode nodeName
+                                                                ]
                                                 pure (nodeName, systemCode, nodeEnvResults)
                                 let roundSystemResults =
                                         [(nodeName, code) | (nodeName, code, _) <- roundResults]
-                                let roundEnvResults = concat [results | (_, _, results) <- roundResults]
+                                let roundEnvOutcomes = concat [results | (_, _, results) <- roundResults]
+                                let roundEnvResults = [envResult | (envResult, _, _) <- roundEnvOutcomes]
                                 let roundSuccessful =
                                         S.fromList
                                             [ envName
-                                            | (envName, ExitSuccess) <- roundEnvResults
+                                            | ((envName, ExitSuccess), True, _) <- roundEnvOutcomes
                                             ]
+                                let roundVerificationFailures =
+                                        catMaybes [failure | (_, _, failure) <- roundEnvOutcomes]
                                 deployReadyNodes
                                     (pendingNodes \\ readyNodes)
                                     (systemResults ++ roundSystemResults)
                                     (envResults ++ roundEnvResults)
                                     (successfulEnvironments `S.union` roundSuccessful)
+                                    (verificationFailures ++ roundVerificationFailures)
 
-            (pendingNodes, systemDeployRes, envDeployRes, successfulEnvironments) <-
-                deployReadyNodes targetNodes [] [] S.empty
+            (pendingNodes, systemDeployRes, envDeployRes, successfulEnvironments, verificationFatalFailures) <-
+                deployReadyNodes targetNodes [] [] S.empty []
 
             let pendingNodeDetails =
                     [ ( nodeName
@@ -2216,78 +2293,9 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                 printProviderErrLine
                     ( "hostenv-provider: error: cannot safely finalize source node "
                         <> nodeName
-                        <> "; destination environment(s) did not deploy successfully: "
+                        <> "; destination environment(s) did not complete deployment and verification successfully: "
                         <> T.intercalate ", " blocked
                     )
-
-            verificationFatalFailures <-
-                if skipVerification
-                    then do
-                        printProviderLine "hostenv-provider: --skip-verification enabled; skipping post-deploy verification checks"
-                        pure []
-                    else do
-                        let envInfoByName = toNamed envInfosFiltered
-                        let statusSuffix mStatus =
-                                case mStatus of
-                                    Nothing -> ""
-                                    Just status -> " (HTTP " <> T.pack (show status) <> ")"
-                        fmap catMaybes $
-                            forM envDeployRes $ \(envName, deployCode) ->
-                                case deployCode of
-                                    ExitFailure _ -> pure Nothing
-                                    ExitSuccess ->
-                                        case lookup envName envInfoByName of
-                                            Nothing -> do
-                                                printProviderLine ("hostenv-provider: warning: environment metadata missing for " <> envName <> "; skipping verification")
-                                                pure Nothing
-                                            Just envInfo -> do
-                                                let verificationSpec = verificationSpecFor envName
-                                                if not verificationSpec.evEnable
-                                                    then pure Nothing
-                                                    else
-                                                        if null verificationSpec.evChecks
-                                                            then pure Nothing
-                                                            else do
-                                                                let verificationHost = Verify.canonicalNodeHostname hostenvHostname envInfo.node
-                                                                printProviderLine ("hostenv-provider: running deployment verification for " <> envName <> " via " <> verificationHost)
-                                                                verificationRes <- try (Verify.runEnvVerification verificationHost verificationSpec) :: IO (Either SomeException [Verify.VerificationCheckResult])
-                                                                case verificationRes of
-                                                                    Left err -> do
-                                                                        let message = "verification failed for " <> envName <> ": " <> T.pack (displayException err)
-                                                                        if verificationSpec.evEnforce
-                                                                            then printProviderErrLine ("hostenv-provider: error: " <> message) >> pure (Just envName)
-                                                                            else printProviderLine ("hostenv-provider: warning: " <> message) >> pure Nothing
-                                                                    Right checkResults -> do
-                                                                        let failedChecks = filter (not . (.vcrPassed)) checkResults
-                                                                        forM_ checkResults $ \checkResult ->
-                                                                            if checkResult.vcrPassed
-                                                                                then
-                                                                                    printProviderLine
-                                                                                        ( "hostenv-provider: verification check "
-                                                                                            <> checkResult.vcrName
-                                                                                            <> " passed for "
-                                                                                            <> envName
-                                                                                            <> statusSuffix checkResult.vcrHttpStatus
-                                                                                        )
-                                                                                else
-                                                                                    printProviderLine
-                                                                                        ( "hostenv-provider: warning: verification check "
-                                                                                            <> checkResult.vcrName
-                                                                                            <> " failed for "
-                                                                                            <> envName
-                                                                                            <> statusSuffix checkResult.vcrHttpStatus
-                                                                                            <> " ("
-                                                                                            <> T.intercalate "; " checkResult.vcrFailures
-                                                                                            <> ")"
-                                                                                        )
-                                                                        if null failedChecks
-                                                                            then pure Nothing
-                                                                            else
-                                                                                if verificationSpec.evEnforce
-                                                                                    then pure (Just envName)
-                                                                                    else do
-                                                                                        printProviderLine ("hostenv-provider: warning: verification failures ignored for " <> envName <> " (deploymentVerification.enforce=false)")
-                                                                                        pure Nothing
 
             let systemDeploymentFailures = any (\(_, code) -> code /= ExitSuccess) systemDeployRes
             let environmentDeploymentFailures = any (\(_, code) -> code /= ExitSuccess) envDeployRes
