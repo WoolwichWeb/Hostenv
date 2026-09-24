@@ -99,8 +99,16 @@ lookupTextList key obj = case KM.lookup key obj of
 nodesForProject :: Text -> Text -> BL.ByteString -> Either Text [Text]
 nodesForProject org project raw = do
   envs <- decodeEnvironments raw
-  let matches = mapMaybe extractEnv (KM.toList envs)
-  Right (sort (nub (map envNode matches)))
+  let matches =
+        mapMaybe extractEnv (KM.toList envs)
+      nodes = sort (nub (map envNode matches))
+      deps =
+        [ (envNode info, prev)
+        | info <- matches
+        , Just prev <- [info.envPrevNode]
+        , prev /= info.envNode
+        ]
+  Right (orderNodes nodes deps)
   where
     extractEnv (_kEnv, vEnv) = case vEnv of
       Object envObj -> do
@@ -110,7 +118,8 @@ nodesForProject org project raw = do
         if org' == org && project' == project
           then do
             node <- lookupText (K.fromString "node") envObj
-            pure (EnvNodeInfo node Nothing)
+            let prevNode = lookupText (K.fromString "previousNode") envObj
+            pure (EnvNodeInfo node prevNode)
           else Nothing
       _ -> Nothing
 
@@ -146,24 +155,25 @@ nodesForProjectWithDnsWith pointsTo org project raw = do
                       (Just org', Just project') | org' == org && project' == project -> do
                         case lookupText (K.fromString "node") envObj of
                           Just node -> do
+                            let prevNode = lookupText (K.fromString "previousNode") envObj
                             let migrateBackups = lookupTextList (K.fromString "migrations") envObj
                             -- Previous-node discovery probes the canonical
                             -- hostenv hostname first, then these vhosts.
                             let vhostsObj = fromMaybe KM.empty (lookupObj (K.fromString "virtualHosts") envObj)
                             let vhosts = map (K.toText . fst) (KM.toList vhostsObj)
-                            pure (Just (envUserName, node, migrateBackups, vhosts))
+                            pure (Just (envUserName, node, prevNode, migrateBackups, vhosts))
                           Nothing -> pure Nothing
                       _ -> pure Nothing
                   Nothing -> pure Nothing
               _ -> pure Nothing
-          let discoveryNodes = PrevNode.discoveryNodeNames root (map (\(_, node, _, _) -> node) matches)
+          let discoveryNodes = PrevNode.discoveryNodeNames root (map (\(_, node, _, _, _) -> node) matches)
 
-          resolvedMatches <- forM matches $ \(envUserName, node, migrateBackups, vhosts) -> do
+          resolvedMatches <- forM matches $ \(envUserName, node, prevNode, migrateBackups, vhosts) -> do
             resolvedPrev <-
               -- Only migrating environments need previous-node discovery.
               if null migrateBackups
-                then pure (Right Nothing)
-                else resolvePrevNodeFromDns cachedPointsTo hostenvHostname discoveryNodes envUserName vhosts node
+                then pure (Right prevNode)
+                else resolvePrevNodeFromDns cachedPointsTo hostenvHostname discoveryNodes envUserName vhosts node prevNode
             pure ((\prev -> EnvNodeInfo node prev) <$> resolvedPrev)
 
           case sequence resolvedMatches of
@@ -180,39 +190,50 @@ nodesForProjectWithDnsWith pointsTo org project raw = do
                     ]
               pure (Right (orderNodes nodes deps))
   where
-    -- Resolve the previous node for one environment from DNS. The generated
-    -- plan deliberately carries no historical node placement.
-    resolvePrevNodeFromDns :: (Text -> Text -> IO Bool) -> Maybe Text -> [Text] -> Text -> [Text] -> Text -> IO (Either Text (Maybe Text))
-    resolvePrevNodeFromDns pointsTo' hostenvHostname discoveryNodes envName vhosts currentNode =
-      case hostenvHostname of
-        Nothing -> pure (Right Nothing)
-        Just host -> do
-          let candidateNodes = map PrevNode.NodeName discoveryNodes
-          let currentNodeName = PrevNode.NodeName currentNode
-          let previousNodeCandidates = PrevNode.previousNodeCandidates currentNodeName candidateNodes
-          if null previousNodeCandidates
-            then pure (Right Nothing)
-            else do
-              let probedHosts = PrevNode.probeHosts host envName vhosts
-              probes <-
-                forM probedHosts $ \probedHost ->
-                  PrevNode.probeHost pointsTo' host probedHost candidateNodes
-              let resolution = PrevNode.chooseDiscoveryOutcome currentNodeName probes
-              case resolution of
-                PrevNode.DiscoveryResolved _probedHost (PrevNode.NodeName node) -> pure (Right (Just node))
-                PrevNode.DiscoverySkipped _ -> pure (Right Nothing)
-                PrevNode.DiscoveryAmbiguous (PrevNode.Hostname probedHost) nodes ->
-                  pure
-                    ( Left
-                        ( "DNS for "
-                            <> probedHost
-                            <> " matches more than one possible previous node for "
-                            <> envName
-                            <> ": "
-                            <> T.intercalate ", " [ nodeName | PrevNode.NodeName nodeName <- nodes ]
-                            <> ". Fix DNS so it identifies one source node."
+    -- Resolve the previous node for one environment. If the plan already set
+    -- previousNode, keep it. Otherwise, probe the canonical hostenv hostname
+    -- first and then the environment's configured vhosts for a match.
+    resolvePrevNodeFromDns :: (Text -> Text -> IO Bool) -> Maybe Text -> [Text] -> Text -> [Text] -> Text -> Maybe Text -> IO (Either Text (Maybe Text))
+    resolvePrevNodeFromDns pointsTo' hostenvHostname discoveryNodes envName vhosts currentNode prevNode =
+      case PrevNode.resolveDeclaredPrevNode currentNode Nothing prevNode of
+        PrevNode.NoDeclaredPrevNode ->
+          case hostenvHostname of
+            -- Without the hostenv domain we cannot build the canonical probe
+            -- hostname or canonical node hostnames to compare against.
+            Nothing -> pure (Right Nothing)
+            Just host -> do
+              -- TODO: Finish the refactor by typing plan-derived node/env data
+              -- before it reaches this helper instead of wrapping raw Text here.
+              let candidateNodes = map PrevNode.NodeName discoveryNodes
+              let currentNodeName = PrevNode.NodeName currentNode
+              let previousNodeCandidates = PrevNode.previousNodeCandidates currentNodeName candidateNodes
+              if null previousNodeCandidates
+                then pure (Right Nothing)
+                else do
+                  -- Probe the canonical env hostname first, then fall back to
+                  -- configured customer-facing vhosts when that is inconclusive.
+                  let probedHosts = PrevNode.probeHosts host envName vhosts
+                  probes <-
+                    forM probedHosts $ \probedHost -> do
+                      PrevNode.probeHost pointsTo' host probedHost candidateNodes
+                  let resolution = PrevNode.chooseDiscoveryOutcome currentNodeName probes
+                  case resolution of
+                    PrevNode.DiscoveryResolved _probedHost (PrevNode.NodeName node) -> pure (Right (Just node))
+                    PrevNode.DiscoverySkipped _ -> pure (Right Nothing)
+                    PrevNode.DiscoveryAmbiguous (PrevNode.Hostname probedHost) nodes ->
+                      pure
+                        ( Left
+                            ( "DNS for "
+                                <> probedHost
+                                <> " matches more than one possible previous node for "
+                                <> envName
+                                <> ": "
+                                <> T.intercalate ", " [ nodeName | PrevNode.NodeName nodeName <- nodes ]
+                                <> ". Set previousNode explicitly."
+                            )
                         )
-                    )
+        PrevNode.DeclaredCurrentNode _source _sourceNode -> pure (Right Nothing)
+        PrevNode.DeclaredPreviousNode _source sourceNode -> pure (Right (Just sourceNode))
 
 data EnvNodeInfo = EnvNodeInfo
   { envNode :: Text
