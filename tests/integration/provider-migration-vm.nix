@@ -20,6 +20,8 @@ pkgs.testers.runNixOSTest {
         pkgs.python3
       ];
 
+      networking.firewall.allowedTCPPorts = [ 18080 ];
+
       virtualisation = {
         cores = 1;
         memorySize = 768;
