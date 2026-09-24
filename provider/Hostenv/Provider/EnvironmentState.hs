@@ -4,6 +4,7 @@ module Hostenv.Provider.EnvironmentState
     ( NodeUsers
     , managedUserUidMismatches
     , managedUsersToRetire
+    , observedNodesForUser
     , parsePasswdUsers
     , resolveMigrationSourceNode
     )
@@ -59,6 +60,13 @@ managedUsersToRetire nodeName desiredNodes observedUsers =
             else Nothing
     retireCandidate _ = Nothing
 
+observedNodesForUser :: Text -> Integer -> NodeUsers -> [Text]
+observedNodesForUser userName uid observedNodes =
+    [ nodeName
+    | (nodeName, users) <- M.toList observedNodes
+    , M.lookup userName users == Just uid
+    ]
+
 resolveMigrationSourceNode ::
     Text ->
     Text ->
@@ -103,11 +111,7 @@ resolveMigrationSourceNode currentNode userName uid explicitSource observedNodes
             Nothing -> False
 
     matchingSources =
-        [ nodeName
-        | (nodeName, users) <- M.toList observedNodes
-        , nodeName /= currentNode
-        , M.lookup userName users == Just uid
-        ]
+        filter (/= currentNode) (observedNodesForUser userName uid observedNodes)
 
 parsePasswdUsers :: Text -> Map Text Integer
 parsePasswdUsers =

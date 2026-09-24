@@ -291,6 +291,10 @@ let
         env
         // {
           uid = if (previous.uid or null) != null then previous.uid else nextUid + idx;
+          # This is plan metadata, not workflow state. It distinguishes a
+          # genuinely new environment from a previously reserved identity that
+          # has unexpectedly disappeared from provider inventory.
+          knownIdentity = builtins.isInt (previous.uid or null);
         }
       ) validatedEnvironments;
 

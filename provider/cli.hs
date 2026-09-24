@@ -384,6 +384,7 @@ data EnvInfo = EnvInfo
     , migrateBackups :: [Text]
     , runtimeDir :: Text
     , uid :: Integer
+    , knownIdentity :: Bool
     }
 
 -- Note: check the nix code that generates plan.json
@@ -401,6 +402,7 @@ instance A.FromJSON EnvInfo where
         node <- o .: "node"
         migrateBackups <- o .:? "migrations" .!= []
         uid <- o .: "uid"
+        knownIdentity <- o .: "knownIdentity"
         pure $
             EnvInfo
                 { userName = userName
@@ -408,6 +410,7 @@ instance A.FromJSON EnvInfo where
                 , migrateBackups = migrateBackups
                 , runtimeDir = runtimeDir
                 , uid = uid
+                , knownIdentity = knownIdentity
                 }
 
 data Snapshot = Snapshot {snapId :: Text}
