@@ -1495,6 +1495,13 @@ validateNodeInventoryTransition planPath statePath newPlanRaw = do
                             error ("hostenv-provider: cannot validate removed nodes because " <> T.unpack statePath <> " is invalid JSON: " <> err)
                         Right value -> pure (value :: KM.KeyMap A.Value)
 
+                let previousEnvironments =
+                        fromMaybe KM.empty (lookupObj (K.fromString "environments") previousPlan)
+                -- Previous environment entries have top-level uid fields and
+                -- are keyed by Hostenv username, so EnvironmentState can use
+                -- them as identity evidence even if state.json was truncated.
+                let managedIdentities = KM.union state previousEnvironments
+
                 let deployUser = planDeployUser previousPlan
                 let oldHostname =
                         fromMaybe
