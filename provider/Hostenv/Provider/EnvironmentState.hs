@@ -2,6 +2,8 @@
 
 module Hostenv.Provider.EnvironmentState
     ( NodeUsers
+    , managedIdentities
+    , managedReservedUidConflicts
     , managedUserUidMismatches
     , managedUsersToRetire
     , observedNodesForUser
@@ -18,11 +20,36 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as M
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Scientific (floatingOrInteger)
+import Data.Set (Set)
+import Data.Set qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Read qualified as TR
 
 type NodeUsers = Map Text (Map Text Integer)
+
+managedIdentities :: KM.KeyMap A.Value -> [(Text, Integer)]
+managedIdentities =
+    sortOn fst . mapMaybe identityFromEntry . KM.toList
+  where
+    identityFromEntry (key, A.Object entry) = do
+        uid <- lookupInteger (K.fromString "uid") entry
+        let userName = fromMaybe (K.toText key) (lookupText (K.fromString "userName") entry)
+        pure (userName, uid)
+    identityFromEntry _ = Nothing
+
+managedReservedUidConflicts ::
+    Map Text Integer ->
+    KM.KeyMap A.Value ->
+    [(Text, Integer, Text)]
+managedReservedUidConflicts observedUsers state =
+    sortOn (\(name, _, owner) -> (name, owner))
+        [ (userName, expectedUid, observedName)
+        | (userName, expectedUid) <- managedIdentities state
+        , (observedName, observedUid) <- M.toList observedUsers
+        , observedUid == expectedUid
+        , observedName /= userName
+        ]
 
 managedUserUidMismatches ::
     Map Text Integer ->
@@ -44,16 +71,21 @@ managedUsersToRetire ::
     Text ->
     Map Text Text ->
     Map Text Integer ->
+    Set Text ->
     KM.KeyMap A.Value ->
     [(Text, Integer)]
-managedUsersToRetire nodeName desiredNodes observedUsers =
+managedUsersToRetire nodeName desiredNodes observedUsers runtimeUsers =
     sortOn fst . mapMaybe retireCandidate . KM.toList
   where
     retireCandidate (key, A.Object entry) = do
         uid <- lookupInteger (K.fromString "uid") entry
         let userName = fromMaybe (K.toText key) (lookupText (K.fromString "userName") entry)
-        observedUid <- M.lookup userName observedUsers
-        if observedUid == uid && M.lookup userName desiredNodes /= Just nodeName
+        let passwdMatches = M.lookup userName observedUsers == Just uid
+        let orphanRuntime =
+                M.notMember userName observedUsers
+                    && S.member userName runtimeUsers
+        if M.lookup userName desiredNodes /= Just nodeName
+            && (passwdMatches || orphanRuntime)
             then Just (userName, uid)
             else Nothing
     retireCandidate _ = Nothing
