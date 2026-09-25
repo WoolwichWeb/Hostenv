@@ -5,6 +5,8 @@ let
   uid = 2000;
   freshUser = "fresh-prod";
   freshUid = 3000;
+  orphanUser = "orphan-prod";
+  orphanUid = 2100;
   snapshotId = "0123456789abcdef";
 
   rawCliPkg = pkgs.haskellPackages.callCabal2nix "hostenv-provider-cli" ../../provider { };
@@ -89,6 +91,26 @@ let
     };
   });
 
+  orphanPlan = pkgs.writeText "provider-orphan-plan.json" (builtins.toJSON {
+    hostenvHostname = "hosting.test";
+    deployUser = "root";
+    nodeStatus."old-node" = "active";
+    nodes."old-node" = { };
+    nodeConnections."old-node" = {
+      hostname = "old";
+      inherit sshOpts;
+    };
+    environments = { };
+  });
+
+  orphanState = pkgs.writeText "provider-orphan-state.json" (builtins.toJSON {
+    ${orphanUser} = {
+      userName = orphanUser;
+      uid = orphanUid;
+      virtualHosts = [ ];
+    };
+  });
+
   snapshotWrapper = pkgs.writeShellScript "restic-demo-migrate" ''
     set -euo pipefail
     case " $* " in
@@ -157,29 +179,36 @@ let
         fi
 
         restore_plan="/run/hostenv/user/${user}/restore/plan.json"
-        restore_json="$(ssh_node new cat "$restore_plan")"
-        printf '%s\n' "$restore_json" | ${pkgs.gnugrep}/bin/grep -Fq '"sourceNode":"old-node"'
-        printf '%s\n' "$restore_json" | ${pkgs.gnugrep}/bin/grep -Fq '"demo-migrate":"${snapshotId}"'
+        if ssh_node new "test -f '$restore_plan'"; then
+          restore_json="$(ssh_node new cat "$restore_plan")"
+          printf '%s\n' "$restore_json" | ${pkgs.gnugrep}/bin/grep -Fq '"sourceNode":"old-node"'
+          printf '%s\n' "$restore_json" | ${pkgs.gnugrep}/bin/grep -Fq '"demo-migrate":"${snapshotId}"'
 
-        tmp="$(${pkgs.coreutils}/bin/mktemp)"
-        ${pkgs.openssh}/bin/scp \
-          -o BatchMode=yes \
-          -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null \
-          "root@old:/home/${user}/data/sentinel.txt" "$tmp"
-        ssh_node new "install -d -o '${user}' -g '${user}' '/home/${user}/data'"
-        ${pkgs.openssh}/bin/scp \
-          -o BatchMode=yes \
-          -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null \
-          "$tmp" "root@new:/home/${user}/data/sentinel.txt"
-        ${pkgs.coreutils}/bin/rm -f "$tmp"
-        ssh_node new "
-          chown '${user}:${user}' '/home/${user}/data/sentinel.txt'
-          touch '/home/${user}/activated'
-          chown '${user}:${user}' '/home/${user}/activated'
-          rm -f '$restore_plan'
-        "
+          tmp="$(${pkgs.coreutils}/bin/mktemp)"
+          ${pkgs.openssh}/bin/scp \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "root@old:/home/${user}/data/sentinel.txt" "$tmp"
+          ssh_node new "install -d -o '${user}' -g '${user}' '/home/${user}/data'"
+          ${pkgs.openssh}/bin/scp \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            "$tmp" "root@new:/home/${user}/data/sentinel.txt"
+          ${pkgs.coreutils}/bin/rm -f "$tmp"
+          ssh_node new "
+            chown '${user}:${user}' '/home/${user}/data/sentinel.txt'
+            touch '/home/${user}/activated'
+            chown '${user}:${user}' '/home/${user}/activated'
+            rm -f '$restore_plan'
+          "
+        else
+          ssh_node new "
+            test -f '/home/${user}/activated'
+            grep -qx 'hello-from-old-node' '/home/${user}/data/sentinel.txt'
+          "
+        fi
         ;;
 
       *'generated/.#"new-node"."${freshUser}"'*)
@@ -194,7 +223,18 @@ let
         if [ "''${FAIL_SOURCE_SYSTEM:-0}" = 1 ]; then
           exit 42
         fi
-        ssh_node old "userdel '${user}'"
+        case "''${FAKE_MODE:-move}" in
+          move)
+            ssh_node old "getent passwd '${user}' >/dev/null && userdel '${user}' || true"
+            ;;
+          orphan)
+            true
+            ;;
+          *)
+            echo "unknown FAKE_MODE for old-node system: ''${FAKE_MODE:-}" >&2
+            exit 2
+            ;;
+        esac
         ;;
 
       *)
@@ -237,6 +277,13 @@ pkgs.testers.runNixOSTest {
         linger = true;
       };
 
+      users.users.${orphanUser} = {
+        isNormalUser = true;
+        uid = orphanUid;
+        createHome = true;
+        linger = true;
+      };
+
       systemd.user.services."restic-backups-demo-migrate" = {
         description = "Hostenv migration test backup";
         serviceConfig = {
@@ -272,6 +319,7 @@ pkgs.testers.runNixOSTest {
     old.wait_for_unit("sshd.service")
     new.wait_for_unit("sshd.service")
     old.wait_for_unit("user@${toString uid}.service")
+    old.wait_for_unit("user@${toString orphanUid}.service")
 
     with subtest("prepare controller SSH and source backup service"):
         controller.succeed(
@@ -307,6 +355,33 @@ pkgs.testers.runNixOSTest {
         old.succeed("test -e /var/lib/systemd/linger/${user}")
         old.succeed("systemctl is-active --quiet user@${toString uid}.service")
 
+    with subtest("orphaned Hostenv runtime is cleaned without passwd entry"):
+        old.succeed("systemctl is-active --quiet user@${toString orphanUid}.service")
+        old.succeed("test -e /var/lib/systemd/linger/${orphanUser}")
+        old.succeed("userdel --force ${orphanUser}")
+        old.fail("getent passwd ${orphanUser}")
+        old.succeed("systemctl is-active --quiet user@${toString orphanUid}.service")
+        old.succeed("test -e /var/lib/systemd/linger/${orphanUser}")
+
+        controller.succeed("cp ${orphanPlan} /root/provider/generated/plan.json")
+        controller.succeed("cp ${orphanState} /root/provider/generated/state.json")
+        controller.succeed(": > /tmp/orphan-nix.log")
+
+        orphan_command = (
+            "cd /root/provider && "
+            "PATH=/root/fake-bin:$PATH "
+            "NIX_LOG=/tmp/orphan-nix.log "
+            "FAKE_MODE=orphan "
+            "${cliPkg}/bin/hostenv-provider deploy "
+            "--remote-build --skip-verification"
+        )
+        controller.succeed(orphan_command)
+
+        old.fail("getent passwd ${orphanUser}")
+        old.fail("test -e /var/lib/systemd/linger/${orphanUser}")
+        old.fail("systemctl is-active --quiet user@${toString orphanUid}.service")
+        old.fail("test -e /run/user/${toString orphanUid}")
+
     with subtest("destination activation failure leaves source recoverable"):
         controller.succeed("cp ${movePlan} /root/provider/generated/plan.json")
         controller.succeed("cp ${moveState} /root/provider/generated/state.json")
@@ -337,7 +412,29 @@ pkgs.testers.runNixOSTest {
             "grep -Fq 'generated/.#\\\"old-node\\\".\\\"system\\\"' /tmp/move-nix.log"
         )
 
-    with subtest("retry migrates data then retires the source"):
+    with subtest("accepted destination stays live while source finalization fails"):
+        controller.succeed(": > /tmp/move-nix.log")
+        controller.fail(
+            move_command.replace(
+                "FAKE_MODE=move ",
+                "FAKE_MODE=move FAIL_SOURCE_SYSTEM=1 ",
+            )
+        )
+
+        old.succeed("getent passwd ${user}")
+        old.fail("test -e /var/lib/systemd/linger/${user}")
+        old.fail("systemctl is-active --quiet user@${toString uid}.service")
+        new.succeed("getent passwd ${user}")
+        new.succeed("test -f /home/${user}/activated")
+        new.succeed("grep -qx 'hello-from-old-node' /home/${user}/data/sentinel.txt")
+        new.succeed(
+            "grep -qx 'old-node' /home/${user}/.local/state/hostenv/migration-handoff-source"
+        )
+        controller.succeed(
+            "grep -Fq 'generated/.#\\\"old-node\\\".\\\"system\\\"' /tmp/move-nix.log"
+        )
+
+    with subtest("retry skips source migration and completes finalization"):
         controller.succeed(": > /tmp/move-nix.log")
         controller.succeed(move_command)
 
