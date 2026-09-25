@@ -668,6 +668,20 @@ in
       test "$quiesced_line" -lt "$source_system_line"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
 
+      # A matching accepted handoff is also sufficient to resume finalization
+      # when the source passwd entry has disappeared but runtime survives. There
+      # is no source account left from which another migration backup could run.
+      rm -f "$SOURCE_STATE_DIR/acme-prod-quiesced"
+      printf 'accepted old-node\n' > "$HANDOFF_DIR/new-node-acme-prod"
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" ORPHAN_SOURCE=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
+
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
