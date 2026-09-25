@@ -2504,7 +2504,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
 
             let managedIdentities = EnvironmentState.managedIdentities state
             runtimeResults <-
-                forM targetNodes $
+                forM observationNodes $
                     readNodeRuntimeUsers
                         deployUser
                         resolveNodeConnection
@@ -2599,22 +2599,67 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                 ("hostenv: migration source for " <> envInfo.userName <> " observed on node: " <> sourceNode)
                                     pure (Right (Just (envInfo, sourceNode)))
                                 Right Nothing -> do
-                                    removedNodeHint <-
-                                        dnsRemovedInventoryHint
-                                            hostenvHostname
-                                            inventoryNodes
-                                            envInfo
-                                    pure $ case removedNodeHint of
-                                        Just removedNode ->
-                                            Left
-                                                ( "DNS for "
-                                                    <> envInfo.hostname
-                                                    <> " points to provider node "
-                                                    <> removedNode
-                                                    <> ", but that node is not in provider.nodeSystems. "
-                                                    <> "Restore the source node to provider inventory until migration and retirement complete."
+                                    let orphanRuntimeSources =
+                                            [ nodeName
+                                            | (nodeName, runtimeUsers) <- M.toList observedNodeRuntimeUsers
+                                            , nodeName /= envInfo.node
+                                            , S.member envInfo.userName runtimeUsers
+                                            ]
+                                    case orphanRuntimeSources of
+                                        [] -> do
+                                            removedNodeHint <-
+                                                dnsRemovedInventoryHint
+                                                    hostenvHostname
+                                                    inventoryNodes
+                                                    envInfo
+                                            pure $ case removedNodeHint of
+                                                Just removedNode ->
+                                                    Left
+                                                        ( "DNS for "
+                                                            <> envInfo.hostname
+                                                            <> " points to provider node "
+                                                            <> removedNode
+                                                            <> ", but that node is not in provider.nodeSystems. "
+                                                            <> "Restore the source node to provider inventory until migration and retirement complete."
+                                                        )
+                                                Nothing -> Right Nothing
+                                        [sourceNode] -> do
+                                            completedSource <-
+                                                readMigrationHandoffSource
+                                                    deployUser
+                                                    resolveNodeConnection
+                                                    envInfo
+                                            if completedSource == Just sourceNode
+                                                then do
+                                                    printProviderLine
+                                                        ( "hostenv-provider: Hostenv runtime for "
+                                                            <> envInfo.userName
+                                                            <> " remains on "
+                                                            <> sourceNode
+                                                            <> " without a passwd entry, but the destination records an accepted handoff; resuming source finalization"
+                                                        )
+                                                    pure (Right (Just (envInfo, sourceNode)))
+                                                else
+                                                    pure
+                                                        ( Left
+                                                            ( "Hostenv runtime for "
+                                                                <> envInfo.userName
+                                                                <> " remains on "
+                                                                <> sourceNode
+                                                                <> " but the passwd account is missing. Refusing to treat the destination as fresh because migration data cannot be safely recovered. "
+                                                                <> "Restore the source account/runtime or resolve the environment manually."
+                                                            )
+                                                        )
+                                        sources ->
+                                            pure
+                                                ( Left
+                                                    ( "Hostenv runtime for "
+                                                        <> envInfo.userName
+                                                        <> " remains on multiple possible source nodes without a matching passwd account: "
+                                                        <> T.intercalate ", " sources
+                                                        <> ". Refusing migration until the orphan runtime state is reconciled."
+                                                    )
                                                 )
-                                        Nothing -> Right Nothing
                                 Left err -> pure (Left err)
 
             let migrationFatalErrors =
