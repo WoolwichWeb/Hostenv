@@ -2081,7 +2081,20 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                                 <> "\" >&2; exit 93; fi; "
                                 <> "fi"
                     printProviderLine ("hostenv-provider: preparing retirement of Hostenv user " <> userName <> " from " <> nodeName)
-                    code <- runRemote target ["bash", "-lc", cleanupCmd]
+                    (code, cleanupOut, cleanupErr) <- runRemoteOutput target ["bash", "-lc", cleanupCmd]
+                    when (code /= ExitSuccess) $ do
+                        let detail =
+                                T.strip $
+                                    if T.null (T.strip cleanupErr)
+                                        then cleanupOut
+                                        else cleanupErr
+                        printProviderErrLine
+                            ( "hostenv-provider: error: cleanup command failed for "
+                                <> userName
+                                <> " on "
+                                <> nodeName
+                                <> if T.null detail then "" else ": " <> detail
+                            )
                     when (code == ExitSuccess) (onCleaned userName uid)
                     pure ((userName, uid), code)
             let cleanedUsers = [user | (user, code) <- cleanupResults, code == ExitSuccess]
