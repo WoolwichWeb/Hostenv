@@ -326,7 +326,7 @@ pkgs.testers.runNixOSTest {
             "install -d -m 0700 /root/.ssh /root/provider/generated /root/fake-bin"
         )
         controller.succeed(
-            "${pkgs.openssh}/bin/ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519"
+            "${pkgs.openssh}/bin/ssh-keygen -q -t ed25519 -N \"\" -f /root/.ssh/id_ed25519"
         )
         public_key = controller.succeed("cat /root/.ssh/id_ed25519.pub").strip()
 
