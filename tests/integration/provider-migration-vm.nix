@@ -334,7 +334,7 @@ pkgs.testers.runNixOSTest {
         for machine in (old, new):
             machine.succeed("install -d -m 0700 /root/.ssh")
             machine.succeed(
-                "printf '%s\\\\n' "
+                "printf '%s\\n' "
                 + shlex.quote(public_key)
                 + " > /root/.ssh/authorized_keys"
             )
@@ -345,7 +345,7 @@ pkgs.testers.runNixOSTest {
 
         old.succeed("install -d -o ${user} -g users /home/${user}/data")
         old.succeed(
-            "printf 'hello-from-old-node\\\\n' > /home/${user}/data/sentinel.txt"
+            "printf 'hello-from-old-node\\n' > /home/${user}/data/sentinel.txt"
         )
         old.succeed("chown ${user}:users /home/${user}/data/sentinel.txt")
         old.succeed("install -d -o ${user} -g users /home/${user}/.local/bin")
