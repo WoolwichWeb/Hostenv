@@ -2028,10 +2028,11 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                                 <> "if [ \"$unit_status\" -ne 0 ]; then echo \"failed to inspect "
                                 <> unit
                                 <> " (systemctl exit $unit_status)\" >&2; exit \"$unit_status\"; fi; "
+                                <> "stop_status=0; "
                                 <> "case \"$unit_state\" in "
                                 <> "active|reloading|activating|deactivating) sudo systemctl stop "
                                 <> shellEscape unit
-                                <> " ;; "
+                                <> " || stop_status=$? ;; "
                                 <> "inactive|failed) ;; "
                                 <> "*) echo \"unexpected ActiveState for "
                                 <> unit
@@ -2047,7 +2048,7 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                                 <> "inactive|failed) ;; "
                                 <> "active|reloading|activating|deactivating) echo \""
                                 <> unit
-                                <> " is still active after cleanup ($unit_state)\" >&2; exit 90 ;; "
+                                <> " is still active after cleanup ($unit_state; stop exit $stop_status)\" >&2; exit 90 ;; "
                                 <> "*) echo \"unexpected ActiveState for "
                                 <> unit
                                 <> " after cleanup: $unit_state\" >&2; exit 92 ;; "
