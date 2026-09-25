@@ -60,14 +60,18 @@ When an existing valid `generated/plan.json` is available,
 environment was assigned to a node that disappears from the proposed
 `nodeSystems`, planning stops. Removing a previously retiring node also causes
 Hostenv to contact it using the previous plan's connection details and inspect
-its passwd database; the node is removed only when no reserved Hostenv account
-remains.
+both its passwd database and Hostenv runtime state. Removal is blocked while a
+reserved account, linger file, `user@UID.service`, or `/run/user/UID`
+remains, even if the Unix account itself has already disappeared.
 
 The previous plan is not persistent state and is never required to regenerate
 the provider configuration. If it is missing or malformed, Hostenv skips the
 historical comparison and still checks Hostenv-controlled DNS before publishing
 the proposed plan. A CNAME that identifies a node outside the proposed
 inventory aborts planning, before `dns-gate` has an opportunity to change DNS.
+If DNS cannot be queried reliably (for example SERVFAIL, resolver failure, or
+`dig` execution failure), planning also stops rather than treating the lookup
+as evidence that no old node exists.
 
 A UID reservation in `state.json` does **not** mean an environment has
 already been deployed; planning a brand-new environment creates its reservation
@@ -85,10 +89,18 @@ environments.
 
 Source retirement is a finalization step: Hostenv first migrates data, deploys
 the destination system, successfully activates the destination environment, and
-passes any enforced deployment verification. Only then does it disable
-lingering/stop the old user manager and deploy the source system configuration
-that removes the account. If a source system deployment fails, Hostenv attempts
-to restore the old user manager so a retry remains possible.
+passes any enforced deployment verification. At that point it records a
+destination-local migration handoff marker, disables lingering/stops the old
+user manager, and deploys the source system configuration that removes the
+account.
+
+If source-system finalization fails after the destination has been accepted,
+Hostenv deliberately leaves the source application quiesced. The handoff marker
+allows the next deploy to skip source backup/restore-plan recreation and retry
+only destination acceptance plus source finalization. This avoids restarting
+cron, queue workers, nginx, or other source services alongside the live
+destination. Old handoff markers are cleared when a node later becomes a source,
+so a future round-trip move cannot reuse an earlier handoff.
 
 `--skip-migrations` and ignored migration failures protect their source
 accounts for that run. Hostenv may defer the corresponding source-node system
@@ -177,7 +189,8 @@ check and regenerates it.
 Before publishing a proposed plan, Hostenv also checks Hostenv-controlled DNS.
 If an environment hostname still CNAMEs to a provider-looking node that is
 missing from the proposed `provider.nodeSystems`, planning stops before
-`dns-gate` can update that DNS record.
+`dns-gate` can update that DNS record. DNS lookup failure is also fatal for
+this safety check; it is not treated as an empty answer.
 
 A successful plan is published with a same-directory atomic rename, so
 interruption cannot leave a partially written `generated/plan.json`.

@@ -112,7 +112,7 @@ provider.nodeStatus.old-node = "retiring";
 Hostenv keeps retiring nodes deployable for migration and cleanup, deploys and
 activates each destination before retiring its source account, and refuses to
 remove the node from inventory until a live check confirms no reserved Hostenv
-accounts remain.
+account or orphan runtime state remains.
 
 ## Next steps
 
