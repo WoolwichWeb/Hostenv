@@ -1466,75 +1466,165 @@ readNodeUsers deployUser nodeConnection nodeName = do
                     )
                 )
 
-validateNodeInventoryTransition :: Text -> Text -> BL.ByteString -> IO ()
-validateNodeInventoryTransition planPath statePath newPlanRaw = do
-    previousPlanExists <- Dir.doesFileExist (T.unpack planPath)
-    if not previousPlanExists
-        then do
-            stateExists <- Dir.doesFileExist (T.unpack statePath)
-            when stateExists $ do
-                stateRaw <- BL.readFile (T.unpack statePath)
-                state <-
-                    case A.eitherDecode' stateRaw of
-                        Left err ->
-                            error ("hostenv-provider: cannot validate provider inventory because " <> T.unpack statePath <> " is invalid JSON: " <> err)
-                        Right value -> pure (value :: KM.KeyMap A.Value)
-                let reservations = KM.delete (K.fromString "_description") state
-                unless (null (KM.toList reservations)) $
-                    error
-                        ( "hostenv-provider: "
-                            <> T.unpack planPath
-                            <> " is missing for an existing provider. Restore the previous generated plan from version control before planning inventory changes."
-                        )
+planEnvironmentAssignments :: KM.KeyMap A.Value -> [(Text, Text)]
+planEnvironmentAssignments plan =
+    case lookupObj (K.fromString "environments") plan of
+        Nothing -> []
+        Just environments ->
+            mapMaybe assignment (KM.toList environments)
+  where
+    assignment (key, A.Object envObj) = do
+        nodeName <- lookupText (K.fromString "node") envObj
+        pure (K.toText key, nodeName)
+    assignment _ = Nothing
+
+planEnvironmentHostnames :: KM.KeyMap A.Value -> [Text]
+planEnvironmentHostnames plan =
+    case lookupObj (K.fromString "environments") plan of
+        Nothing -> []
+        Just environments ->
+            mapMaybe hostnameFor (KM.elems environments)
+  where
+    hostnameFor (A.Object envObj) = do
+        hostenvObj <- lookupObj (K.fromString "hostenv") envObj
+        lookupText (K.fromString "hostname") hostenvObj
+    hostnameFor _ = Nothing
+
+stateReservedHostnames :: Text -> KM.KeyMap A.Value -> [Text]
+stateReservedHostnames hostenvHostname =
+    mapMaybe hostnameFor . KM.toList
+  where
+    hostnameFor (key, A.Object entry) =
+        let userName = fromMaybe (K.toText key) (lookupText (K.fromString "userName") entry)
+         in if T.null userName
+                then Nothing
+                else Just (normalizeDnsName userName <> "." <> normalizeDnsName hostenvHostname)
+    hostnameFor _ = Nothing
+
+loadProviderState :: Text -> IO (KM.KeyMap A.Value)
+loadProviderState statePath = do
+    stateExists <- Dir.doesFileExist (T.unpack statePath)
+    if not stateExists
+        then pure KM.empty
         else do
-            previousRaw <- BL.readFile (T.unpack planPath)
-            previousPlan <-
+            stateRaw <- BL.readFile (T.unpack statePath)
+            case A.eitherDecode' stateRaw of
+                Left err ->
+                    error ("hostenv-provider: cannot read " <> T.unpack statePath <> ": " <> err)
+                Right value -> pure value
+
+validatePlanDnsSafety ::
+    KM.KeyMap A.Value ->
+    Maybe (KM.KeyMap A.Value) ->
+    KM.KeyMap A.Value ->
+    IO ()
+validatePlanDnsSafety state previousPlan newPlan = do
+    let hostenvHostname =
+            fromMaybe
+                (error "hostenv-provider: generated plan is missing hostenvHostname")
+                (lookupText (K.fromString "hostenvHostname") newPlan)
+    let inventory = S.fromList (map normalizeDnsName (planSystemTargetNodes newPlan Nothing))
+    let hostnames =
+            S.toList . S.fromList $
+                planEnvironmentHostnames newPlan
+                    ++ maybe [] planEnvironmentHostnames previousPlan
+                    ++ stateReservedHostnames hostenvHostname state
+
+    dnsCache <- newDnsLookupCache
+    violations <-
+        fmap concat . forM hostnames $ \hostname -> do
+            cnames <- digRRWith dnsCache hostname "CNAME"
+            let domain = normalizeDnsName hostenvHostname
+            let suffix = "." <> domain
+            pure
+                [ (hostname, nodeName)
+                | cname <- cnames
+                , let normalizedTarget = normalizeDnsName cname
+                , Just nodeName <- [T.stripSuffix suffix normalizedTarget]
+                , not (T.null nodeName)
+                , not (S.member nodeName inventory)
+                ]
+
+    unless (null violations) $
+        error
+            ( "hostenv-provider: refusing provider plan because Hostenv DNS still points at node(s) missing from provider.nodeSystems: "
+                <> T.unpack
+                    ( T.intercalate
+                        ", "
+                        [ hostname <> " -> " <> nodeName
+                        | (hostname, nodeName) <- violations
+                        ]
+                    )
+                <> ". Restore the node to inventory, migrate/retire the environment, and run plan again before changing DNS."
+            )
+
+validatePlanTransition :: Text -> Text -> BL.ByteString -> IO ()
+validatePlanTransition planPath statePath newPlanRaw = do
+    newPlan <-
+        case A.eitherDecode' newPlanRaw of
+            Left err ->
+                error ("hostenv-provider: generated plan is invalid JSON: " <> err)
+            Right value -> pure (value :: KM.KeyMap A.Value)
+
+    state <- loadProviderState statePath
+
+    previousPlanExists <- Dir.doesFileExist (T.unpack planPath)
+    previousPlan <-
+        if not previousPlanExists
+            then pure Nothing
+            else do
+                previousRaw <- BL.readFile (T.unpack planPath)
                 case A.eitherDecode' previousRaw of
-                    Left err ->
-                        error ("hostenv-provider: cannot validate node inventory transition because " <> T.unpack planPath <> " is invalid JSON: " <> err)
-                    Right value -> pure (value :: KM.KeyMap A.Value)
-            newPlan <-
-                case A.eitherDecode' newPlanRaw of
-                    Left err ->
-                        error ("hostenv-provider: generated plan is invalid JSON: " <> err)
-                    Right value -> pure (value :: KM.KeyMap A.Value)
+                    Left err -> do
+                        printProviderLine
+                            ( "hostenv-provider: warning: existing "
+                                <> planPath
+                                <> " is invalid; skipping previous-plan inventory comparison ("
+                                <> T.pack err
+                                <> ")"
+                            )
+                        pure Nothing
+                    Right value -> pure (Just (value :: KM.KeyMap A.Value))
 
+    case previousPlan of
+        Nothing -> pure ()
+        Just oldPlan -> do
             let removedNodes =
-                    planSystemTargetNodes previousPlan Nothing
+                    planSystemTargetNodes oldPlan Nothing
                         \\ planSystemTargetNodes newPlan Nothing
+            let removedSet = S.fromList removedNodes
+            let removedAssignments =
+                    [ (envName, nodeName)
+                    | (envName, nodeName) <- planEnvironmentAssignments oldPlan
+                    , S.member nodeName removedSet
+                    ]
+
+            unless (null removedAssignments) $
+                error
+                    ( "hostenv-provider: refusing provider plan because environment(s) were assigned to node(s) removed from provider.nodeSystems: "
+                        <> T.unpack
+                            ( T.intercalate
+                                ", "
+                                [ envName <> "@" <> nodeName
+                                | (envName, nodeName) <- removedAssignments
+                                ]
+                            )
+                        <> ". Keep each source node in inventory, move its environments, mark it retiring, deploy the cleanup, then remove it in a later plan."
+                    )
+
             unless (null removedNodes) $ do
-                stateExists <- Dir.doesFileExist (T.unpack statePath)
-                unless stateExists $
-                    error
-                        ( "hostenv-provider: cannot remove provider node(s) "
-                            <> T.unpack (T.intercalate ", " removedNodes)
-                            <> " because "
-                            <> T.unpack statePath
-                            <> " is missing"
-                        )
-                stateRaw <- BL.readFile (T.unpack statePath)
-                state <-
-                    case A.eitherDecode' stateRaw of
-                        Left err ->
-                            error ("hostenv-provider: cannot validate removed nodes because " <> T.unpack statePath <> " is invalid JSON: " <> err)
-                        Right value -> pure (value :: KM.KeyMap A.Value)
-
                 let previousEnvironments =
-                        fromMaybe KM.empty (lookupObj (K.fromString "environments") previousPlan)
-                -- Previous environment entries have top-level uid fields and
-                -- are keyed by Hostenv username, so EnvironmentState can use
-                -- them as identity evidence even if state.json was truncated.
+                        fromMaybe KM.empty (lookupObj (K.fromString "environments") oldPlan)
                 let managedIdentities = KM.union state previousEnvironments
-
-                let deployUser = planDeployUser previousPlan
+                let deployUser = planDeployUser oldPlan
                 let oldHostname =
                         fromMaybe
-                            (error ("hostenv-provider: hostenvHostname missing from previous " <> T.unpack planPath))
-                            (lookupText (K.fromString "hostenvHostname") previousPlan)
-                let resolveOldConnection = nodeConnectionFor previousPlan oldHostname
+                            (error ("hostenv-provider: hostenvHostname missing from existing " <> T.unpack planPath))
+                            (lookupText (K.fromString "hostenvHostname") oldPlan)
+                let resolveOldConnection = nodeConnectionFor oldPlan oldHostname
 
                 forM_ removedNodes $ \nodeName -> do
-                    unless (planNodeStatus previousPlan nodeName == "retiring") $
+                    unless (planNodeStatus oldPlan nodeName == "retiring") $
                         error
                             ( "hostenv-provider: refusing to remove provider node "
                                 <> T.unpack nodeName
@@ -1579,6 +1669,11 @@ validateNodeInventoryTransition planPath statePath newPlanRaw = do
                                     )
                                 <> ". Deploy migrations/retirements until the node is clean, then run plan again."
                             )
+
+    -- This check happens before plan.json is published and before dns-gate can
+    -- update records. It is deliberately independent of previous-plan history:
+    -- DNS is a live safety tripwire when the previous generated plan is absent.
+    validatePlanDnsSafety state previousPlan newPlan
 
 prepareManagedUserCleanupOnNode ::
     Text ->
