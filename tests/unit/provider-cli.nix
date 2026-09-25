@@ -75,6 +75,24 @@ in
 
     cat > "$work/generated/state.json" <<'EOF'
     {
+      "_providerNodes": {
+        "old-node": {
+          "status": "active",
+          "deployUser": "deploy",
+          "connection": {
+            "hostname": "old-node.hosting.test",
+            "sshOpts": []
+          }
+        },
+        "new-node": {
+          "status": "active",
+          "deployUser": "deploy",
+          "connection": {
+            "hostname": "new-node.hosting.test",
+            "sshOpts": []
+          }
+        }
+      },
       "acme-prod": {
         "userName": "acme-prod",
         "uid": 2000,
@@ -388,6 +406,19 @@ in
       exit 0
     fi
 
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_USER_MANAGER_PROBE"; then
+      case "$script" in
+        *acme-stage*) probe_user="acme-stage" ;;
+        *) probe_user="acme-prod" ;;
+      esac
+      if [ -f "$SOURCE_STATE_DIR/$probe_user-quiesced" ]; then
+        printf 'quiesced\n'
+      else
+        printf 'active\n'
+      fi
+      exit 0
+    fi
+
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "migration-handoff-source"; then
       case "$script" in
         *acme-stage*) handoff_user="acme-stage" ;;
@@ -401,8 +432,16 @@ in
       if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "sudo cat"; then
         [ -f "$handoff_file" ] && cat "$handoff_file"
       elif printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "sudo tee"; then
-        printf 'old-node\n' > "$handoff_file"
-        printf 'HANDOFF_WRITE %s\n' "$handoff_user" >> "$EVENT_LOG"
+        case "$script" in
+          *"accepted old-node"*) handoff_phase="accepted" ;;
+          *"quiesced old-node"*) handoff_phase="quiesced" ;;
+          *) echo "unexpected handoff payload" >&2; exit 44 ;;
+        esac
+        printf '%s old-node\n' "$handoff_phase" > "$handoff_file"
+        case "$handoff_phase" in
+          accepted) printf 'HANDOFF_ACCEPTED %s\n' "$handoff_user" >> "$EVENT_LOG" ;;
+          quiesced) printf 'HANDOFF_QUIESCED %s\n' "$handoff_user" >> "$EVENT_LOG" ;;
+        esac
       elif printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "sudo rm -f"; then
         rm -f "$handoff_file"
       fi
@@ -438,10 +477,20 @@ in
         *acme-stage*) cleanup_user="acme-stage" ;;
         *) cleanup_user="acme-prod" ;;
       esac
+      if [ "''${SYSTEMCTL_QUERY_FAIL:-0}" = 1 ]; then
+        printf 'CLEANUP_QUERY_FAIL %s\n' "$cleanup_user" >> "$EVENT_LOG"
+        exit 5
+      fi
+      if [ "''${FAIL_CLEANUP_AFTER_QUIESCE:-0}" = 1 ]; then
+        touch "$SOURCE_STATE_DIR/$cleanup_user-quiesced"
+        printf 'CLEANUP_QUIESCED_FAIL %s\n' "$cleanup_user" >> "$EVENT_LOG"
+        exit 43
+      fi
       if [ "''${FAIL_CLEANUP:-0}" = 1 ] || { [ "$cleanup_user" = "acme-stage" ] && [ "''${FAIL_CLEANUP_STAGE:-0}" = 1 ]; }; then
         printf 'CLEANUP_FAIL %s\n' "$cleanup_user" >> "$EVENT_LOG"
         exit 43
       fi
+      touch "$SOURCE_STATE_DIR/$cleanup_user-quiesced"
       printf 'CLEANUP %s\n' "$cleanup_user" >> "$EVENT_LOG"
       exit 0
     fi
@@ -470,7 +519,8 @@ in
     (
       cd "$work"
       export HANDOFF_DIR="$TMPDIR/handoff"
-      mkdir -p "$HANDOFF_DIR"
+      export SOURCE_STATE_DIR="$TMPDIR/source-state"
+      mkdir -p "$HANDOFF_DIR" "$SOURCE_STATE_DIR"
       cp generated/state.json "$TMPDIR/state-before.json"
 
       # Pointing --migration-source at the destination must not suppress a
@@ -527,9 +577,51 @@ in
       ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
 
-      # Destination acceptance alone is not a durable handoff. If source
-      # quiescing fails, no handoff marker may be written and the source system
-      # must not be deployed. A retry must take a fresh backup path.
+      # A completed marker from an older lifecycle cannot suppress a real live
+      # source. It must be discarded and a fresh backup attempted.
+      printf 'quiesced old-node\n' > "$HANDOFF_DIR/new-node-acme-prod"
+      rm -f "$SOURCE_STATE_DIR/acme-prod-quiesced"
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_DEST_ENV=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "stale completed handoff suppressed a fresh migration"
+        exit 1
+      fi
+      ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
+      test ! -f "$HANDOFF_DIR/new-node-acme-prod"
+
+      # If cleanup mutates the source and then reports failure, the accepted
+      # marker plus a live source probe makes the interruption recoverable.
+      rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/*
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_CLEANUP_AFTER_QUIESCE=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "cleanup-after-quiesce failure was reported as success"
+        exit 1
+      fi
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP_QUIESCED_FAIL acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_SOURCE_SYSTEM=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "quiesced-source retry was reported as success"
+        exit 1
+      fi
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
+
+      # A cleanup failure that leaves the source live records only acceptance.
+      # The next retry must take a fresh source backup before trying cleanup again.
+      rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/*
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
@@ -541,12 +633,13 @@ in
 
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$nixLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP_FAIL acme-prod' "$eventLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_WRITE acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
 
-      # On retry, the missing handoff marker forces another source backup.
-      # Successful source quiescing records the marker before source-system
-      # removal is attempted. If that removal fails, the source stays quiesced.
+      # On retry the accepted marker does not suppress a fresh backup while the
+      # source is still live. Successful cleanup promotes it to quiesced before
+      # source-system removal is attempted.
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
@@ -557,18 +650,21 @@ in
       fi
 
       ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_WRITE acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'ROLLBACK acme-prod' "$eventLog"
       dest_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
       dest_env_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."acme-prod"' "$eventLog" | head -n1 | cut -d: -f1)"
+      accepted_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_ACCEPTED acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       cleanup_line="$(${pkgs.gnugrep}/bin/grep -n -F 'CLEANUP acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
-      handoff_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_WRITE acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
+      quiesced_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_QUIESCED acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       source_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"old-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
       test "$dest_system_line" -lt "$dest_env_line"
-      test "$dest_env_line" -lt "$cleanup_line"
-      test "$cleanup_line" -lt "$handoff_line"
-      test "$handoff_line" -lt "$source_system_line"
+      test "$dest_env_line" -lt "$accepted_line"
+      test "$accepted_line" -lt "$cleanup_line"
+      test "$cleanup_line" -lt "$quiesced_line"
+      test "$quiesced_line" -lt "$source_system_line"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
 
       : > "$nixLog"
@@ -622,8 +718,10 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-stage"' "$nixLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP_FAIL acme-stage' "$eventLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_WRITE acme-prod' "$eventLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_WRITE acme-stage' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-stage' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-stage' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
     )
 
@@ -823,6 +921,16 @@ in
 
     cat > "$newState" <<'EOF'
     {
+      "_providerNodes": {
+        "new-node": {
+          "status": "active",
+          "deployUser": "deploy",
+          "connection": {
+            "hostname": "new-node.hosting.test",
+            "sshOpts": []
+          }
+        }
+      },
       "acme-prod": {
         "userName": "acme-prod",
         "uid": 2000,
@@ -924,6 +1032,10 @@ in
         '.nodeStatus["old-node"] = "retiring" | .environments["acme-prod"].node = "new-node"' \
         generated/plan.json > "$TMPDIR/retiring-plan.json"
       mv "$TMPDIR/retiring-plan.json" generated/plan.json
+      ${pkgs.jq}/bin/jq \
+        '._providerNodes["old-node"].status = "retiring"' \
+        generated/state.json > "$TMPDIR/retiring-state.json"
+      mv "$TMPDIR/retiring-state.json" generated/state.json
 
       if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
         ${cliPkg}/bin/hostenv-provider plan --dry-run; then
@@ -940,13 +1052,24 @@ in
       PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
 
-      # plan.json is generated output. Losing it must not brick planning.
+      # plan.json is generated output. Losing it must fall back to the durable
+      # provider-node inventory, including its old SSH connection and status.
       rm generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "missing previous plan bypassed live retiring-node validation"
+        exit 1
+      fi
       PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
 
-      # Nor should an old malformed generated plan prevent regeneration.
+      # A malformed generated plan uses the same durable fallback.
       printf 'deliberately not JSON\n' > generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "malformed previous plan bypassed live retiring-node validation"
+        exit 1
+      fi
       PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
 
