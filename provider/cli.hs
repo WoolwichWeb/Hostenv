@@ -481,6 +481,24 @@ data EnvInfo = EnvInfo
     , uid :: Integer
     }
 
+data MigrationHandoffPhase
+    = HandoffAccepted
+    | HandoffQuiesced
+    deriving (Eq, Show)
+
+data MigrationHandoff = MigrationHandoff
+    { mhSourceNode :: Text
+    , mhPhase :: MigrationHandoffPhase
+    }
+    deriving (Eq, Show)
+
+data StoredProviderNode = StoredProviderNode
+    { spnStatus :: Text
+    , spnDeployUser :: Text
+    , spnConnection :: NodeConnection
+    }
+    deriving (Eq, Show)
+
 -- Note: check the nix code that generates plan.json
 -- (modules/entrypoints/provider/plan.nix)
 -- The name key is always == userName. So, it's okay to use
@@ -1557,9 +1575,18 @@ readNodeRuntimeUsers deployUser nodeConnection identities nodeName = do
                 unit = "user@" <> T.pack (show uid) <> ".service"
                 runtimeDir = "/run/user/" <> T.pack (show uid)
              in T.unlines
-                    [ "if [ -e " <> shellEscape lingerPath <> " ]"
-                        <> " || systemctl is-active --quiet "
-                        <> shellEscape unit
+                    [ "unit_active=0"
+                    , "set +e"
+                    , "systemctl is-active --quiet " <> shellEscape unit
+                    , "unit_status=$?"
+                    , "set -e"
+                    , "case \"$unit_status\" in"
+                    , "  0) unit_active=1 ;;"
+                    , "  3|4) unit_active=0 ;;"
+                    , "  *) echo \"failed to inspect " <> unit <> " (systemctl exit $unit_status)\" >&2; exit \"$unit_status\" ;;"
+                    , "esac"
+                    , "if [ -e " <> shellEscape lingerPath <> " ]"
+                        <> " || [ \"$unit_active\" -eq 1 ]"
                         <> " || [ -e "
                         <> shellEscape runtimeDir
                         <> " ]; then"
@@ -1619,15 +1646,49 @@ planEnvironmentHostnames plan =
     hostnameFor _ = Nothing
 
 stateReservedHostnames :: Text -> KM.KeyMap A.Value -> [Text]
-stateReservedHostnames hostenvHostname =
-    mapMaybe hostnameFor . KM.toList
+stateReservedHostnames hostenvHostname state =
+    [ normalizeDnsName userName <> "." <> normalizeDnsName hostenvHostname
+    | (userName, _) <- EnvironmentState.managedIdentities state
+    ]
+
+storedProviderNodes :: KM.KeyMap A.Value -> Either Text (M.Map Text StoredProviderNode)
+storedProviderNodes state =
+    case lookupObj (K.fromString "_providerNodes") state of
+        Nothing -> Right M.empty
+        Just nodes ->
+            M.fromList <$> mapM parseNode (KM.toList nodes)
   where
-    hostnameFor (key, A.Object entry) =
-        let userName = fromMaybe (K.toText key) (lookupText (K.fromString "userName") entry)
-         in if T.null userName
-                then Nothing
-                else Just (normalizeDnsName userName <> "." <> normalizeDnsName hostenvHostname)
-    hostnameFor _ = Nothing
+    parseNode (key, A.Object nodeObj) = do
+        let nodeName = K.toText key
+        status <-
+            case lookupText (K.fromString "status") nodeObj of
+                Just "active" -> Right "active"
+                Just "retiring" -> Right "retiring"
+                Just other -> Left ("invalid stored provider node status for " <> nodeName <> ": " <> other)
+                Nothing -> Left ("stored provider node " <> nodeName <> " is missing status")
+        deployUser <-
+            maybe
+                (Left ("stored provider node " <> nodeName <> " is missing deployUser"))
+                Right
+                (lookupText (K.fromString "deployUser") nodeObj)
+        connectionObj <-
+            maybe
+                (Left ("stored provider node " <> nodeName <> " is missing connection"))
+                Right
+                (lookupObj (K.fromString "connection") nodeObj)
+        connectionHost <-
+            maybe
+                (Left ("stored provider node " <> nodeName <> " connection is missing hostname"))
+                Right
+                (lookupText (K.fromString "hostname") connectionObj)
+        let connection =
+                NodeConnection
+                    { hostname = connectionHost
+                    , sshOpts = lookupTextList (K.fromString "sshOpts") connectionObj
+                    }
+        Right (nodeName, StoredProviderNode status deployUser connection)
+    parseNode (key, _) =
+        Left ("stored provider node " <> K.toText key <> " is not an object")
 
 loadProviderState :: Text -> IO (KM.KeyMap A.Value)
 loadProviderState statePath = do
@@ -1722,19 +1783,93 @@ validatePlanTransition planPath statePath newPlanRaw = do
                         printProviderLine
                             ( "hostenv-provider: warning: existing "
                                 <> planPath
-                                <> " is invalid; skipping previous-plan inventory comparison ("
+                                <> " is invalid; falling back to durable provider-node state ("
                                 <> T.pack err
                                 <> ")"
                             )
                         pure Nothing
                     Right value -> pure (Just (value :: KM.KeyMap A.Value))
 
+    let newNodes = planSystemTargetNodes newPlan Nothing
+    let validateRemovedNode nodeName status deployUser connection managedIdentityState = do
+            unless (status == "retiring") $
+                error
+                    ( "hostenv-provider: refusing to remove provider node "
+                        <> T.unpack nodeName
+                        <> " directly from inventory. Mark provider.nodeStatus."
+                        <> T.unpack nodeName
+                        <> " = \"retiring\", move/retire its environments, deploy the cleanup, then run plan again."
+                    )
+
+            let resolveStoredConnection _ = connection
+            observedResult <- readNodeUsers deployUser resolveStoredConnection nodeName
+            observedUsers <-
+                case observedResult of
+                    Left err ->
+                        error
+                            ( "hostenv-provider: refusing to remove retiring node "
+                                <> T.unpack nodeName
+                                <> " because Hostenv could not verify that it is clean: "
+                                <> T.unpack err
+                            )
+                    Right (_, users) -> pure users
+
+            let identities = EnvironmentState.managedIdentities managedIdentityState
+            runtimeResult <-
+                readNodeRuntimeUsers
+                    deployUser
+                    resolveStoredConnection
+                    identities
+                    nodeName
+            runtimeUsers <-
+                case runtimeResult of
+                    Left err ->
+                        error
+                            ( "hostenv-provider: refusing to remove retiring node "
+                                <> T.unpack nodeName
+                                <> " because Hostenv could not verify its user runtime state: "
+                                <> T.unpack err
+                            )
+                    Right (_, users) -> pure users
+
+            let managedUsers =
+                    EnvironmentState.managedUsersToRetire
+                        nodeName
+                        M.empty
+                        observedUsers
+                        runtimeUsers
+                        managedIdentityState
+            let uidMismatches =
+                    EnvironmentState.managedUserUidMismatches
+                        observedUsers
+                        managedIdentityState
+            let uidOwnerConflicts =
+                    EnvironmentState.managedReservedUidConflicts
+                        observedUsers
+                        managedIdentityState
+            unless (null managedUsers && null uidMismatches && null uidOwnerConflicts) $
+                error
+                    ( "hostenv-provider: refusing to remove retiring node "
+                        <> T.unpack nodeName
+                        <> " from inventory because it still contains Hostenv-managed account/runtime state: "
+                        <> T.unpack
+                            ( T.intercalate
+                                ", "
+                                ( map fst managedUsers
+                                    ++ [ userName <> " (UID drift)" | (userName, _, _) <- uidMismatches ]
+                                    ++ [ userName <> " (reserved UID " <> T.pack (show expectedUid) <> " owned by " <> owner <> ")"
+                                       | (userName, expectedUid, owner) <- uidOwnerConflicts
+                                       ]
+                                )
+                            )
+                        <> ". Deploy migrations/retirements until the node is clean, then run plan again."
+                    )
+
     case previousPlan of
-        Nothing -> pure ()
         Just oldPlan -> do
             let removedNodes =
                     planSystemTargetNodes oldPlan Nothing
-                        \\ planSystemTargetNodes newPlan Nothing
+                        \\ newNodes
             let removedSet = S.fromList removedNodes
             let removedAssignments =
                     [ (envName, nodeName)
@@ -1759,91 +1894,53 @@ validatePlanTransition planPath statePath newPlanRaw = do
                 let previousEnvironments =
                         fromMaybe KM.empty (lookupObj (K.fromString "environments") oldPlan)
                 let managedIdentityState = KM.union state previousEnvironments
-                let identities = EnvironmentState.managedIdentities managedIdentityState
                 let deployUser = planDeployUser oldPlan
                 let oldHostname =
                         fromMaybe
                             (error ("hostenv-provider: hostenvHostname missing from existing " <> T.unpack planPath))
                             (lookupText (K.fromString "hostenvHostname") oldPlan)
                 let resolveOldConnection = nodeConnectionFor oldPlan oldHostname
-
-                forM_ removedNodes $ \nodeName -> do
-                    unless (planNodeStatus oldPlan nodeName == "retiring") $
+                forM_ removedNodes $ \nodeName ->
+                    validateRemovedNode
+                        nodeName
+                        (planNodeStatus oldPlan nodeName)
+                        deployUser
+                        (resolveOldConnection nodeName)
+                        managedIdentityState
+        Nothing -> do
+            storedNodes <-
+                case storedProviderNodes state of
+                    Left err ->
                         error
-                            ( "hostenv-provider: refusing to remove provider node "
-                                <> T.unpack nodeName
-                                <> " directly from inventory. Mark provider.nodeStatus."
-                                <> T.unpack nodeName
-                                <> " = \"retiring\", move/retire its environments, deploy the cleanup, then run plan again."
+                            ( "hostenv-provider: cannot use durable provider-node state to validate plan transition: "
+                                <> T.unpack err
                             )
-
-                    observedResult <- readNodeUsers deployUser resolveOldConnection nodeName
-                    observedUsers <-
-                        case observedResult of
-                            Left err ->
-                                error
-                                    ( "hostenv-provider: refusing to remove retiring node "
-                                        <> T.unpack nodeName
-                                        <> " because Hostenv could not verify that it is clean: "
-                                        <> T.unpack err
-                                    )
-                            Right (_, users) -> pure users
-
-                    runtimeResult <-
-                        readNodeRuntimeUsers
-                            deployUser
-                            resolveOldConnection
-                            identities
+                    Right nodes -> pure nodes
+            let managedIdentities = EnvironmentState.managedIdentities state
+            when (M.null storedNodes && not (null managedIdentities)) $
+                error
+                    ( "hostenv-provider: refusing provider plan because "
+                        <> T.unpack planPath
+                        <> " is unavailable and "
+                        <> T.unpack statePath
+                        <> " predates durable provider-node inventory. Restore the last generated plan, run plan once to upgrade state.json, then retry."
+                    )
+            let removedNodes = M.keys storedNodes \\ newNodes
+            forM_ removedNodes $ \nodeName ->
+                case M.lookup nodeName storedNodes of
+                    Nothing -> pure ()
+                    Just stored ->
+                        validateRemovedNode
                             nodeName
-                    runtimeUsers <-
-                        case runtimeResult of
-                            Left err ->
-                                error
-                                    ( "hostenv-provider: refusing to remove retiring node "
-                                        <> T.unpack nodeName
-                                        <> " because Hostenv could not verify its user runtime state: "
-                                        <> T.unpack err
-                                    )
-                            Right (_, users) -> pure users
-
-                    let managedUsers =
-                            EnvironmentState.managedUsersToRetire
-                                nodeName
-                                M.empty
-                                observedUsers
-                                runtimeUsers
-                                managedIdentityState
-                    let uidMismatches =
-                            EnvironmentState.managedUserUidMismatches
-                                observedUsers
-                                managedIdentityState
-                    let uidOwnerConflicts =
-                            EnvironmentState.managedReservedUidConflicts
-                                observedUsers
-                                managedIdentityState
-                    unless (null managedUsers && null uidMismatches && null uidOwnerConflicts) $
-                        error
-                            ( "hostenv-provider: refusing to remove retiring node "
-                                <> T.unpack nodeName
-                                <> " from inventory because it still contains Hostenv-managed account/runtime state: "
-                                <> T.unpack
-                                    ( T.intercalate
-                                        ", "
-                                        ( map fst managedUsers
-                                            ++ [ userName <> " (UID drift)" | (userName, _, _) <- uidMismatches ]
-                                            ++ [ userName <> " (reserved UID " <> T.pack (show expectedUid) <> " owned by " <> owner <> ")"
-                                               | (userName, expectedUid, owner) <- uidOwnerConflicts
-                                               ]
-                                        )
-                                    )
-                                <> ". Deploy migrations/retirements until the node is clean, then run plan again."
-                            )
+                            stored.spnStatus
+                            stored.spnDeployUser
+                            stored.spnConnection
+                            state
 
     -- This check happens before plan.json is published and before dns-gate can
-    -- update records. It is deliberately independent of previous-plan history:
-    -- DNS is a live safety tripwire when the previous generated plan is absent.
+    -- update records. It remains an independent live tripwire in addition to
+    -- durable provider-node transition checks.
     validatePlanDnsSafety state previousPlan newPlan
-
 prepareManagedUserCleanupOnNode ::
     Text ->
     (Text -> NodeConnection) ->
@@ -1852,8 +1949,9 @@ prepareManagedUserCleanupOnNode ::
     S.Set Text ->
     KM.KeyMap A.Value ->
     Text ->
+    (Text -> Integer -> IO ()) ->
     IO (Either Text ([(Text, Integer)], [Text]))
-prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedUsers runtimeUsers state nodeName = do
+prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedUsers runtimeUsers state nodeName onCleaned = do
     let target = mkSshTarget deployUser (nodeConnection nodeName)
     let uidMismatches =
             EnvironmentState.managedUserUidMismatches
@@ -1921,11 +2019,35 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                                 <> "; else sudo rm -f "
                                 <> shellEscape lingerPath
                                 <> "; fi; "
-                                <> "if systemctl is-active --quiet "
+                                <> "set +e; systemctl is-active --quiet "
                                 <> shellEscape unit
-                                <> "; then sudo systemctl stop "
+                                <> "; unit_status=$?; set -e; "
+                                <> "case \"$unit_status\" in "
+                                <> "0) sudo systemctl stop "
                                 <> shellEscape unit
-                                <> "; fi; "
+                                <> " ;; "
+                                <> "3|4) ;; "
+                                <> "*) echo \"failed to inspect "
+                                <> unit
+                                <> " (systemctl exit $unit_status)\" >&2; exit \"$unit_status\" ;; "
+                                <> "esac; "
+                                <> "set +e; systemctl is-active --quiet "
+                                <> shellEscape unit
+                                <> "; unit_status=$?; set -e; "
+                                <> "case \"$unit_status\" in "
+                                <> "0) echo \""
+                                <> unit
+                                <> " is still active after cleanup\" >&2; exit 90 ;; "
+                                <> "3|4) ;; "
+                                <> "*) echo \"failed to verify "
+                                <> unit
+                                <> " after cleanup (systemctl exit $unit_status)\" >&2; exit \"$unit_status\" ;; "
+                                <> "esac; "
+                                <> "if [ -e "
+                                <> shellEscape lingerPath
+                                <> " ]; then echo \"linger remains for "
+                                <> userName
+                                <> " after cleanup\" >&2; exit 91; fi; "
                                 <> "if ! getent passwd "
                                 <> shellEscape userName
                                 <> " >/dev/null; then sudo rm -rf "
@@ -1933,6 +2055,7 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                                 <> "; fi"
                     printProviderLine ("hostenv-provider: preparing retirement of Hostenv user " <> userName <> " from " <> nodeName)
                     code <- runRemote target ["bash", "-lc", cleanupCmd]
+                    when (code == ExitSuccess) (onCleaned userName uid)
                     pure ((userName, uid), code)
             let cleanedUsers = [user | (user, code) <- cleanupResults, code == ExitSuccess]
             let failures = [userName | ((userName, _), code) <- cleanupResults, code /= ExitSuccess]
@@ -1976,6 +2099,63 @@ rollbackManagedUserCleanupOnNode deployUser nodeConnection nodeName users = do
         printProviderLine ("hostenv-provider: restoring Hostenv user manager after failed system deployment: " <> userName <> " on " <> nodeName)
         _ <- runRemote target ["bash", "-lc", rollbackCmd]
         pure ()
+
+managedUserIsQuiescedOnNode ::
+    Text ->
+    (Text -> NodeConnection) ->
+    Text ->
+    Integer ->
+    Text ->
+    IO Bool
+managedUserIsQuiescedOnNode deployUser nodeConnection userName uid nodeName = do
+    let target = mkSshTarget deployUser (nodeConnection nodeName)
+    let lingerPath = "/var/lib/systemd/linger/" <> userName
+    let unit = "user@" <> T.pack (show uid) <> ".service"
+    let probeScript =
+            T.unlines
+                [ "set -euo pipefail"
+                , "# HOSTENV_USER_MANAGER_PROBE " <> userName
+                , "set +e"
+                , "systemctl is-active --quiet " <> shellEscape unit
+                , "unit_status=$?"
+                , "set -e"
+                , "case \"$unit_status\" in"
+                , "  0) unit_active=1 ;;"
+                , "  3|4) unit_active=0 ;;"
+                , "  *) echo \"failed to inspect " <> unit <> " (systemctl exit $unit_status)\" >&2; exit \"$unit_status\" ;;"
+                , "esac"
+                , "if [ ! -e " <> shellEscape lingerPath <> " ] && [ \"$unit_active\" -eq 0 ]; then"
+                , "  printf 'quiesced\\n'"
+                , "else"
+                , "  printf 'active\\n'"
+                , "fi"
+                ]
+    (code, out, err) <- runRemoteScriptOutput target probeScript
+    case code of
+        ExitFailure exitCode ->
+            error
+                ( "failed to inspect Hostenv user manager for "
+                    <> T.unpack userName
+                    <> " on "
+                    <> T.unpack nodeName
+                    <> " (exit "
+                    <> show exitCode
+                    <> "): "
+                    <> T.unpack (T.strip err)
+                )
+        ExitSuccess ->
+            case T.strip out of
+                "quiesced" -> pure True
+                "active" -> pure False
+                other ->
+                    error
+                        ( "unexpected Hostenv user-manager probe result for "
+                            <> T.unpack userName
+                            <> " on "
+                            <> T.unpack nodeName
+                            <> ": "
+                            <> T.unpack other
+                        )
 
 runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
 runMigrationBackup deployUser nodeConnection envInfo prevNode backupName = do
@@ -2100,12 +2280,29 @@ migrationHandoffPath :: EnvInfo -> Text
 migrationHandoffPath envInfo =
     envInfo.stateDir <> "/hostenv/migration-handoff-source"
 
-readMigrationHandoffSource ::
+retiredMigrationHandoffPath :: Text -> Text
+retiredMigrationHandoffPath userName =
+    "/home/" <> userName <> "/.local/state/hostenv/migration-handoff-source"
+
+parseMigrationHandoff :: Text -> Maybe MigrationHandoff
+parseMigrationHandoff raw =
+    case T.words (T.strip raw) of
+        [] -> Nothing
+        [sourceNode] ->
+            Just (MigrationHandoff sourceNode HandoffQuiesced)
+        ["accepted", sourceNode] ->
+            Just (MigrationHandoff sourceNode HandoffAccepted)
+        ["quiesced", sourceNode] ->
+            Just (MigrationHandoff sourceNode HandoffQuiesced)
+        _ ->
+            error ("invalid migration handoff marker: " <> T.unpack raw)
+
+readMigrationHandoff ::
     Text ->
     (Text -> NodeConnection) ->
     EnvInfo ->
-    IO (Maybe Text)
-readMigrationHandoffSource deployUser nodeConnection envInfo = do
+    IO (Maybe MigrationHandoff)
+readMigrationHandoff deployUser nodeConnection envInfo = do
     let target = mkSshTarget deployUser (nodeConnection envInfo.node)
     let markerPath = migrationHandoffPath envInfo
     let cmd =
@@ -2115,26 +2312,32 @@ readMigrationHandoffSource deployUser nodeConnection envInfo = do
                 <> shellEscape markerPath
                 <> "; fi"
     source <- T.strip <$> runRemoteStrict target ["bash", "-lc", cmd]
-    pure (if T.null source then Nothing else Just source)
+    pure (parseMigrationHandoff source)
 
-writeMigrationHandoffSource ::
+writeMigrationHandoff ::
     Text ->
     (Text -> NodeConnection) ->
     EnvInfo ->
     Text ->
+    MigrationHandoffPhase ->
     IO ()
-writeMigrationHandoffSource deployUser nodeConnection envInfo sourceNode = do
+writeMigrationHandoff deployUser nodeConnection envInfo sourceNode phase = do
     let target = mkSshTarget deployUser (nodeConnection envInfo.node)
     let markerPath = migrationHandoffPath envInfo
     let markerDir = FP.takeDirectory (T.unpack markerPath)
     let ownerSpec = T.pack (show envInfo.uid)
+    let phaseText =
+            case phase of
+                HandoffAccepted -> "accepted"
+                HandoffQuiesced -> "quiesced"
+    let markerText = phaseText <> " " <> sourceNode
     let cmd =
             T.intercalate
                 " && "
                 [ "sudo mkdir -p " <> shellEscape (T.pack markerDir)
                 , "sudo chown " <> ownerSpec <> ":" <> ownerSpec <> " " <> shellEscape (T.pack markerDir)
                 , "printf '%s\\n' "
-                    <> shellEscape sourceNode
+                    <> shellEscape markerText
                     <> " | sudo tee "
                     <> shellEscape markerPath
                     <> " >/dev/null"
@@ -2145,19 +2348,48 @@ writeMigrationHandoffSource deployUser nodeConnection envInfo sourceNode = do
     case result of
         ExitSuccess ->
             printProviderLine
-                ( "hostenv-provider: recorded completed migration handoff for "
+                ( "hostenv-provider: recorded migration handoff "
+                    <> phaseText
+                    <> " for "
                     <> envInfo.userName
                     <> " from "
                     <> sourceNode
                 )
         ExitFailure code ->
             error
-                ( "failed to record migration handoff for "
+                ( "failed to record migration handoff "
+                    <> T.unpack phaseText
+                    <> " for "
                     <> T.unpack envInfo.userName
                     <> " (exit "
                     <> show code
                     <> ")"
                 )
+
+writeMigrationHandoffAccepted ::
+    Text ->
+    (Text -> NodeConnection) ->
+    EnvInfo ->
+    Text ->
+    IO ()
+writeMigrationHandoffAccepted deployUser nodeConnection envInfo sourceNode = do
+    existing <- readMigrationHandoff deployUser nodeConnection envInfo
+    case existing of
+        Just handoff
+            | handoff.mhSourceNode == sourceNode
+            , handoff.mhPhase == HandoffQuiesced ->
+                pure ()
+        _ ->
+            writeMigrationHandoff deployUser nodeConnection envInfo sourceNode HandoffAccepted
+
+writeMigrationHandoffQuiesced ::
+    Text ->
+    (Text -> NodeConnection) ->
+    EnvInfo ->
+    Text ->
+    IO ()
+writeMigrationHandoffQuiesced deployUser nodeConnection envInfo sourceNode =
+    writeMigrationHandoff deployUser nodeConnection envInfo sourceNode HandoffQuiesced
 
 clearMigrationHandoffSourceOnNode ::
     Text ->
@@ -2181,6 +2413,29 @@ clearMigrationHandoffSourceOnNode deployUser nodeConnection envInfo nodeName = d
             error
                 ( "failed to clear stale migration handoff marker for "
                     <> T.unpack envInfo.userName
+                    <> " on "
+                    <> T.unpack nodeName
+                    <> " (exit "
+                    <> show code
+                    <> ")"
+                )
+
+clearRetiredMigrationHandoffOnNode ::
+    Text ->
+    (Text -> NodeConnection) ->
+    Text ->
+    Text ->
+    IO ()
+clearRetiredMigrationHandoffOnNode deployUser nodeConnection userName nodeName = do
+    let target = mkSshTarget deployUser (nodeConnection nodeName)
+    let markerPath = retiredMigrationHandoffPath userName
+    result <- runRemote target ["bash", "-lc", "sudo rm -f " <> shellEscape markerPath]
+    case result of
+        ExitSuccess -> pure ()
+        ExitFailure code ->
+            error
+                ( "failed to clear retired migration handoff marker for "
+                    <> T.unpack userName
                     <> " on "
                     <> T.unpack nodeName
                     <> " (exit "
@@ -2626,12 +2881,12 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                         )
                                                 Nothing -> Right Nothing
                                         [sourceNode] -> do
-                                            completedSource <-
-                                                readMigrationHandoffSource
+                                            completedHandoff <-
+                                                readMigrationHandoff
                                                     deployUser
                                                     resolveNodeConnection
                                                     envInfo
-                                            if completedSource == Just sourceNode
+                                            if maybe False ((== sourceNode) . (.mhSourceNode)) completedHandoff
                                                 then do
                                                     printProviderLine
                                                         ( "hostenv-provider: Hostenv runtime for "
@@ -2680,26 +2935,70 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
 
             migrationHandoffStates <-
                 forM migrations $ \migration@(envInfo, prevNode) -> do
-                    completedSource <-
-                        readMigrationHandoffSource
+                    completedHandoff <-
+                        readMigrationHandoff
                             deployUser
                             resolveNodeConnection
                             envInfo
-                    let alreadyAccepted = completedSource == Just prevNode
-                    when alreadyAccepted $
-                        printProviderLine
-                            ( "hostenv-provider: migration handoff for "
-                                <> envInfo.userName
-                                <> " from "
-                                <> prevNode
-                                <> " was already accepted; skipping source backup and restore-plan recreation"
-                            )
-                    pure (migration, alreadyAccepted)
+                    alreadyQuiesced <-
+                        case completedHandoff of
+                            Nothing -> pure False
+                            Just handoff
+                                | handoff.mhSourceNode /= prevNode -> do
+                                    printProviderLine
+                                        ( "hostenv-provider: warning: discarding stale migration handoff for "
+                                            <> envInfo.userName
+                                            <> " from "
+                                            <> handoff.mhSourceNode
+                                            <> "; current source is "
+                                            <> prevNode
+                                        )
+                                    clearMigrationHandoffSourceOnNode
+                                        deployUser
+                                        resolveNodeConnection
+                                        envInfo
+                                        envInfo.node
+                                    pure False
+                                | otherwise -> do
+                                    sourceQuiesced <-
+                                        managedUserIsQuiescedOnNode
+                                            deployUser
+                                            resolveNodeConnection
+                                            envInfo.userName
+                                            envInfo.uid
+                                            prevNode
+                                    if sourceQuiesced
+                                        then do
+                                            when (handoff.mhPhase == HandoffAccepted) $
+                                                writeMigrationHandoffQuiesced
+                                                    deployUser
+                                                    resolveNodeConnection
+                                                    envInfo
+                                                    prevNode
+                                            printProviderLine
+                                                ( "hostenv-provider: migration handoff for "
+                                                    <> envInfo.userName
+                                                    <> " from "
+                                                    <> prevNode
+                                                    <> " has a quiesced source; skipping source backup and restore-plan recreation"
+                                                )
+                                            pure True
+                                        else do
+                                            when (handoff.mhPhase == HandoffQuiesced) $
+                                                printProviderLine
+                                                    ( "hostenv-provider: warning: stale quiesced migration handoff for "
+                                                        <> envInfo.userName
+                                                        <> " from "
+                                                        <> prevNode
+                                                        <> " has a live source; taking a fresh migration backup"
+                                                    )
+                                            pure False
+                    pure (migration, alreadyQuiesced)
 
             let migrationsToRun =
                     [ migration
-                    | (migration, alreadyAccepted) <- migrationHandoffStates
-                    , not alreadyAccepted
+                    | (migration, alreadyQuiesced) <- migrationHandoffStates
+                    , not alreadyQuiesced
                     ]
 
             let runMigration (envInfo, prevNode) = do
@@ -2879,6 +3178,14 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                         ExitFailure _ -> pure (envResult, False, Nothing)
                         ExitSuccess -> do
                             (accepted, verificationFailure) <- verifyDeployedEnvironment envInfo
+                            when accepted $
+                                forM_ (M.lookup envName acceptedMigrationSources) $ \sourceNode ->
+                                    when (not (null envInfo.migrateBackups)) $
+                                        writeMigrationHandoffAccepted
+                                            deployUser
+                                            resolveNodeConnection
+                                            envInfo
+                                            sourceNode
                             pure (envResult, accepted, verificationFailure)
 
             let deployReadyNodes pendingNodes systemResults envResults successfulEnvironments verificationFailures =
@@ -2894,26 +3201,15 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             else do
                                 roundResults <-
                                     forM readyNodes $ \nodeName -> do
-                                        prepared <-
-                                            prepareManagedUserCleanupOnNode
-                                                deployUser
-                                                resolveNodeConnection
-                                                desiredNodesByUser
-                                                (M.findWithDefault M.empty nodeName observedNodeUsers)
-                                                (M.findWithDefault S.empty nodeName observedNodeRuntimeUsers)
-                                                state
-                                                nodeName
-                                        case prepared of
-                                            Left err -> do
-                                                printProviderErrLine ("hostenv-provider: error: " <> err)
-                                                let failedEnvs =
-                                                        [ ((envInfo.userName, ExitFailure 1), False, Nothing)
-                                                        | envInfo <- envsForNode nodeName
-                                                        ]
-                                                pure (nodeName, ExitFailure 1, failedEnvs)
-                                            Right (cleanedUsers, cleanupFailures) -> do
-                                                forM_ cleanedUsers $ \(userName, _) ->
-                                                    when (M.member userName desiredNodesByUser) $
+                                        let onCleaned userName _uid =
+                                                case M.lookup userName desiredNodesByUser of
+                                                    Nothing ->
+                                                        clearRetiredMigrationHandoffOnNode
+                                                            deployUser
+                                                            resolveNodeConnection
+                                                            userName
+                                                            nodeName
+                                                    Just _ ->
                                                         forM_ (M.lookup userName envInfoByUser) $ \envInfo -> do
                                                             clearMigrationHandoffSourceOnNode
                                                                 deployUser
@@ -2924,7 +3220,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                                 case M.lookup userName acceptedMigrationSources of
                                                                     Just sourceNode
                                                                         | sourceNode == nodeName ->
-                                                                            writeMigrationHandoffSource
+                                                                            writeMigrationHandoffQuiesced
                                                                                 deployUser
                                                                                 resolveNodeConnection
                                                                                 envInfo
@@ -2945,6 +3241,25 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                                                 <> " on "
                                                                                 <> T.unpack nodeName
                                                                             )
+                                        prepared <-
+                                            prepareManagedUserCleanupOnNode
+                                                deployUser
+                                                resolveNodeConnection
+                                                desiredNodesByUser
+                                                (M.findWithDefault M.empty nodeName observedNodeUsers)
+                                                (M.findWithDefault S.empty nodeName observedNodeRuntimeUsers)
+                                                state
+                                                nodeName
+                                                onCleaned
+                                        case prepared of
+                                            Left err -> do
+                                                printProviderErrLine ("hostenv-provider: error: " <> err)
+                                                let failedEnvs =
+                                                        [ ((envInfo.userName, ExitFailure 1), False, Nothing)
+                                                        | envInfo <- envsForNode nodeName
+                                                        ]
+                                                pure (nodeName, ExitFailure 1, failedEnvs)
+                                            Right (cleanedUsers, cleanupFailures) -> do
                                                 if null cleanupFailures
                                                     then do
                                                         systemCode <- deploySystemNode nodeName
