@@ -85,6 +85,11 @@ in
         "userName": "retired-prod",
         "uid": 2001,
         "virtualHosts": []
+      },
+      "orphan-prod": {
+        "userName": "orphan-prod",
+        "uid": 2002,
+        "virtualHosts": []
       }
     }
     EOF
@@ -114,6 +119,17 @@ in
 
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/etc/os-release"; then
       printf 'ID=nixos\n'
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      case "$target" in
+        *retired-node.hosting.test*)
+          if [ "''${ORPHAN_RUNTIME:-0}" = 1 ]; then
+            printf 'orphan-prod\n'
+          fi
+          ;;
+      esac
       exit 0
     fi
 
@@ -178,6 +194,16 @@ in
 
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
       test "$(wc -l < "$log")" -eq 1
+
+      # A Hostenv runtime can outlive its passwd entry. The reserved identity
+      # must still be cleaned from linger, user@UID, and /run/user/UID.
+      : > "$log"
+      : > "$sshLog"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" SSH_LOG="$sshLog" ORPHAN_RUNTIME=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --node retired-node --remote-build --skip-verification
+      ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/systemd/linger/orphan-prod" "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq "user@2002.service" "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq "/run/user/2002" "$sshLog"
 
       # Real deploys observe node passwd state, but state.json itself is an
       # input/reservation file and must remain byte-for-byte unchanged.
@@ -352,6 +378,27 @@ in
       exit 0
     fi
 
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "migration-handoff-source"; then
+      case "$target" in
+        *new-node.hosting.test*) handoff_file="$HANDOFF_DIR/new-node" ;;
+        *old-node.hosting.test*) handoff_file="$HANDOFF_DIR/old-node" ;;
+        *) handoff_file="$HANDOFF_DIR/unknown" ;;
+      esac
+      if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "sudo cat"; then
+        [ -f "$handoff_file" ] && cat "$handoff_file"
+      elif printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "sudo tee"; then
+        printf 'old-node\n' > "$handoff_file"
+        printf 'HANDOFF_WRITE acme-prod\n' >> "$EVENT_LOG"
+      elif printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "sudo rm -f"; then
+        rm -f "$handoff_file"
+      fi
+      exit 0
+    fi
+
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
       case "$target" in
         *old-node.hosting.test*)
@@ -399,6 +446,8 @@ in
 
     (
       cd "$work"
+      export HANDOFF_DIR="$TMPDIR/handoff"
+      mkdir -p "$HANDOFF_DIR"
       cp generated/state.json "$TMPDIR/state-before.json"
 
       # Pointing --migration-source at the destination must not suppress a
@@ -455,22 +504,9 @@ in
       ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
 
-      : > "$nixLog"
-      : > "$sshLog"
-      : > "$eventLog"
-      PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" \
-        ${cliPkg}/bin/hostenv-provider deploy --remote-build
-
-      dest_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
-      dest_env_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."acme-prod"' "$eventLog" | head -n1 | cut -d: -f1)"
-      cleanup_line="$(${pkgs.gnugrep}/bin/grep -n -F 'CLEANUP acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
-      source_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"old-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
-
-      test "$dest_system_line" -lt "$dest_env_line"
-      test "$dest_env_line" -lt "$cleanup_line"
-      test "$cleanup_line" -lt "$source_system_line"
-      ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
-
+      # Once the destination is accepted, a source-system failure must leave
+      # the old application quiesced. The destination handoff marker makes the
+      # next run skip source backup/restore-plan recreation.
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
@@ -480,13 +516,16 @@ in
         exit 1
       fi
 
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_WRITE acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'ROLLBACK acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'ROLLBACK acme-prod' "$eventLog"
+      dest_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
+      dest_env_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."acme-prod"' "$eventLog" | head -n1 | cut -d: -f1)"
       cleanup_line="$(${pkgs.gnugrep}/bin/grep -n -F 'CLEANUP acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       source_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"old-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
-      rollback_line="$(${pkgs.gnugrep}/bin/grep -n -F 'ROLLBACK acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
+      test "$dest_system_line" -lt "$dest_env_line"
+      test "$dest_env_line" -lt "$cleanup_line"
       test "$cleanup_line" -lt "$source_system_line"
-      test "$source_system_line" -lt "$rollback_line"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
 
       : > "$nixLog"
@@ -495,6 +534,8 @@ in
       PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'ROLLBACK acme-prod' "$eventLog"
     )
 
     echo ok > "$out"
