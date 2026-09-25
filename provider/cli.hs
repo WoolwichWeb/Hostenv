@@ -1575,15 +1575,18 @@ readNodeRuntimeUsers deployUser nodeConnection identities nodeName = do
                 unit = "user@" <> T.pack (show uid) <> ".service"
                 runtimeDir = "/run/user/" <> T.pack (show uid)
              in T.unlines
-                    [ "unit_active=0"
-                    , "set +e"
-                    , "systemctl is-active --quiet " <> shellEscape unit
+                    [ "set +e"
+                    , "unit_state=$(systemctl show -p ActiveState --value " <> shellEscape unit <> ")"
                     , "unit_status=$?"
                     , "set -e"
-                    , "case \"$unit_status\" in"
-                    , "  0) unit_active=1 ;;"
-                    , "  3|4) unit_active=0 ;;"
-                    , "  *) echo \"failed to inspect " <> unit <> " (systemctl exit $unit_status)\" >&2; exit \"$unit_status\" ;;"
+                    , "if [ \"$unit_status\" -ne 0 ]; then"
+                    , "  echo \"failed to inspect " <> unit <> " (systemctl exit $unit_status)\" >&2"
+                    , "  exit \"$unit_status\""
+                    , "fi"
+                    , "case \"$unit_state\" in"
+                    , "  active|reloading|activating|deactivating) unit_active=1 ;;"
+                    , "  inactive|failed) unit_active=0 ;;"
+                    , "  *) echo \"unexpected ActiveState for " <> unit <> ": $unit_state\" >&2; exit 92 ;;"
                     , "esac"
                     , "if [ -e " <> shellEscape lingerPath <> " ]"
                         <> " || [ \"$unit_active\" -eq 1 ]"
@@ -2019,29 +2022,35 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                                 <> "; else sudo rm -f "
                                 <> shellEscape lingerPath
                                 <> "; fi; "
-                                <> "set +e; systemctl is-active --quiet "
+                                <> "set +e; unit_state=$(systemctl show -p ActiveState --value "
                                 <> shellEscape unit
-                                <> "; unit_status=$?; set -e; "
-                                <> "case \"$unit_status\" in "
-                                <> "0) sudo systemctl stop "
+                                <> "); unit_status=$?; set -e; "
+                                <> "if [ \"$unit_status\" -ne 0 ]; then echo \"failed to inspect "
+                                <> unit
+                                <> " (systemctl exit $unit_status)\" >&2; exit \"$unit_status\"; fi; "
+                                <> "case \"$unit_state\" in "
+                                <> "active|reloading|activating|deactivating) sudo systemctl stop "
                                 <> shellEscape unit
                                 <> " ;; "
-                                <> "3|4) ;; "
-                                <> "*) echo \"failed to inspect "
+                                <> "inactive|failed) ;; "
+                                <> "*) echo \"unexpected ActiveState for "
                                 <> unit
-                                <> " (systemctl exit $unit_status)\" >&2; exit \"$unit_status\" ;; "
+                                <> ": $unit_state\" >&2; exit 92 ;; "
                                 <> "esac; "
-                                <> "set +e; systemctl is-active --quiet "
+                                <> "set +e; unit_state=$(systemctl show -p ActiveState --value "
                                 <> shellEscape unit
-                                <> "; unit_status=$?; set -e; "
-                                <> "case \"$unit_status\" in "
-                                <> "0) echo \""
+                                <> "); unit_status=$?; set -e; "
+                                <> "if [ \"$unit_status\" -ne 0 ]; then echo \"failed to verify "
                                 <> unit
-                                <> " is still active after cleanup\" >&2; exit 90 ;; "
-                                <> "3|4) ;; "
-                                <> "*) echo \"failed to verify "
+                                <> " after cleanup (systemctl exit $unit_status)\" >&2; exit \"$unit_status\"; fi; "
+                                <> "case \"$unit_state\" in "
+                                <> "inactive|failed) ;; "
+                                <> "active|reloading|activating|deactivating) echo \""
                                 <> unit
-                                <> " after cleanup (systemctl exit $unit_status)\" >&2; exit \"$unit_status\" ;; "
+                                <> " is still active after cleanup ($unit_state)\" >&2; exit 90 ;; "
+                                <> "*) echo \"unexpected ActiveState for "
+                                <> unit
+                                <> " after cleanup: $unit_state\" >&2; exit 92 ;; "
                                 <> "esac; "
                                 <> "if [ -e "
                                 <> shellEscape lingerPath
@@ -2115,19 +2124,18 @@ managedUserIsQuiescedOnNode deployUser nodeConnection userName uid nodeName = do
                 [ "set -euo pipefail"
                 , "# HOSTENV_USER_MANAGER_PROBE " <> userName
                 , "set +e"
-                , "systemctl is-active --quiet " <> shellEscape unit
+                , "unit_state=$(systemctl show -p ActiveState --value " <> shellEscape unit <> ")"
                 , "unit_status=$?"
                 , "set -e"
-                , "case \"$unit_status\" in"
-                , "  0) unit_active=1 ;;"
-                , "  3|4) unit_active=0 ;;"
-                , "  *) echo \"failed to inspect " <> unit <> " (systemctl exit $unit_status)\" >&2; exit \"$unit_status\" ;;"
-                , "esac"
-                , "if [ \"$unit_active\" -eq 0 ]; then"
-                , "  printf 'quiesced\\n'"
-                , "else"
-                , "  printf 'active\\n'"
+                , "if [ \"$unit_status\" -ne 0 ]; then"
+                , "  echo \"failed to inspect " <> unit <> " (systemctl exit $unit_status)\" >&2"
+                , "  exit \"$unit_status\""
                 , "fi"
+                , "case \"$unit_state\" in"
+                , "  inactive|failed) printf 'quiesced\\n' ;;"
+                , "  active|reloading|activating|deactivating) printf 'active\\n' ;;"
+                , "  *) echo \"unexpected ActiveState for " <> unit <> ": $unit_state\" >&2; exit 92 ;;"
+                , "esac"
                 ]
     (code, out, err) <- runRemoteScriptOutput target probeScript
     case code of
