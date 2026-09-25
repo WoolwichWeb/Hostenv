@@ -454,12 +454,21 @@ printDiffAgainstFile path proposedPretty = do
             pure True
         else do
             currentRaw <- BL.readFile (T.unpack path)
-            currentPretty <- prettyJson currentRaw
-            if currentPretty == proposedPretty
-                then do
-                    printProviderLine ("hostenv-provider: dry-run: no changes for " <> path)
-                    pure False
-                else printUnifiedDiff path currentPretty proposedPretty
+            currentPrettyResult <- tryAny (prettyJson currentRaw)
+            case currentPrettyResult of
+                Right currentPretty ->
+                    if currentPretty == proposedPretty
+                        then do
+                            printProviderLine ("hostenv-provider: dry-run: no changes for " <> path)
+                            pure False
+                        else printUnifiedDiff path currentPretty proposedPretty
+                Left _ -> do
+                    printProviderLine
+                        ( "hostenv-provider: dry-run: current "
+                            <> path
+                            <> " is not valid JSON; showing raw current content against the proposed plan"
+                        )
+                    printUnifiedDiff path currentRaw proposedPretty
 
 -- -------- Migration helpers --------
 data EnvInfo = EnvInfo

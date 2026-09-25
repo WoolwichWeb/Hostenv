@@ -58,20 +58,11 @@ in
             installDocumentation = config.documentation.haskell.dependencies.enable;
           })
             providerHsDeps;
-        rawCliPkg = pkgs.haskellPackages.callCabal2nix "hostenv-provider-cli" providerRoot { };
-        cliPkg =
-          if config.documentation.haskell.haddock.enable then
-            rawCliPkg
-          else
-            pkgs.haskell.lib.dontHaddock rawCliPkg;
-        hostenvProviderCLI = pkgs.writeShellApplication {
-          name = "hostenv-provider";
-          runtimeInputs = [ pkgs.jq pkgs.bind ];
-          text = ''
-            set -euo pipefail
-            exec ${cliPkg}/bin/hostenv-provider "$@"
-          '';
+        providerCliPackage = pkgs.callPackage (providerRoot + /package.nix) {
+          src = providerRoot;
+          documentationEnabled = config.documentation.haskell.haddock.enable;
         };
+        hostenvProviderCLI = providerCliPackage.wrapped;
         hostenvProviderApp = {
           type = "app";
           program = "${hostenvProviderCLI}/bin/hostenv-provider";
