@@ -48,7 +48,7 @@ import System.Directory qualified as Dir
 import System.Environment qualified as Env
 import System.Exit (ExitCode (..))
 import System.FilePath qualified as FP
-import System.IO (hClose, openTempFile, stderr)
+import System.IO (hClose, openBinaryTempFile, openTempFile, stderr)
 import System.Process (readProcessWithExitCode)
 import Turtle (FilePath, (<|>))
 import Turtle qualified as Sh
@@ -330,6 +330,24 @@ prettyJson raw = do
         ExitSuccess -> pure (BL.fromStrict (TE.encodeUtf8 (T.pack out)))
         ExitFailure c ->
             error ("jq failed while formatting JSON (exit " <> show c <> "): " <> err)
+
+withSameDirectoryTempFile :: Text -> BL.ByteString -> (String -> IO a) -> IO a
+withSameDirectoryTempFile destination content action = do
+    let destinationPath = T.unpack destination
+    let directory = FP.takeDirectory destinationPath
+    let template = "." <> FP.takeFileName destinationPath <> ".tmp-"
+    Dir.createDirectoryIfMissing True directory
+    (tmpPath, handle) <- openBinaryTempFile directory template
+    let cleanup = do
+            _ <- tryAny (hClose handle)
+            _ <- tryAny (Dir.removeFile tmpPath)
+            pure ()
+    (do
+        BL.hPut handle content
+        hClose handle
+        action tmpPath
+      )
+        `finally` cleanup
 
 withTempBytesFile :: String -> BL.ByteString -> (FilePath -> IO a) -> IO a
 withTempBytesFile template content action = do
@@ -1006,27 +1024,33 @@ runPlan dryRun = do
 
     planRaw <- BL.readFile (T.unpack planSource)
     planPretty <- prettyJson planRaw
-    validateNodeInventoryTransition planDest stateDest planPretty
     if dryRun
         then do
+            validatePlanTransition planDest stateDest planPretty
             _ <- printDiffAgainstFile planDest planPretty
             printProviderLine "hostenv-provider: dry-run: generated/plan.json was not modified"
-        else do
-            stateSource <- nixBuildPath (planAttrBase <> ".state")
-            flakeSource <- nixBuildPath (planAttrBase <> ".flake")
+        else
+            withSameDirectoryTempFile planDest planPretty $ \candidatePlanPath -> do
+                candidatePlanRaw <- BL.readFile candidatePlanPath
+                validatePlanTransition planDest stateDest candidatePlanRaw
 
-            BL.writeFile (T.unpack planDest) planPretty
+                stateSource <- nixBuildPath (planAttrBase <> ".state")
+                flakeSource <- nixBuildPath (planAttrBase <> ".flake")
 
-            stateRaw <- BL.readFile (T.unpack stateSource)
-            BL.writeFile (T.unpack stateDest) stateRaw
+                stateRaw <- BL.readFile (T.unpack stateSource)
+                BL.writeFile (T.unpack stateDest) stateRaw
 
-            flakeRaw <- BL.readFile (T.unpack flakeSource)
-            BL.writeFile (T.unpack flakeDest) flakeRaw
+                flakeRaw <- BL.readFile (T.unpack flakeSource)
+                BL.writeFile (T.unpack flakeDest) flakeRaw
 
-            _ <- Sh.procs "git" ["add", dest] Sh.empty
-            _ <- Sh.procs "nix" (nixCommonArgs ++ ["flake", "update", "--flake", "./" <> dest]) Sh.empty
-            _ <- Sh.procs "git" ["add", dest] Sh.empty
-            BLC.putStrLn ("✅ Infrastructure configuration written to " <> BLC.pack (T.unpack dest))
+                -- Publish the validated plan last. candidatePlanPath lives in
+                -- generated/, so POSIX rename replaces plan.json atomically.
+                Dir.renameFile candidatePlanPath (T.unpack planDest)
+
+                _ <- Sh.procs "git" ["add", dest] Sh.empty
+                _ <- Sh.procs "nix" (nixCommonArgs ++ ["flake", "update", "--flake", "./" <> dest]) Sh.empty
+                _ <- Sh.procs "git" ["add", dest] Sh.empty
+                BLC.putStrLn ("✅ Infrastructure configuration written to " <> BLC.pack (T.unpack dest))
   where
     nixCommonArgs :: [Text]
     nixCommonArgs = ["--extra-experimental-features", "nix-command flakes"]
