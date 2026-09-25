@@ -7,6 +7,10 @@ let
       rawCliPkg
     else
       pkgs.haskell.lib.dontHaddock rawCliPkg;
+  cliRuntimeInputs = [
+    pkgs.jq
+    pkgs.bind
+  ];
   ghc =
     (pkgs.haskellPackages.ghcWithPackages.override {
       installDocumentation = documentationEnabled;
@@ -18,7 +22,7 @@ let
         p.scientific
         p.text
       ]);
-  providerCliDnsGateFilter = pkgs.runCommand "provider-cli-dns-gate-filter" { } ''
+  providerCliDnsGateFilter = pkgs.runCommand "provider-cli-dns-gate-filter" { nativeBuildInputs = cliRuntimeInputs; } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDnsGateFilter.hs
     echo ok > "$out"
@@ -26,14 +30,14 @@ let
 in
 {
   provider-cli-typecheck = cliPkg;
-  provider-cli-signing-targets = pkgs.runCommand "provider-cli-signing-targets" { } ''
+  provider-cli-signing-targets = pkgs.runCommand "provider-cli-signing-targets" { nativeBuildInputs = cliRuntimeInputs; } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestSigningTargets.hs
     echo ok > "$out"
   '';
   provider-cli-dns-gate-filter = providerCliDnsGateFilter;
   provider-cli-dns-gate-filtering = providerCliDnsGateFilter;
-  provider-cli-dry-run-help = pkgs.runCommand "provider-cli-dry-run-help" { } ''
+  provider-cli-dry-run-help = pkgs.runCommand "provider-cli-dry-run-help" { nativeBuildInputs = cliRuntimeInputs; } ''
     set -euo pipefail
     for subcmd in plan dns-gate deploy; do
       help_output="$(${cliPkg}/bin/hostenv-provider "$subcmd" --help)"
@@ -42,7 +46,7 @@ in
     echo ok > "$out"
   '';
 
-  provider-cli-cleanup-only-system-targets = pkgs.runCommand "provider-cli-cleanup-only-system-targets" { } ''
+  provider-cli-cleanup-only-system-targets = pkgs.runCommand "provider-cli-cleanup-only-system-targets" { nativeBuildInputs = cliRuntimeInputs; } ''
     set -euo pipefail
 
     work="$TMPDIR/provider"
@@ -283,7 +287,7 @@ in
     echo ok > "$out"
   '';
 
-  provider-cli-move-finalization-order = pkgs.runCommand "provider-cli-move-finalization-order" { } ''
+  provider-cli-move-finalization-order = pkgs.runCommand "provider-cli-move-finalization-order" { nativeBuildInputs = cliRuntimeInputs; } ''
     set -euo pipefail
 
     work="$TMPDIR/provider"
@@ -552,7 +556,7 @@ in
     echo ok > "$out"
   '';
 
-  provider-cli-new-environment-deploy = pkgs.runCommand "provider-cli-new-environment-deploy" { } ''
+  provider-cli-new-environment-deploy = pkgs.runCommand "provider-cli-new-environment-deploy" { nativeBuildInputs = cliRuntimeInputs; } ''
     set -euo pipefail
 
     work="$TMPDIR/provider"
@@ -659,7 +663,7 @@ in
   '';
 
 
-  provider-cli-node-retirement-plan = pkgs.runCommand "provider-cli-node-retirement-plan" { } ''
+  provider-cli-node-retirement-plan = pkgs.runCommand "provider-cli-node-retirement-plan" { nativeBuildInputs = cliRuntimeInputs; } ''
     set -euo pipefail
 
     work="$TMPDIR/provider"
@@ -905,17 +909,17 @@ in
     echo ok > "$out"
   '';
 
-  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
+  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { nativeBuildInputs = cliRuntimeInputs; } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
     echo ok > "$out"
   '';
-  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
+  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { nativeBuildInputs = cliRuntimeInputs; } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
     echo ok > "$out"
   '';
-  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
+  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { nativeBuildInputs = cliRuntimeInputs; } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDeployVerification.hs
     echo ok > "$out"
