@@ -401,6 +401,7 @@ data EnvInfo = EnvInfo
     , node :: Text
     , migrateBackups :: [Text]
     , runtimeDir :: Text
+    , stateDir :: Text
     , hostname :: Text
     , uid :: Integer
     }
@@ -417,6 +418,7 @@ instance A.FromJSON EnvInfo where
         hostenvObj <- o .: "hostenv"
         userName <- hostenvObj .: "userName"
         runtimeDir <- hostenvObj .: "runtimeDir"
+        stateDir <- hostenvObj .:? "stateDir" .!= ("/home/" <> userName <> "/.local/state")
         hostname <- hostenvObj .: "hostname"
         node <- o .: "node"
         migrateBackups <- o .:? "migrations" .!= []
@@ -427,6 +429,7 @@ instance A.FromJSON EnvInfo where
                 , node = node
                 , migrateBackups = migrateBackups
                 , runtimeDir = runtimeDir
+                , stateDir = stateDir
                 , hostname = hostname
                 , uid = uid
                 }
@@ -1983,6 +1986,69 @@ clearRestorePlan deployUser nodeConnection envInfo = do
             printProviderLine ("hostenv-provider: removed pending restore plan for skipped environment " <> envInfo.userName)
         _ ->
             printProviderLine ("hostenv-provider: no pending restore plan for skipped environment " <> envInfo.userName)
+
+migrationHandoffPath :: EnvInfo -> Text
+migrationHandoffPath envInfo =
+    envInfo.stateDir <> "/hostenv/migration-handoff-source"
+
+readMigrationHandoffSource ::
+    Text ->
+    (Text -> NodeConnection) ->
+    EnvInfo ->
+    IO (Maybe Text)
+readMigrationHandoffSource deployUser nodeConnection envInfo = do
+    let target = mkSshTarget deployUser (nodeConnection envInfo.node)
+    let markerPath = migrationHandoffPath envInfo
+    let cmd =
+            "if sudo test -f "
+                <> shellEscape markerPath
+                <> "; then sudo cat "
+                <> shellEscape markerPath
+                <> "; fi"
+    source <- T.strip <$> runRemoteStrict target ["bash", "-lc", cmd]
+    pure (if T.null source then Nothing else Just source)
+
+writeMigrationHandoffSource ::
+    Text ->
+    (Text -> NodeConnection) ->
+    EnvInfo ->
+    Text ->
+    IO ()
+writeMigrationHandoffSource deployUser nodeConnection envInfo sourceNode = do
+    let target = mkSshTarget deployUser (nodeConnection envInfo.node)
+    let markerPath = migrationHandoffPath envInfo
+    let markerDir = FP.takeDirectory (T.unpack markerPath)
+    let ownerSpec = T.pack (show envInfo.uid)
+    let cmd =
+            T.intercalate
+                " && "
+                [ "sudo mkdir -p " <> shellEscape (T.pack markerDir)
+                , "sudo chown " <> ownerSpec <> ":" <> ownerSpec <> " " <> shellEscape (T.pack markerDir)
+                , "printf '%s\\n' "
+                    <> shellEscape sourceNode
+                    <> " | sudo tee "
+                    <> shellEscape markerPath
+                    <> " >/dev/null"
+                , "sudo chown " <> ownerSpec <> ":" <> ownerSpec <> " " <> shellEscape markerPath
+                , "sudo chmod 0600 " <> shellEscape markerPath
+                ]
+    result <- runRemote target ["bash", "-lc", cmd]
+    case result of
+        ExitSuccess ->
+            printProviderLine
+                ( "hostenv-provider: recorded completed migration handoff for "
+                    <> envInfo.userName
+                    <> " from "
+                    <> sourceNode
+                )
+        ExitFailure code ->
+            error
+                ( "failed to record migration handoff for "
+                    <> T.unpack envInfo.userName
+                    <> " (exit "
+                    <> show code
+                    <> ")"
+                )
 
 writeRestorePlan :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> [(Text, Text)] -> IO ()
 writeRestorePlan deployUser nodeConnection envInfo prevNode snapshots = do
