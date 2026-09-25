@@ -2886,13 +2886,6 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                         ExitFailure _ -> pure (envResult, False, Nothing)
                         ExitSuccess -> do
                             (accepted, verificationFailure) <- verifyDeployedEnvironment envInfo
-                            when accepted $
-                                forM_ (M.lookup envName acceptedMigrationSources) $ \sourceNode ->
-                                    writeMigrationHandoffSource
-                                        deployUser
-                                        resolveNodeConnection
-                                        envInfo
-                                        sourceNode
                             pure (envResult, accepted, verificationFailure)
 
             let deployReadyNodes pendingNodes systemResults envResults successfulEnvironments verificationFailures =
@@ -2928,12 +2921,37 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                             Right cleanedUsers -> do
                                                 forM_ cleanedUsers $ \(userName, _) ->
                                                     when (M.member userName desiredNodesByUser) $
-                                                        forM_ (M.lookup userName envInfoByUser) $ \envInfo ->
+                                                        forM_ (M.lookup userName envInfoByUser) $ \envInfo -> do
                                                             clearMigrationHandoffSourceOnNode
                                                                 deployUser
                                                                 resolveNodeConnection
                                                                 envInfo
                                                                 nodeName
+                                                            when (not (null envInfo.migrateBackups)) $
+                                                                case M.lookup userName acceptedMigrationSources of
+                                                                    Just sourceNode
+                                                                        | sourceNode == nodeName ->
+                                                                            writeMigrationHandoffSource
+                                                                                deployUser
+                                                                                resolveNodeConnection
+                                                                                envInfo
+                                                                                sourceNode
+                                                                    Just sourceNode ->
+                                                                        error
+                                                                            ( "migration source mismatch while finalizing "
+                                                                                <> T.unpack userName
+                                                                                <> ": cleaning "
+                                                                                <> T.unpack nodeName
+                                                                                <> " but accepted source is "
+                                                                                <> T.unpack sourceNode
+                                                                            )
+                                                                    Nothing ->
+                                                                        error
+                                                                            ( "missing accepted migration source while finalizing "
+                                                                                <> T.unpack userName
+                                                                                <> " on "
+                                                                                <> T.unpack nodeName
+                                                                            )
                                                 systemCode <- deploySystemNode nodeName
                                                 when (systemCode /= ExitSuccess && not (null cleanedUsers)) $ do
                                                     let rollbackUsers =
