@@ -1852,7 +1852,7 @@ prepareManagedUserCleanupOnNode ::
     S.Set Text ->
     KM.KeyMap A.Value ->
     Text ->
-    IO (Either Text [(Text, Integer)])
+    IO (Either Text ([(Text, Integer)], [Text]))
 prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedUsers runtimeUsers state nodeName = do
     let target = mkSshTarget deployUser (nodeConnection nodeName)
     let uidMismatches =
@@ -1934,30 +1934,23 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                     printProviderLine ("hostenv-provider: preparing retirement of Hostenv user " <> userName <> " from " <> nodeName)
                     code <- runRemote target ["bash", "-lc", cleanupCmd]
                     pure ((userName, uid), code)
+            let cleanedUsers = [user | (user, code) <- cleanupResults, code == ExitSuccess]
             let failures = [userName | ((userName, _), code) <- cleanupResults, code /= ExitSuccess]
-            if null failures
-                then pure (Right retiredUsers)
-                else do
-                    -- A node may retire more than one account. If any cleanup
-                    -- command fails, undo the preparation for every account we
-                    -- attempted so the node remains retryable as a whole.
-                    let rollbackUsers =
-                            filter
-                                (\(userName, _) -> M.notMember userName desiredNodes)
-                                (map fst cleanupResults)
-                    rollbackManagedUserCleanupOnNode
-                        deployUser
-                        nodeConnection
-                        nodeName
-                        rollbackUsers
-                    pure
-                        ( Left
-                            ( "failed to prepare Hostenv user retirement on "
-                                <> nodeName
-                                <> ": "
-                                <> T.intercalate ", " failures
-                            )
-                        )
+            unless (null failures) $ do
+                -- Fully retired users have no accepted destination to protect.
+                -- Restore every attempted retirement on a partially failed node,
+                -- while leaving successfully quiesced moved users stopped so the
+                -- caller can persist their handoff markers individually.
+                let rollbackUsers =
+                        filter
+                            (\(userName, _) -> M.notMember userName desiredNodes)
+                            (map fst cleanupResults)
+                rollbackManagedUserCleanupOnNode
+                    deployUser
+                    nodeConnection
+                    nodeName
+                    rollbackUsers
+            pure (Right (cleanedUsers, failures))
 
 rollbackManagedUserCleanupOnNode ::
     Text ->
@@ -2918,7 +2911,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                         | envInfo <- envsForNode nodeName
                                                         ]
                                                 pure (nodeName, ExitFailure 1, failedEnvs)
-                                            Right cleanedUsers -> do
+                                            Right (cleanedUsers, cleanupFailures) -> do
                                                 forM_ cleanedUsers $ \(userName, _) ->
                                                     when (M.member userName desiredNodesByUser) $
                                                         forM_ (M.lookup userName envInfoByUser) $ \envInfo -> do
@@ -2952,33 +2945,47 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                                                 <> " on "
                                                                                 <> T.unpack nodeName
                                                                             )
-                                                systemCode <- deploySystemNode nodeName
-                                                when (systemCode /= ExitSuccess && not (null cleanedUsers)) $ do
-                                                    let rollbackUsers =
-                                                            filter
-                                                                (\(userName, _) -> M.notMember userName desiredNodesByUser)
-                                                                cleanedUsers
-                                                    rollbackManagedUserCleanupOnNode
-                                                        deployUser
-                                                        resolveNodeConnection
-                                                        nodeName
-                                                        rollbackUsers
-                                                nodeEnvResults <-
-                                                    if systemCode == ExitSuccess
-                                                        then forM (envsForNode nodeName) deployEnvironmentAndVerify
-                                                        else do
-                                                            forM_ (envsForNode nodeName) $ \envInfo ->
-                                                                printProviderLine
-                                                                    ( "hostenv-provider: system deployment failed for node "
-                                                                        <> nodeName
-                                                                        <> "; skipping environment "
-                                                                        <> envInfo.userName
-                                                                    )
-                                                            pure
+                                                if null cleanupFailures
+                                                    then do
+                                                        systemCode <- deploySystemNode nodeName
+                                                        when (systemCode /= ExitSuccess && not (null cleanedUsers)) $ do
+                                                            let rollbackUsers =
+                                                                    filter
+                                                                        (\(userName, _) -> M.notMember userName desiredNodesByUser)
+                                                                        cleanedUsers
+                                                            rollbackManagedUserCleanupOnNode
+                                                                deployUser
+                                                                resolveNodeConnection
+                                                                nodeName
+                                                                rollbackUsers
+                                                        nodeEnvResults <-
+                                                            if systemCode == ExitSuccess
+                                                                then forM (envsForNode nodeName) deployEnvironmentAndVerify
+                                                                else do
+                                                                    forM_ (envsForNode nodeName) $ \envInfo ->
+                                                                        printProviderLine
+                                                                            ( "hostenv-provider: system deployment failed for node "
+                                                                                <> nodeName
+                                                                                <> "; skipping environment "
+                                                                                <> envInfo.userName
+                                                                            )
+                                                                    pure
+                                                                        [ ((envInfo.userName, ExitFailure 1), False, Nothing)
+                                                                        | envInfo <- envsForNode nodeName
+                                                                        ]
+                                                        pure (nodeName, systemCode, nodeEnvResults)
+                                                    else do
+                                                        printProviderErrLine
+                                                            ( "hostenv-provider: error: failed to prepare Hostenv user retirement on "
+                                                                <> nodeName
+                                                                <> ": "
+                                                                <> T.intercalate ", " cleanupFailures
+                                                            )
+                                                        let failedEnvs =
                                                                 [ ((envInfo.userName, ExitFailure 1), False, Nothing)
                                                                 | envInfo <- envsForNode nodeName
                                                                 ]
-                                                pure (nodeName, systemCode, nodeEnvResults)
+                                                        pure (nodeName, ExitFailure 1, failedEnvs)
                                 let roundSystemResults =
                                         [(nodeName, code) | (nodeName, code, _) <- roundResults]
                                 let roundEnvOutcomes = concat [results | (_, _, results) <- roundResults]

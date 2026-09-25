@@ -389,16 +389,20 @@ in
     fi
 
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "migration-handoff-source"; then
+      case "$script" in
+        *acme-stage*) handoff_user="acme-stage" ;;
+        *) handoff_user="acme-prod" ;;
+      esac
       case "$target" in
-        *new-node.hosting.test*) handoff_file="$HANDOFF_DIR/new-node" ;;
-        *old-node.hosting.test*) handoff_file="$HANDOFF_DIR/old-node" ;;
-        *) handoff_file="$HANDOFF_DIR/unknown" ;;
+        *new-node.hosting.test*) handoff_file="$HANDOFF_DIR/new-node-$handoff_user" ;;
+        *old-node.hosting.test*) handoff_file="$HANDOFF_DIR/old-node-$handoff_user" ;;
+        *) handoff_file="$HANDOFF_DIR/unknown-$handoff_user" ;;
       esac
       if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "sudo cat"; then
         [ -f "$handoff_file" ] && cat "$handoff_file"
       elif printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "sudo tee"; then
         printf 'old-node\n' > "$handoff_file"
-        printf 'HANDOFF_WRITE acme-prod\n' >> "$EVENT_LOG"
+        printf 'HANDOFF_WRITE %s\n' "$handoff_user" >> "$EVENT_LOG"
       elif printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "sudo rm -f"; then
         rm -f "$handoff_file"
       fi
@@ -410,6 +414,9 @@ in
         *old-node.hosting.test*)
           if [ "''${ORPHAN_SOURCE:-0}" != 1 ]; then
             printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+            if [ "''${MULTI_MOVE:-0}" = 1 ]; then
+              printf 'acme-stage:x:2001:100::/home/acme-stage:/bin/sh\n'
+            fi
           fi
           ;;
       esac
@@ -427,11 +434,15 @@ in
     fi
 
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "loginctl disable-linger"; then
-      if [ "''${FAIL_CLEANUP:-0}" = 1 ]; then
-        printf 'CLEANUP_FAIL acme-prod\n' >> "$EVENT_LOG"
+      case "$script" in
+        *acme-stage*) cleanup_user="acme-stage" ;;
+        *) cleanup_user="acme-prod" ;;
+      esac
+      if [ "''${FAIL_CLEANUP:-0}" = 1 ] || { [ "$cleanup_user" = "acme-stage" ] && [ "''${FAIL_CLEANUP_STAGE:-0}" = 1 ]; }; then
+        printf 'CLEANUP_FAIL %s\n' "$cleanup_user" >> "$EVENT_LOG"
         exit 43
       fi
-      printf 'CLEANUP acme-prod\n' >> "$EVENT_LOG"
+      printf 'CLEANUP %s\n' "$cleanup_user" >> "$EVENT_LOG"
       exit 0
     fi
 
@@ -570,6 +581,50 @@ in
       ! ${pkgs.gnugrep}/bin/grep -Fq 'ROLLBACK acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq '/var/lib/systemd/linger/acme-prod' "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq '/run/user/2000' "$sshLog"
+
+      # When multiple moved users share a source node, one cleanup failure must
+      # not hide successful quiescing of another moved user. The successful
+      # user needs its handoff marker before the node-level failure is returned,
+      # otherwise the next deploy would try to back it up from a stopped manager.
+      rm -f "$HANDOFF_DIR"/*
+      ${pkgs.jq}/bin/jq '
+        .environments["acme-stage"] = {
+          "hostenv": {
+            "userName": "acme-stage",
+            "runtimeDir": "/run/hostenv/user/acme-stage",
+            "hostname": "acme-stage.hosting.test"
+          },
+          "uid": 2001,
+          "node": "new-node",
+          "migrations": [ "demo-migrate" ],
+          "virtualHosts": {}
+        }
+      ' generated/plan.json > "$TMPDIR/multi-plan.json"
+      mv "$TMPDIR/multi-plan.json" generated/plan.json
+      ${pkgs.jq}/bin/jq '
+        .["acme-stage"] = {
+          "userName": "acme-stage",
+          "uid": 2001,
+          "virtualHosts": []
+        }
+      ' generated/state.json > "$TMPDIR/multi-state.json"
+      mv "$TMPDIR/multi-state.json" generated/state.json
+
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" MULTI_MOVE=1 FAIL_CLEANUP_STAGE=1         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "partial multi-user source cleanup failure was reported as success"
+        exit 1
+      fi
+
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-stage"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP_FAIL acme-stage' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_WRITE acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_WRITE acme-stage' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
     )
 
     echo ok > "$out"
