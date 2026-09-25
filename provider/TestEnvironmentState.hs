@@ -47,7 +47,7 @@ main = do
 
     assertEqual
         "orphan runtime is still retired without passwd entry"
-        [("retired", 2003)]
+        [("moved", 2001), ("retired", 2003)]
         (managedUsersToRetire "old-node" desired (M.delete "retired" oldUsers) (S.singleton "retired") state)
 
     let uidConflictUsers =
