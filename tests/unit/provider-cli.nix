@@ -2,6 +2,7 @@
 let
   src = ../../provider;
   providerCliPackage = pkgs.callPackage ../../provider/package.nix {
+    providerSrc = src;
     inherit documentationEnabled;
   };
   cliPkg = providerCliPackage.unwrapped;

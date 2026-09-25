@@ -10,6 +10,7 @@ let
   snapshotId = "0123456789abcdef";
 
   providerCliPackage = pkgs.callPackage ../../provider/package.nix {
+    providerSrc = ../../provider;
     documentationEnabled = false;
   };
   cliPkg = providerCliPackage.unwrapped;

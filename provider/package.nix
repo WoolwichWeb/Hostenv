@@ -1,6 +1,6 @@
-{ pkgs, src ? ./., documentationEnabled ? false }:
+{ pkgs, providerSrc, documentationEnabled ? false }:
 let
-  raw = pkgs.haskellPackages.callCabal2nix "hostenv-provider-cli" src { };
+  raw = pkgs.haskellPackages.callCabal2nix "hostenv-provider-cli" providerSrc { };
   unwrapped =
     if documentationEnabled then
       raw

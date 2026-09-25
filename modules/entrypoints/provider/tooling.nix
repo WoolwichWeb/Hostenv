@@ -59,7 +59,7 @@ in
           })
             providerHsDeps;
         providerCliPackage = pkgs.callPackage (providerRoot + /package.nix) {
-          src = providerRoot;
+          providerSrc = providerRoot;
           documentationEnabled = config.documentation.haskell.haddock.enable;
         };
         hostenvProviderCLI = providerCliPackage.wrapped;
