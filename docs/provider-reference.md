@@ -58,20 +58,28 @@ A safe node retirement is therefore:
 When an existing valid `generated/plan.json` is available,
 `hostenv-provider plan` uses it as an additional transition check. If an
 environment was assigned to a node that disappears from the proposed
-`nodeSystems`, planning stops. Removing a previously retiring node also causes
-Hostenv to contact it using the previous plan's connection details and inspect
-both its passwd database and Hostenv runtime state. Removal is blocked while a
-reserved account, linger file, `user@UID.service`, or `/run/user/UID`
-remains, even if the Unix account itself has already disappeared.
+`nodeSystems`, planning stops.
 
-The previous plan is not persistent state and is never required to regenerate
-the provider configuration. If it is missing or malformed, Hostenv skips the
-historical comparison and still checks Hostenv-controlled DNS before publishing
-the proposed plan. A CNAME that identifies a node outside the proposed
-inventory aborts planning, before `dns-gate` has an opportunity to change DNS.
-If DNS cannot be queried reliably (for example SERVFAIL, resolver failure, or
-`dig` execution failure), planning also stops rather than treating the lookup
-as evidence that no old node exists.
+`generated/state.json` also retains a small provider-node inventory containing
+each node's lifecycle status and SSH routing information. This does **not**
+record environment placement. It exists so node removal remains fail-closed
+when the generated plan is missing or malformed. Removing a previously
+retiring node causes Hostenv to contact it using the last durable connection
+details and inspect both its passwd database and Hostenv runtime state. Removal
+is blocked while a reserved account, linger file, `user@UID.service`, or
+`/run/user/UID` remains, even if the Unix account itself has already
+disappeared.
+
+The previous plan is not persistent state and is never required after
+`state.json` has been upgraded with provider-node inventory. A legacy state
+file without that inventory cannot safely recover from a simultaneously missing
+or malformed plan; restore the previous plan and run `plan` once to upgrade
+the state. Hostenv also checks Hostenv-controlled DNS before publishing the
+proposed plan. A CNAME that identifies a node outside the proposed inventory
+aborts planning before `dns-gate` can change DNS. If DNS cannot be queried
+reliably (for example SERVFAIL, resolver failure, or `dig` execution failure),
+planning also stops rather than treating the lookup as evidence that no old
+node exists.
 
 A UID reservation in `state.json` does **not** mean an environment has
 already been deployed; planning a brand-new environment creates its reservation
@@ -182,16 +190,17 @@ in each node's own `nodes/<node>/configuration.nix`.
 ## State
 
 Keep `generated/state.json` in version control. Hostenv deliberately keeps
-this state small: stable environment UIDs and hostname reservations. Node
-placement is not stored there; deployment observes Hostenv users on the
-provider nodes when deciding migrations and cleanup, and does not modify
+this state small: stable environment UIDs, hostname reservations, and a minimal
+provider-node inventory containing lifecycle status plus SSH routing metadata.
+Environment placement is not stored there; deployment observes Hostenv users on
+the provider nodes when deciding migrations and cleanup, and does not modify
 `state.json`.
 
 `generated/plan.json` is disposable generated output. If an existing copy is
-valid, `hostenv-provider plan` compares its node/environment assignments with
-the proposed plan and can use its old SSH connection data to verify a retiring
-node is clean. If the file is absent or malformed, Hostenv skips that historical
-check and regenerates it.
+valid, `hostenv-provider plan` additionally compares its node/environment
+assignments with the proposed plan. If it is absent or malformed, Hostenv uses
+the durable provider-node inventory in `state.json` to enforce the retirement
+transition and verify removed nodes are clean before regenerating the plan.
 
 Before publishing a proposed plan, Hostenv also checks Hostenv-controlled DNS.
 If an environment hostname still CNAMEs to a provider-looking node that is

@@ -429,7 +429,7 @@ pkgs.testers.runNixOSTest {
         new.succeed("test -f /home/${user}/activated")
         new.succeed("grep -qx 'hello-from-old-node' /home/${user}/data/sentinel.txt")
         new.succeed(
-            "grep -qx 'old-node' /home/${user}/.local/state/hostenv/migration-handoff-source"
+            "grep -qx 'quiesced old-node' /home/${user}/.local/state/hostenv/migration-handoff-source"
         )
         controller.succeed(
             "grep -Fq 'generated/.#\\\"old-node\\\".\\\"system\\\"' /tmp/move-nix.log"

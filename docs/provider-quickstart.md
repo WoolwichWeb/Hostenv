@@ -76,14 +76,16 @@ nix run .#hostenv-provider -- plan
 This writes the deployment files under `generated/`.
 
 Commit `generated/state.json` to the provider repository. It contains the
-durable reservations Hostenv cannot reconstruct, such as stable environment
-UIDs and hostname ownership.
+durable information Hostenv cannot safely reconstruct: stable environment UIDs,
+hostname ownership, and a minimal provider-node inventory used to enforce safe
+node retirement. Environment placement is not stored there.
 
 `generated/plan.json` is disposable generated output. When a previous copy is
-present, `hostenv-provider plan` compares it with the proposed plan as an
-additional node-removal safety check; if it is missing or malformed, planning
-can regenerate it and relies on the current provider inventory plus the
-pre-publication DNS safety check instead.
+present, `hostenv-provider plan` uses its environment assignments as an
+additional transition check. If it is missing or malformed, planning uses the
+durable provider-node inventory from `state.json` plus the pre-publication DNS
+safety check. A legacy state file must be upgraded once with a valid previous
+plan before this fallback is available.
 
 ## 6. Check DNS
 
