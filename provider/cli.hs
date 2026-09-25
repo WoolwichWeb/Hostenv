@@ -2109,7 +2109,6 @@ managedUserIsQuiescedOnNode ::
     IO Bool
 managedUserIsQuiescedOnNode deployUser nodeConnection userName uid nodeName = do
     let target = mkSshTarget deployUser (nodeConnection nodeName)
-    let lingerPath = "/var/lib/systemd/linger/" <> userName
     let unit = "user@" <> T.pack (show uid) <> ".service"
     let probeScript =
             T.unlines
@@ -2124,7 +2123,7 @@ managedUserIsQuiescedOnNode deployUser nodeConnection userName uid nodeName = do
                 , "  3|4) unit_active=0 ;;"
                 , "  *) echo \"failed to inspect " <> unit <> " (systemctl exit $unit_status)\" >&2; exit \"$unit_status\" ;;"
                 , "esac"
-                , "if [ ! -e " <> shellEscape lingerPath <> " ] && [ \"$unit_active\" -eq 0 ]; then"
+                , "if [ \"$unit_active\" -eq 0 ]; then"
                 , "  printf 'quiesced\\n'"
                 , "else"
                 , "  printf 'active\\n'"
