@@ -87,7 +87,7 @@ let
     nodeFor = { default = "node-a"; production = "node-a"; testing = "node-a"; development = "node-a"; };
     statePath = stateStub;
     lockPath = lockPath;
-    nodeSystems = { };
+    nodeSystems = { node-a = localSystem; };
     cloudflare = { enable = false; zoneId = null; apiTokenFile = null; };
     secretsFile = "secrets/secrets.yaml";
   };
