@@ -117,17 +117,16 @@ let
         else
           true;
 
-      rawState = removeAttrs (
-        if statePath == null || !(builtins.pathExists statePath) then { } else lib.importJSON statePath
-      ) [ "_description" ];
+      rawState =
+        if statePath == null || !(builtins.pathExists statePath) then { } else lib.importJSON statePath;
 
-      # State contains durable reservations only. Node placement is observed
-      # from the provider nodes at deployment time, so discard historical
-      # `node` fields written by older Hostenv versions.
+      # Environment state contains durable reservations only. Provider-node
+      # lifecycle/connection metadata is stored separately so plan.json remains
+      # disposable without making node retirement fail open.
       state = lib.mapAttrs (
         _: entry:
         if builtins.isAttrs entry then removeAttrs entry [ "node" ] else entry
-      ) rawState;
+      ) (removeAttrs rawState [ "_description" "_providerNodes" ]);
 
       lockData =
         if builtins.pathExists lockPath then
@@ -578,14 +577,23 @@ let
               };
             }) environmentsWithUid
           );
+          providerNodes = lib.mapAttrs (
+            nodeName: _:
+            {
+              status = effectiveNodeStatus.${nodeName};
+              inherit deployUser;
+              connection = nodeConnections.${nodeName};
+            }
+          ) nodeSystems;
         in
         pkgs.writers.writeJSON "state.json" (
           {
             _description = ''
               Persistent state to retain across deployments. Should be committed to version control.
             '';
+            _providerNodes = providerNodes;
           }
-          # Preserve retired identities and extra durable fields. Node
+          # Preserve retired identities and extra durable fields. Environment
           # placement is intentionally absent: deploy derives it from the nodes.
           // lib.recursiveUpdate state identityState
         );
