@@ -2069,9 +2069,17 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                                 <> " after cleanup\" >&2; exit 91; fi; "
                                 <> "if ! getent passwd "
                                 <> shellEscape userName
-                                <> " >/dev/null; then sudo rm -rf "
+                                <> " >/dev/null; then "
+                                <> "runtime_unit=user-runtime-dir@"
+                                <> T.pack (show uid)
+                                <> ".service; "
+                                <> "sudo systemctl stop \"$runtime_unit\" >/dev/null 2>&1 || true; "
+                                <> "if [ -e "
                                 <> shellEscape runtimeDir
-                                <> "; fi"
+                                <> " ]; then echo \"runtime directory remains after cleanup: "
+                                <> runtimeDir
+                                <> "\" >&2; exit 93; fi; "
+                                <> "fi"
                     printProviderLine ("hostenv-provider: preparing retirement of Hostenv user " <> userName <> " from " <> nodeName)
                     code <- runRemote target ["bash", "-lc", cleanupCmd]
                     when (code == ExitSuccess) (onCleaned userName uid)
