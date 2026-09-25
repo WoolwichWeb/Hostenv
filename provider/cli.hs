@@ -1668,7 +1668,8 @@ validatePlanTransition planPath statePath newPlanRaw = do
             unless (null removedNodes) $ do
                 let previousEnvironments =
                         fromMaybe KM.empty (lookupObj (K.fromString "environments") oldPlan)
-                let managedIdentities = KM.union state previousEnvironments
+                let managedIdentityState = KM.union state previousEnvironments
+                let identities = EnvironmentState.managedIdentities managedIdentityState
                 let deployUser = planDeployUser oldPlan
                 let oldHostname =
                         fromMaybe
@@ -1698,26 +1699,51 @@ validatePlanTransition planPath statePath newPlanRaw = do
                                     )
                             Right (_, users) -> pure users
 
+                    runtimeResult <-
+                        readNodeRuntimeUsers
+                            deployUser
+                            resolveOldConnection
+                            identities
+                            nodeName
+                    runtimeUsers <-
+                        case runtimeResult of
+                            Left err ->
+                                error
+                                    ( "hostenv-provider: refusing to remove retiring node "
+                                        <> T.unpack nodeName
+                                        <> " because Hostenv could not verify its user runtime state: "
+                                        <> T.unpack err
+                                    )
+                            Right (_, users) -> pure users
+
                     let managedUsers =
                             EnvironmentState.managedUsersToRetire
                                 nodeName
                                 M.empty
                                 observedUsers
-                                managedIdentities
+                                runtimeUsers
+                                managedIdentityState
                     let uidMismatches =
                             EnvironmentState.managedUserUidMismatches
                                 observedUsers
-                                managedIdentities
-                    unless (null managedUsers && null uidMismatches) $
+                                managedIdentityState
+                    let uidOwnerConflicts =
+                            EnvironmentState.managedReservedUidConflicts
+                                observedUsers
+                                managedIdentityState
+                    unless (null managedUsers && null uidMismatches && null uidOwnerConflicts) $
                         error
                             ( "hostenv-provider: refusing to remove retiring node "
                                 <> T.unpack nodeName
-                                <> " from inventory because it still contains Hostenv-managed environment account(s): "
+                                <> " from inventory because it still contains Hostenv-managed account/runtime state: "
                                 <> T.unpack
                                     ( T.intercalate
                                         ", "
                                         ( map fst managedUsers
                                             ++ [ userName <> " (UID drift)" | (userName, _, _) <- uidMismatches ]
+                                            ++ [ userName <> " (reserved UID " <> T.pack (show expectedUid) <> " owned by " <> owner <> ")"
+                                               | (userName, expectedUid, owner) <- uidOwnerConflicts
+                                               ]
                                         )
                                     )
                                 <> ". Deploy migrations/retirements until the node is clean, then run plan again."
