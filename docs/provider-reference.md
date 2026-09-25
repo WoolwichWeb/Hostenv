@@ -162,17 +162,24 @@ in each node's own `nodes/<node>/configuration.nix`.
 
 ## State
 
-Keep both `generated/state.json` and `generated/plan.json` in version
-control. Hostenv deliberately keeps `state.json` small: stable environment
-UIDs and hostname reservations. Node placement is not stored there; deployment
-observes Hostenv users on the provider nodes when deciding migrations and
-cleanup, and does not modify `state.json`.
+Keep `generated/state.json` in version control. Hostenv deliberately keeps
+this state small: stable environment UIDs and hostname reservations. Node
+placement is not stored there; deployment observes Hostenv users on the
+provider nodes when deciding migrations and cleanup, and does not modify
+`state.json`.
 
-The previous `plan.json` is retained as generated configuration, not mutable
-deployment state. `hostenv-provider plan` uses its node inventory and
-connection data to enforce the explicit active → retiring → removed lifecycle.
-If a provider already has state reservations but the previous plan is missing,
-planning stops rather than guessing that node removal is safe.
+`generated/plan.json` is disposable generated output. If an existing copy is
+valid, `hostenv-provider plan` compares its node/environment assignments with
+the proposed plan and can use its old SSH connection data to verify a retiring
+node is clean. If the file is absent or malformed, Hostenv skips that historical
+check and regenerates it.
 
-Do not reset state to `{}` or delete the previous generated plan as a
-troubleshooting step.
+Before publishing a proposed plan, Hostenv also checks Hostenv-controlled DNS.
+If an environment hostname still CNAMEs to a provider-looking node that is
+missing from the proposed `provider.nodeSystems`, planning stops before
+`dns-gate` can update that DNS record.
+
+A successful plan is published with a same-directory atomic rename, so
+interruption cannot leave a partially written `generated/plan.json`.
+
+Do not reset `generated/state.json` to `{}` as a troubleshooting step.
