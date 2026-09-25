@@ -574,6 +574,25 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       test ! -f "$HANDOFF_DIR/new-node-acme-prod"
 
+      # An indeterminate systemd query must fail cleanup closed. Acceptance is
+      # durable, but the source is not marked quiesced and its system is not
+      # deployed.
+      rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/*
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" SYSTEMCTL_QUERY_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "systemctl query failure was reported as successful cleanup"
+        exit 1
+      fi
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP_QUERY_FAIL acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'failed to inspect user@2000.service' "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'failed to verify user@2000.service after cleanup' "$sshLog"
+
       # If cleanup mutates the source and then reports failure, the accepted
       # marker plus a live source probe makes the interruption recoverable.
       rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/*
