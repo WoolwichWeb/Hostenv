@@ -2960,8 +2960,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                     pure False
                                 | otherwise -> do
                                     let sourceAccountPresent =
-                                            M.lookup prevNode observedNodeUsers
-                                                >>= M.lookup envInfo.userName
+                                            (M.lookup prevNode observedNodeUsers >>= M.lookup envInfo.userName)
                                                 == Just envInfo.uid
                                     if not sourceAccountPresent
                                         then do
