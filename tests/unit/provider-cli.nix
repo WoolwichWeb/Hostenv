@@ -379,6 +379,13 @@ in
     fi
 
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      case "$target" in
+        *old-node.hosting.test*)
+          if [ "''${ORPHAN_SOURCE:-0}" = 1 ]; then
+            printf 'acme-prod\n'
+          fi
+          ;;
+      esac
       exit 0
     fi
 
@@ -402,7 +409,9 @@ in
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
       case "$target" in
         *old-node.hosting.test*)
-          printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+          if [ "''${ORPHAN_SOURCE:-0}" != 1 ]; then
+            printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+          fi
           ;;
       esac
       exit 0
@@ -531,11 +540,13 @@ in
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
-      PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" \
+      PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" ORPHAN_SOURCE=1 \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'ROLLBACK acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '/var/lib/systemd/linger/acme-prod' "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '/run/user/2000' "$sshLog"
     )
 
     echo ok > "$out"
