@@ -1466,6 +1466,56 @@ readNodeUsers deployUser nodeConnection nodeName = do
                     )
                 )
 
+readNodeRuntimeUsers ::
+    Text ->
+    (Text -> NodeConnection) ->
+    [(Text, Integer)] ->
+    Text ->
+    IO (Either Text (Text, S.Set Text))
+readNodeRuntimeUsers deployUser nodeConnection identities nodeName = do
+    let target = mkSshTarget deployUser (nodeConnection nodeName)
+    let probeFor (userName, uid) =
+            let lingerPath = "/var/lib/systemd/linger/" <> userName
+                unit = "user@" <> T.pack (show uid) <> ".service"
+                runtimeDir = "/run/user/" <> T.pack (show uid)
+             in T.unlines
+                    [ "if [ -e " <> shellEscape lingerPath <> " ]"
+                        <> " || systemctl is-active --quiet "
+                        <> shellEscape unit
+                        <> " || [ -e "
+                        <> shellEscape runtimeDir
+                        <> " ]; then"
+                    , "  printf '%s\\n' " <> shellEscape userName
+                    , "fi"
+                    ]
+    let probeScript =
+            T.unlines
+                ( [ "set -euo pipefail"
+                  , "# HOSTENV_RUNTIME_PROBE"
+                  ]
+                    ++ map probeFor identities
+                )
+    (code, out, err) <- runRemoteScriptOutput target probeScript
+    case code of
+        ExitSuccess ->
+            pure
+                ( Right
+                    ( nodeName
+                    , S.fromList (filter (not . T.null) (map T.strip (T.lines out)))
+                    )
+                )
+        ExitFailure exitCode ->
+            pure
+                ( Left
+                    ( "failed to inspect Hostenv user runtime state on "
+                        <> nodeName
+                        <> " (exit "
+                        <> T.pack (show exitCode)
+                        <> "): "
+                        <> T.strip err
+                    )
+                )
+
 planEnvironmentAssignments :: KM.KeyMap A.Value -> [(Text, Text)]
 planEnvironmentAssignments plan =
     case lookupObj (K.fromString "environments") plan of
@@ -1680,13 +1730,18 @@ prepareManagedUserCleanupOnNode ::
     (Text -> NodeConnection) ->
     M.Map Text Text ->
     M.Map Text Integer ->
+    S.Set Text ->
     KM.KeyMap A.Value ->
     Text ->
     IO (Either Text [(Text, Integer)])
-prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedUsers state nodeName = do
+prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedUsers runtimeUsers state nodeName = do
     let target = mkSshTarget deployUser (nodeConnection nodeName)
     let uidMismatches =
             EnvironmentState.managedUserUidMismatches
+                observedUsers
+                state
+    let uidOwnerConflicts =
+            EnvironmentState.managedReservedUidConflicts
                 observedUsers
                 state
     let retiredUsers =
@@ -1694,8 +1749,9 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                 nodeName
                 desiredNodes
                 observedUsers
+                runtimeUsers
                 state
-    if not (null uidMismatches)
+    if not (null uidMismatches) || not (null uidOwnerConflicts)
         then
             pure
                 ( Left
@@ -1711,6 +1767,20 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                                 <> T.pack (show expectedUid)
                             | (userName, expectedUid, observedUid) <- uidMismatches
                             ]
+                        <> ( if null uidOwnerConflicts
+                                then ""
+                                else
+                                    "; reserved UID conflict(s): "
+                                        <> T.intercalate
+                                            ", "
+                                            [ userName
+                                                <> " expected UID "
+                                                <> T.pack (show expectedUid)
+                                                <> " is owned by "
+                                                <> owner
+                                            | (userName, expectedUid, owner) <- uidOwnerConflicts
+                                            ]
+                           )
                         <> ". Refusing system deployment until the account drift is resolved."
                     )
                 )
@@ -1719,6 +1789,7 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                 forM retiredUsers $ \(userName, uid) -> do
                     let lingerPath = "/var/lib/systemd/linger/" <> userName
                     let unit = "user@" <> T.pack (show uid) <> ".service"
+                    let runtimeDir = "/run/user/" <> T.pack (show uid)
                     let cleanupCmd =
                             "set -euo pipefail; "
                                 <> "if getent passwd "
@@ -1735,6 +1806,11 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                                 <> shellEscape unit
                                 <> "; then sudo systemctl stop "
                                 <> shellEscape unit
+                                <> "; fi; "
+                                <> "if ! getent passwd "
+                                <> shellEscape userName
+                                <> " >/dev/null; then sudo rm -rf "
+                                <> shellEscape runtimeDir
                                 <> "; fi"
                     printProviderLine ("hostenv-provider: preparing retirement of Hostenv user " <> userName <> " from " <> nodeName)
                     code <- runRemote target ["bash", "-lc", cleanupCmd]
@@ -1746,11 +1822,15 @@ prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedU
                     -- A node may retire more than one account. If any cleanup
                     -- command fails, undo the preparation for every account we
                     -- attempted so the node remains retryable as a whole.
+                    let rollbackUsers =
+                            filter
+                                (\(userName, _) -> M.notMember userName desiredNodes)
+                                (map fst cleanupResults)
                     rollbackManagedUserCleanupOnNode
                         deployUser
                         nodeConnection
                         nodeName
-                        (map fst cleanupResults)
+                        rollbackUsers
                     pure
                         ( Left
                             ( "failed to prepare Hostenv user retirement on "
