@@ -414,7 +414,7 @@ pkgs.testers.runNixOSTest {
         new.succeed("test \"$(id -u ${user})\" = '${toString uid}'")
         new.succeed("test -f /run/hostenv/user/${user}/restore/plan.json")
         controller.fail(
-            "grep -Fq 'generated/.#\\\"old-node\\\".\\\"system\\\"' /tmp/move-nix.log"
+            "grep -Fq 'generated/.#\"old-node\".\"system\"' /tmp/move-nix.log"
         )
 
     with subtest("accepted destination stays live while source finalization fails"):
@@ -436,7 +436,7 @@ pkgs.testers.runNixOSTest {
             "grep -qx 'quiesced old-node' /home/${user}/.local/state/hostenv/migration-handoff-source"
         )
         controller.succeed(
-            "grep -Fq 'generated/.#\\\"old-node\\\".\\\"system\\\"' /tmp/move-nix.log"
+            "grep -Fq 'generated/.#\"old-node\".\"system\"' /tmp/move-nix.log"
         )
 
     with subtest("retry skips source migration and completes finalization"):
@@ -451,7 +451,7 @@ pkgs.testers.runNixOSTest {
         new.succeed("grep -qx 'hello-from-old-node' /home/${user}/data/sentinel.txt")
         new.fail("test -f /run/hostenv/user/${user}/restore/plan.json")
         controller.succeed(
-            "grep -Fq 'generated/.#\\\"old-node\\\".\\\"system\\\"' /tmp/move-nix.log"
+            "grep -Fq 'generated/.#\"old-node\".\"system\"' /tmp/move-nix.log"
         )
 
     with subtest("fresh migration-capable environment deploys from reservation only"):
@@ -472,7 +472,7 @@ pkgs.testers.runNixOSTest {
         new.succeed("test \"$(id -u ${freshUser})\" = '${toString freshUid}'")
         new.succeed("test -f /home/${freshUser}/activated")
         controller.succeed(
-            "grep -Fq 'generated/.#\\\"new-node\\\".\\\"${freshUser}\\\"' /tmp/fresh-nix.log"
+            "grep -Fq 'generated/.#\"new-node\".\"${freshUser}\"' /tmp/fresh-nix.log"
         )
         controller.succeed("test \"$(wc -l < /tmp/fresh-nix.log)\" -eq 2")
   '';
