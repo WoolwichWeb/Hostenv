@@ -2154,6 +2154,36 @@ writeMigrationHandoffSource deployUser nodeConnection envInfo sourceNode = do
                     <> ")"
                 )
 
+clearMigrationHandoffSourceOnNode ::
+    Text ->
+    (Text -> NodeConnection) ->
+    EnvInfo ->
+    Text ->
+    IO ()
+clearMigrationHandoffSourceOnNode deployUser nodeConnection envInfo nodeName = do
+    let target = mkSshTarget deployUser (nodeConnection nodeName)
+    let markerPath = migrationHandoffPath envInfo
+    result <-
+        runRemote
+            target
+            [ "bash"
+            , "-lc"
+            , "sudo rm -f " <> shellEscape markerPath
+            ]
+    case result of
+        ExitSuccess -> pure ()
+        ExitFailure code ->
+            error
+                ( "failed to clear stale migration handoff marker for "
+                    <> T.unpack envInfo.userName
+                    <> " on "
+                    <> T.unpack nodeName
+                    <> " (exit "
+                    <> show code
+                    <> ")"
+                )
+
+
 writeRestorePlan :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> [(Text, Text)] -> IO ()
 writeRestorePlan deployUser nodeConnection envInfo prevNode snapshots = do
     let deployTarget = mkSshTarget deployUser (nodeConnection envInfo.node)
@@ -2684,6 +2714,8 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                     ]
             let envsForNode nodeName =
                     filter (\envInfo -> envInfo.node == nodeName) envInfosFiltered
+            let envInfoByUser =
+                    M.fromList [(envInfo.userName, envInfo) | envInfo <- envInfosFiltered]
 
             let deploySystemNode nodeName = do
                     let target = nodeName <> ".system"
@@ -2837,6 +2869,14 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                         ]
                                                 pure (nodeName, ExitFailure 1, failedEnvs)
                                             Right cleanedUsers -> do
+                                                forM_ cleanedUsers $ \(userName, _) ->
+                                                    when (M.member userName desiredNodesByUser) $
+                                                        forM_ (M.lookup userName envInfoByUser) $ \envInfo ->
+                                                            clearMigrationHandoffSourceOnNode
+                                                                deployUser
+                                                                resolveNodeConnection
+                                                                envInfo
+                                                                nodeName
                                                 systemCode <- deploySystemNode nodeName
                                                 when (systemCode /= ExitSuccess && not (null cleanedUsers)) $ do
                                                     let rollbackUsers =
