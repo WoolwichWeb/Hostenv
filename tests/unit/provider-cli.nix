@@ -75,24 +75,6 @@ in
 
     cat > "$work/generated/state.json" <<'EOF'
     {
-      "_providerNodes": {
-        "old-node": {
-          "status": "active",
-          "deployUser": "deploy",
-          "connection": {
-            "hostname": "old-node.hosting.test",
-            "sshOpts": []
-          }
-        },
-        "new-node": {
-          "status": "active",
-          "deployUser": "deploy",
-          "connection": {
-            "hostname": "new-node.hosting.test",
-            "sshOpts": []
-          }
-        }
-      },
       "acme-prod": {
         "userName": "acme-prod",
         "uid": 2000,
@@ -882,6 +864,24 @@ in
 
     cat > "$work/generated/state.json" <<'EOF'
     {
+      "_providerNodes": {
+        "old-node": {
+          "status": "active",
+          "deployUser": "deploy",
+          "connection": {
+            "hostname": "old-node.hosting.test",
+            "sshOpts": []
+          }
+        },
+        "new-node": {
+          "status": "active",
+          "deployUser": "deploy",
+          "connection": {
+            "hostname": "new-node.hosting.test",
+            "sshOpts": []
+          }
+        }
+      },
       "acme-prod": {
         "userName": "acme-prod",
         "uid": 2000,
