@@ -2959,44 +2959,59 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                         envInfo.node
                                     pure False
                                 | otherwise -> do
-                                    sourceQuiesced <-
-                                        managedUserIsQuiescedOnNode
-                                            deployUser
-                                            resolveNodeConnection
-                                            envInfo.userName
-                                            envInfo.uid
-                                            prevNode
-                                    if sourceQuiesced
+                                    let sourceAccountPresent =
+                                            M.lookup prevNode observedNodeUsers
+                                                >>= M.lookup envInfo.userName
+                                                == Just envInfo.uid
+                                    if not sourceAccountPresent
                                         then do
-                                            when (handoff.mhPhase == HandoffAccepted) $
-                                                writeMigrationHandoffQuiesced
-                                                    deployUser
-                                                    resolveNodeConnection
-                                                    envInfo
-                                                    prevNode
                                             printProviderLine
                                                 ( "hostenv-provider: migration handoff for "
                                                     <> envInfo.userName
                                                     <> " from "
                                                     <> prevNode
-                                                    <> " has a quiesced source; skipping source backup and restore-plan recreation"
+                                                    <> " has no remaining passwd account; skipping source backup and resuming orphan-runtime finalization"
                                                 )
                                             pure True
                                         else do
-                                            when (handoff.mhPhase == HandoffQuiesced) $ do
-                                                printProviderLine
-                                                    ( "hostenv-provider: warning: stale quiesced migration handoff for "
-                                                        <> envInfo.userName
-                                                        <> " from "
-                                                        <> prevNode
-                                                        <> " has a live source; taking a fresh migration backup"
-                                                    )
-                                                clearMigrationHandoffSourceOnNode
+                                            sourceQuiesced <-
+                                                managedUserIsQuiescedOnNode
                                                     deployUser
                                                     resolveNodeConnection
-                                                    envInfo
-                                                    envInfo.node
-                                            pure False
+                                                    envInfo.userName
+                                                    envInfo.uid
+                                                    prevNode
+                                            if sourceQuiesced
+                                                then do
+                                                    when (handoff.mhPhase == HandoffAccepted) $
+                                                        writeMigrationHandoffQuiesced
+                                                            deployUser
+                                                            resolveNodeConnection
+                                                            envInfo
+                                                            prevNode
+                                                    printProviderLine
+                                                        ( "hostenv-provider: migration handoff for "
+                                                            <> envInfo.userName
+                                                            <> " from "
+                                                            <> prevNode
+                                                            <> " has a stopped source manager; skipping source backup and restore-plan recreation"
+                                                        )
+                                                    pure True
+                                                else do
+                                                    when (handoff.mhPhase == HandoffQuiesced) $ do
+                                                        printProviderLine
+                                                            ( "hostenv-provider: warning: stale quiesced migration handoff for "
+                                                                <> envInfo.userName
+                                                                <> " from "
+                                                                <> prevNode
+                                                                <> " has a live source; taking a fresh migration backup"
+                                                            )
+                                                        clearMigrationHandoffSourceOnNode
+                                                            deployUser
+                                                            resolveNodeConnection
+                                                            envInfo
+                                                            envInfo.node
+                                                    pure False
                     pure (migration, alreadyQuiesced)
 
             let migrationsToRun =
