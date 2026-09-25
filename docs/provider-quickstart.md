@@ -75,11 +75,15 @@ nix run .#hostenv-provider -- plan
 
 This writes the deployment files under `generated/`.
 
-Commit both `generated/state.json` and `generated/plan.json` to the provider
-repository. `state.json` keeps only durable reservations (stable environment
-UIDs and hostname ownership), while the previous generated plan lets Hostenv
-validate provider-inventory transitions such as node retirement. Deployment
-does not modify either file.
+Commit `generated/state.json` to the provider repository. It contains the
+durable reservations Hostenv cannot reconstruct, such as stable environment
+UIDs and hostname ownership.
+
+`generated/plan.json` is disposable generated output. When a previous copy is
+present, `hostenv-provider plan` compares it with the proposed plan as an
+additional node-removal safety check; if it is missing or malformed, planning
+can regenerate it and relies on the current provider inventory plus the
+pre-publication DNS safety check instead.
 
 ## 6. Check DNS
 

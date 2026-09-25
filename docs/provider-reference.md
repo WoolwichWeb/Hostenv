@@ -55,12 +55,19 @@ A safe node retirement is therefore:
 4. remove the node from `nodeSystems`, `nodeStatus`, and its
    `nodes/<name>/` configuration.
 
-`hostenv-provider plan` enforces this transition using the previous generated
-plan. Removing an active node is rejected. Removing a retiring node causes
+When an existing valid `generated/plan.json` is available,
+`hostenv-provider plan` uses it as an additional transition check. If an
+environment was assigned to a node that disappears from the proposed
+`nodeSystems`, planning stops. Removing a previously retiring node also causes
 Hostenv to contact it using the previous plan's connection details and inspect
 its passwd database; the node is removed only when no reserved Hostenv account
-remains. If the node cannot be reached, removal is rejected rather than assumed
-safe.
+remains.
+
+The previous plan is not persistent state and is never required to regenerate
+the provider configuration. If it is missing or malformed, Hostenv skips the
+historical comparison and still checks Hostenv-controlled DNS before publishing
+the proposed plan. A CNAME that identifies a node outside the proposed
+inventory aborts planning, before `dns-gate` has an opportunity to change DNS.
 
 A UID reservation in `state.json` does **not** mean an environment has
 already been deployed; planning a brand-new environment creates its reservation
