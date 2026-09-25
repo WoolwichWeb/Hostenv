@@ -783,10 +783,23 @@ in
     cat > "$fakeBin/ssh" <<'EOF'
     #!${pkgs.runtimeShell}
     set -euo pipefail
-    cat >/dev/null
-    if [ "''${NODE_EMPTY:-0}" != 1 ]; then
-      printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+    script="$(cat)"
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      if [ "''${ORPHAN_RUNTIME:-0}" = 1 ]; then
+        printf 'acme-prod\n'
+      fi
+      exit 0
     fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
+      if [ "''${NODE_EMPTY:-0}" != 1 ]; then
+        printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+      fi
+      exit 0
+    fi
+
+    exit 0
     EOF
     chmod +x "$fakeBin/ssh"
 
@@ -826,6 +839,12 @@ in
       if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
         ${cliPkg}/bin/hostenv-provider plan --dry-run; then
         echo "retiring node with a live Hostenv account was removed"
+        exit 1
+      fi
+
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 ORPHAN_RUNTIME=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with orphan Hostenv runtime was removed"
         exit 1
       fi
 
