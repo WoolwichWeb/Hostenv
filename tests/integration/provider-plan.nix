@@ -231,7 +231,7 @@ let
       };
       statePath = statePathEffective;
       lockPath = lockPath;
-      nodeSystems = { };
+      nodeSystems = { node1 = "x86_64-linux"; };
       cloudflare = {
         enable = false;
         zoneId = null;
@@ -465,7 +465,7 @@ let
     };
     statePath = dummyStatePath;
     lockPath = backupsMixedLockPath;
-    nodeSystems = { };
+    nodeSystems = { node1 = "x86_64-linux"; };
     cloudflare = {
       enable = false;
       zoneId = null;
@@ -531,7 +531,7 @@ let
     };
     statePath = dummyStatePath;
     lockPath = quotedLockPath;
-    nodeSystems = { };
+    nodeSystems = { node1 = "x86_64-linux"; };
     cloudflare = {
       enable = false;
       zoneId = null;
@@ -565,7 +565,7 @@ let
         };
         statePath = dummyStatePath;
         lockPath = lockPath;
-        nodeSystems = { };
+        nodeSystems = { node1 = "x86_64-linux"; };
         cloudflare = {
           enable = false;
           zoneId = null;
@@ -627,7 +627,7 @@ let
         };
         statePath = dummyStatePath;
         lockPath = lockPath;
-        nodeSystems = { };
+        nodeSystems = { node1 = "x86_64-linux"; };
         cloudflare = {
           enable = false;
           zoneId = null;
@@ -687,7 +687,7 @@ let
       development = "node1";
     };
     statePath = dummyStatePath;
-    nodeSystems = { };
+    nodeSystems = { node1 = "x86_64-linux"; };
     cloudflare = {
       enable = false;
       zoneId = null;
@@ -841,7 +841,7 @@ let
           };
           statePath = dummyStatePath;
           lockPath = lockPath;
-          nodeSystems = { };
+          nodeSystems = { node1 = "x86_64-linux"; };
           cloudflare = {
             enable = false;
             zoneId = null;
