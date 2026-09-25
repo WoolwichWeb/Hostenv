@@ -2520,6 +2520,30 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                     | Right (Just migration) <- migrationResolutions
                     ]
 
+            migrationHandoffStates <-
+                forM migrations $ \migration@(envInfo, prevNode) -> do
+                    completedSource <-
+                        readMigrationHandoffSource
+                            deployUser
+                            resolveNodeConnection
+                            envInfo
+                    let alreadyAccepted = completedSource == Just prevNode
+                    when alreadyAccepted $
+                        printProviderLine
+                            ( "hostenv-provider: migration handoff for "
+                                <> envInfo.userName
+                                <> " from "
+                                <> prevNode
+                                <> " was already accepted; skipping source backup and restore-plan recreation"
+                            )
+                    pure (migration, alreadyAccepted)
+
+            let migrationsToRun =
+                    [ migration
+                    | (migration, alreadyAccepted) <- migrationHandoffStates
+                    , not alreadyAccepted
+                    ]
+
             let runMigration (envInfo, prevNode) = do
                     snapshots <- forM envInfo.migrateBackups $ \backupName -> do
                         snap <- runMigrationBackup deployUser resolveNodeConnection envInfo prevNode backupName
@@ -2529,19 +2553,19 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                     printProviderLine ("hostenv-provider: restore plan written for " <> envInfo.userName <> " (snapshots: " <> T.intercalate ", " snapshotPairs <> ")")
 
             ignoredMigrationFailures <-
-                if null migrations
+                if null migrationsToRun
                     then do
-                        printProviderLine "hostenv-provider: no migrations required"
+                        printProviderLine "hostenv-provider: no migration backups required"
                         pure []
                     else do
-                        printProviderLine ("hostenv-provider: migrations required for " <> T.pack (show (length migrations)) <> " environment(s)")
-                        forM_ migrations $ \(envInfo, prevNode) -> do
+                        printProviderLine ("hostenv-provider: migration backups required for " <> T.pack (show (length migrationsToRun)) <> " environment(s)")
+                        forM_ migrationsToRun $ \(envInfo, prevNode) -> do
                             let backups = T.intercalate ", " envInfo.migrateBackups
                             printProviderLine ("hostenv-provider: migrate backups for " <> envInfo.userName <> " from " <> prevNode <> " -> " <> envInfo.node <> " (" <> backups <> ")")
                         if ignoreMigrationErrors
                             then do
                                 failures <- fmap catMaybes $
-                                    forM migrations $ \(envInfo, prevNode) -> do
+                                    forM migrationsToRun $ \(envInfo, prevNode) -> do
                                         res <- try (runMigration (envInfo, prevNode)) :: IO (Either SomeException ())
                                         case res of
                                             Right _ -> pure Nothing
@@ -2555,8 +2579,15 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                         )
                                 pure failures
                             else do
-                                forM_ migrations runMigration
+                                forM_ migrationsToRun runMigration
                                 pure []
+
+            let acceptedMigrationSources =
+                    M.fromList
+                        [ (envInfo.userName, prevNode)
+                        | (envInfo, prevNode) <- migrations
+                        , envInfo.userName `notElem` ignoredMigrationFailures
+                        ]
 
             let protectedSourceUsers =
                     S.fromList (skipHits ++ ignoredMigrationFailures)
@@ -2688,6 +2719,13 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                         ExitFailure _ -> pure (envResult, False, Nothing)
                         ExitSuccess -> do
                             (accepted, verificationFailure) <- verifyDeployedEnvironment envInfo
+                            when accepted $
+                                forM_ (M.lookup envName acceptedMigrationSources) $ \sourceNode ->
+                                    writeMigrationHandoffSource
+                                        deployUser
+                                        resolveNodeConnection
+                                        envInfo
+                                        sourceNode
                             pure (envResult, accepted, verificationFailure)
 
             let deployReadyNodes pendingNodes systemResults envResults successfulEnvironments verificationFailures =
