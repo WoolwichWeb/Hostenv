@@ -2984,7 +2984,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                 )
                                             pure True
                                         else do
-                                            when (handoff.mhPhase == HandoffQuiesced) $
+                                            when (handoff.mhPhase == HandoffQuiesced) $ do
                                                 printProviderLine
                                                     ( "hostenv-provider: warning: stale quiesced migration handoff for "
                                                         <> envInfo.userName
@@ -2992,6 +2992,11 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                         <> prevNode
                                                         <> " has a live source; taking a fresh migration backup"
                                                     )
+                                                clearMigrationHandoffSourceOnNode
+                                                    deployUser
+                                                    resolveNodeConnection
+                                                    envInfo
+                                                    envInfo.node
                                             pure False
                     pure (migration, alreadyQuiesced)
 
