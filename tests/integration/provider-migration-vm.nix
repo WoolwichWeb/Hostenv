@@ -252,12 +252,12 @@ let
   '';
 
   commonNode = { ... }: {
-    # Keep the root account unlocked so runtime-installed public keys are
-    # accepted consistently by sshd in the test VMs.
-    users.users.root.initialPassword = "root";
+    # The NixOS test framework already provisions the root account. The
+    # controller installs a runtime-generated public key, so password login is
+    # neither required nor desirable for these VMs.
     services.openssh = {
       enable = true;
-      settings.PermitRootLogin = "yes";
+      settings.PermitRootLogin = "prohibit-password";
     };
     security.sudo.enable = true;
     virtualisation = {
