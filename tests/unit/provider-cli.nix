@@ -793,8 +793,14 @@ in
     cat > "$fakeBin/dig" <<'EOF'
     #!${pkgs.runtimeShell}
     set -euo pipefail
-    if [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME'; then
-      printf 'old-node.hosting.test.\n'
+    if [ "''${DNS_FAIL:-0}" = 1 ]; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
+    if [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME'; then
+      printf 'acme-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
     fi
     EOF
     chmod +x "$fakeBin/dig"
@@ -842,6 +848,15 @@ in
       if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_OLD=1 \
         ${cliPkg}/bin/hostenv-provider plan; then
         echo "plan published despite Hostenv DNS pointing at a removed node"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # A DNS transport/server failure is not equivalent to "no removed-node
+      # CNAME". The safety check must fail closed and leave the old plan intact.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite an indeterminate DNS lookup"
         exit 1
       fi
       grep -Fxq 'deliberately not JSON' generated/plan.json
