@@ -2391,6 +2391,21 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             let observedNodeUsers =
                     M.fromList [row | Right row <- observedResults]
 
+            let managedIdentities = EnvironmentState.managedIdentities state
+            runtimeResults <-
+                forM targetNodes $
+                    readNodeRuntimeUsers
+                        deployUser
+                        resolveNodeConnection
+                        managedIdentities
+            let runtimeErrors = [err | Left err <- runtimeResults]
+            unless (null runtimeErrors) $ do
+                forM_ runtimeErrors $
+                    printProviderErrLine . ("hostenv-provider: error: " <>)
+                Sh.exitWith (ExitFailure 1)
+            let observedNodeRuntimeUsers =
+                    M.fromList [row | Right row <- runtimeResults]
+
             let observedUidDrift =
                     [ (nodeName, userName, expectedUid, observedUid)
                     | (nodeName, users) <- M.toList observedNodeUsers
@@ -2399,7 +2414,15 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             users
                             state
                     ]
-            unless (null observedUidDrift) $ do
+            let observedUidOwnerConflicts =
+                    [ (nodeName, userName, expectedUid, owner)
+                    | (nodeName, users) <- M.toList observedNodeUsers
+                    , (userName, expectedUid, owner) <-
+                        EnvironmentState.managedReservedUidConflicts
+                            users
+                            state
+                    ]
+            unless (null observedUidDrift && null observedUidOwnerConflicts) $ do
                 forM_ observedUidDrift $ \(nodeName, userName, expectedUid, observedUid) ->
                     printProviderErrLine
                         ( "hostenv-provider: error: Hostenv-managed user UID mismatch on "
@@ -2410,6 +2433,17 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             <> T.pack (show observedUid)
                             <> " expected="
                             <> T.pack (show expectedUid)
+                        )
+                forM_ observedUidOwnerConflicts $ \(nodeName, userName, expectedUid, owner) ->
+                    printProviderErrLine
+                        ( "hostenv-provider: error: reserved Hostenv UID conflict on "
+                            <> nodeName
+                            <> ": "
+                            <> userName
+                            <> " expects UID "
+                            <> T.pack (show expectedUid)
+                            <> ", which is owned by "
+                            <> owner
                         )
                 printProviderErrLine "hostenv-provider: error: refusing deployment until account UID drift is resolved"
                 Sh.exitWith (ExitFailure 1)
@@ -2532,6 +2566,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                         nodeName
                         desiredNodesByUser
                         (M.findWithDefault M.empty nodeName observedNodeUsers)
+                        (M.findWithDefault S.empty nodeName observedNodeRuntimeUsers)
                         state
             let movedSourceUsers nodeName =
                     [ userName
@@ -2674,6 +2709,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                 resolveNodeConnection
                                                 desiredNodesByUser
                                                 (M.findWithDefault M.empty nodeName observedNodeUsers)
+                                                (M.findWithDefault S.empty nodeName observedNodeRuntimeUsers)
                                                 state
                                                 nodeName
                                         case prepared of
@@ -2686,12 +2722,16 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                 pure (nodeName, ExitFailure 1, failedEnvs)
                                             Right cleanedUsers -> do
                                                 systemCode <- deploySystemNode nodeName
-                                                when (systemCode /= ExitSuccess && not (null cleanedUsers)) $
+                                                when (systemCode /= ExitSuccess && not (null cleanedUsers)) $ do
+                                                    let rollbackUsers =
+                                                            filter
+                                                                (\(userName, _) -> M.notMember userName desiredNodesByUser)
+                                                                cleanedUsers
                                                     rollbackManagedUserCleanupOnNode
                                                         deployUser
                                                         resolveNodeConnection
                                                         nodeName
-                                                        cleanedUsers
+                                                        rollbackUsers
                                                 nodeEnvResults <-
                                                     if systemCode == ExitSuccess
                                                         then forM (envsForNode nodeName) deployEnvironmentAndVerify
