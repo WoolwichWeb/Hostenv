@@ -224,6 +224,72 @@ mapConcurrentlyIO action values = do
         pure resultVar
     forM resultVars takeMVar
 
+digCnameForPlanSafety :: Text -> IO (Either Text [Text])
+digCnameForPlanSafety name = do
+    let args =
+            [ "+time=2"
+            , "+tries=1"
+            , "+noall"
+            , "+comments"
+            , "+answer"
+            , T.unpack name
+            , "CNAME"
+            ]
+    result <- tryAny (readProcessWithExitCode "dig" args "")
+    pure $ case result of
+        Left err ->
+            Left
+                ( "DNS lookup for "
+                    <> name
+                    <> " failed to execute: "
+                    <> T.pack (displayException err)
+                )
+        Right (ExitFailure code, _out, err) ->
+            Left
+                ( "DNS lookup for "
+                    <> name
+                    <> " failed (dig exit "
+                    <> T.pack (show code)
+                    <> "): "
+                    <> T.strip (T.pack err)
+                )
+        Right (ExitSuccess, out, _err) ->
+            let output = T.pack out
+                responseStatus =
+                    listToMaybe
+                        [ status
+                        | line <- T.lines output
+                        , let (_, suffix) = T.breakOn "status:" line
+                        , not (T.null suffix)
+                        , let statusText = T.strip (T.drop (T.length ("status:" :: Text)) suffix)
+                        , let status = T.takeWhile (\c -> c /= ',' && c /= ' ' && c /= '\t') statusText
+                        , not (T.null status)
+                        ]
+                answers =
+                    [ normalizeDnsName target
+                    | line <- T.lines output
+                    , let stripped = T.strip line
+                    , not (T.null stripped)
+                    , not (";" `T.isPrefixOf` stripped)
+                    , target : _ <- [reverse (T.words stripped)]
+                    ]
+             in case responseStatus of
+                    Just "NOERROR" -> Right answers
+                    Just "NXDOMAIN" -> Right []
+                    Just status ->
+                        Left
+                            ( "DNS lookup for "
+                                <> name
+                                <> " returned "
+                                <> status
+                            )
+                    Nothing ->
+                        Left
+                            ( "DNS lookup for "
+                                <> name
+                                <> " returned no parseable DNS status"
+                            )
+
 digRRRaw :: Maybe Text -> Text -> Text -> IO [Text]
 digRRRaw mNameserver name rr = do
     let serverArgs = maybe [] (\nameserver -> ["@" <> T.unpack nameserver]) mNameserver
@@ -1583,20 +1649,32 @@ validatePlanDnsSafety state previousPlan newPlan = do
                     ++ maybe [] planEnvironmentHostnames previousPlan
                     ++ stateReservedHostnames hostenvHostname state
 
-    dnsCache <- newDnsLookupCache
-    violations <-
-        fmap concat . forM hostnames $ \hostname -> do
-            cnames <- digRRWith dnsCache hostname "CNAME"
-            let domain = normalizeDnsName hostenvHostname
-            let suffix = "." <> domain
-            pure
-                [ (hostname, nodeName)
-                | cname <- cnames
-                , let normalizedTarget = normalizeDnsName cname
-                , Just nodeName <- [T.stripSuffix suffix normalizedTarget]
-                , not (T.null nodeName)
-                , not (S.member nodeName inventory)
-                ]
+    lookupResults <-
+        forM hostnames $ \hostname -> do
+            result <- digCnameForPlanSafety hostname
+            pure (hostname, result)
+
+    let lookupFailures =
+            [ hostname <> ": " <> err
+            | (hostname, Left err) <- lookupResults
+            ]
+    unless (null lookupFailures) $
+        error
+            ( "hostenv-provider: refusing provider plan because Hostenv DNS could not be verified: "
+                <> T.unpack (T.intercalate "; " lookupFailures)
+            )
+
+    let domain = normalizeDnsName hostenvHostname
+    let suffix = "." <> domain
+    let violations =
+            [ (hostname, nodeName)
+            | (hostname, Right cnames) <- lookupResults
+            , cname <- cnames
+            , let normalizedTarget = normalizeDnsName cname
+            , Just nodeName <- [T.stripSuffix suffix normalizedTarget]
+            , not (T.null nodeName)
+            , not (S.member nodeName inventory)
+            ]
 
     unless (null violations) $
         error

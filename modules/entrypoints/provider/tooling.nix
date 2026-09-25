@@ -66,7 +66,7 @@ in
             pkgs.haskell.lib.dontHaddock rawCliPkg;
         hostenvProviderCLI = pkgs.writeShellApplication {
           name = "hostenv-provider";
-          runtimeInputs = [ pkgs.jq ];
+          runtimeInputs = [ pkgs.jq pkgs.bind ];
           text = ''
             set -euo pipefail
             exec ${cliPkg}/bin/hostenv-provider "$@"
