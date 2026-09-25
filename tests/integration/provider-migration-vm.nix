@@ -376,7 +376,11 @@ pkgs.testers.runNixOSTest {
             "${cliPkg}/bin/hostenv-provider deploy "
             "--remote-build --skip-verification"
         )
-        controller.succeed(orphan_command)
+        orphan_status, orphan_output = controller.execute(orphan_command)
+        print("orphan cleanup output:\\n" + orphan_output)
+        assert orphan_status == 0, (
+            f"orphan cleanup failed with exit {orphan_status}:\\n{orphan_output}"
+        )
 
         old.fail("getent passwd ${orphanUser}")
         old.fail("test -e /var/lib/systemd/linger/${orphanUser}")
