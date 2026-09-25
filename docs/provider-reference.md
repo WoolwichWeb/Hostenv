@@ -89,18 +89,25 @@ environments.
 
 Source retirement is a finalization step: Hostenv first migrates data, deploys
 the destination system, successfully activates the destination environment, and
-passes any enforced deployment verification. At that point it records a
-destination-local migration handoff marker, disables lingering/stops the old
-user manager, and deploys the source system configuration that removes the
-account.
+passes any enforced deployment verification. It then disables lingering/stops
+the old user manager. Only after that source cleanup succeeds does Hostenv
+record a destination-local migration handoff marker and deploy the source system
+configuration that removes the account.
 
-If source-system finalization fails after the destination has been accepted,
-Hostenv deliberately leaves the source application quiesced. The handoff marker
-allows the next deploy to skip source backup/restore-plan recreation and retry
-only destination acceptance plus source finalization. This avoids restarting
-cron, queue workers, nginx, or other source services alongside the live
-destination. Old handoff markers are cleared when a node later becomes a source,
-so a future round-trip move cannot reuse an earlier handoff.
+The marker therefore means that the destination was accepted and the source was
+successfully quiesced. If source cleanup fails, no marker is written, so a retry
+cannot silently skip a newer source backup. If interruption happens after source
+cleanup but before the marker is written, the next deploy has no completed
+handoff to trust and the migration path fails closed unless it can safely run
+again.
+
+If source-system finalization fails after the handoff marker is written, Hostenv
+deliberately leaves the source application quiesced. The marker allows the next
+deploy to skip source backup/restore-plan recreation and retry only destination
+acceptance plus source finalization. This avoids restarting cron, queue workers,
+nginx, or other source services alongside the live destination. Old handoff
+markers are cleared when a node later becomes a source, so a future round-trip
+move cannot reuse an earlier handoff.
 
 `--skip-migrations` and ignored migration failures protect their source
 accounts for that run. Hostenv may defer the corresponding source-node system
