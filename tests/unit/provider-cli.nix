@@ -16,7 +16,7 @@ let
         p.scientific
         p.text
       ]);
-  providerCliDnsGateFilter = pkgs.runCommand "provider-cli-dns-gate-filter" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+  providerCliDnsGateFilter = pkgs.runCommand "provider-cli-dns-gate-filter" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDnsGateFilter.hs
     echo ok > "$out"
@@ -24,7 +24,7 @@ let
 in
 {
   provider-cli-typecheck = cliPkg;
-  provider-cli-signing-targets = pkgs.runCommand "provider-cli-signing-targets" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+  provider-cli-signing-targets = pkgs.runCommand "provider-cli-signing-targets" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestSigningTargets.hs
     echo ok > "$out"
@@ -903,17 +903,17 @@ in
     echo ok > "$out"
   '';
 
-  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
     echo ok > "$out"
   '';
-  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
     echo ok > "$out"
   '';
-  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDeployVerification.hs
     echo ok > "$out"

@@ -9,8 +9,10 @@ let
   orphanUid = 2100;
   snapshotId = "0123456789abcdef";
 
-  rawCliPkg = pkgs.haskellPackages.callCabal2nix "hostenv-provider-cli" ../../provider { };
-  cliPkg = pkgs.haskell.lib.dontHaddock rawCliPkg;
+  providerCliPackage = pkgs.callPackage ../../provider/package.nix {
+    documentationEnabled = false;
+  };
+  cliPkg = providerCliPackage.unwrapped;
 
   sshOpts = [
     "-o"
@@ -301,10 +303,8 @@ pkgs.testers.runNixOSTest {
       imports = [ commonNode ];
       environment.systemPackages = [
         cliPkg
-        pkgs.bind
-        pkgs.jq
         pkgs.openssh
-      ];
+      ] ++ providerCliPackage.runtimeInputs;
     };
   };
 
