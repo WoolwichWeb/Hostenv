@@ -427,6 +427,10 @@ in
     fi
 
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "loginctl disable-linger"; then
+      if [ "''${FAIL_CLEANUP:-0}" = 1 ]; then
+        printf 'CLEANUP_FAIL acme-prod\n' >> "$EVENT_LOG"
+        exit 43
+      fi
       printf 'CLEANUP acme-prod\n' >> "$EVENT_LOG"
       exit 0
     fi
@@ -512,9 +516,26 @@ in
       ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
 
-      # Once the destination is accepted, a source-system failure must leave
-      # the old application quiesced. The destination handoff marker makes the
-      # next run skip source backup/restore-plan recreation.
+      # Destination acceptance alone is not a durable handoff. If source
+      # quiescing fails, no handoff marker may be written and the source system
+      # must not be deployed. A retry must take a fresh backup path.
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_CLEANUP=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "source cleanup failure was reported as success"
+        exit 1
+      fi
+
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP_FAIL acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_WRITE acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+
+      # On retry, the missing handoff marker forces another source backup.
+      # Successful source quiescing records the marker before source-system
+      # removal is attempted. If that removal fails, the source stays quiesced.
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
@@ -524,16 +545,19 @@ in
         exit 1
       fi
 
+      ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_WRITE acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'ROLLBACK acme-prod' "$eventLog"
       dest_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
       dest_env_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."acme-prod"' "$eventLog" | head -n1 | cut -d: -f1)"
       cleanup_line="$(${pkgs.gnugrep}/bin/grep -n -F 'CLEANUP acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
+      handoff_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_WRITE acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       source_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"old-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
       test "$dest_system_line" -lt "$dest_env_line"
       test "$dest_env_line" -lt "$cleanup_line"
-      test "$cleanup_line" -lt "$source_system_line"
+      test "$cleanup_line" -lt "$handoff_line"
+      test "$handoff_line" -lt "$source_system_line"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
 
       : > "$nixLog"
