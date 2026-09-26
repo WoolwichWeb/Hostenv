@@ -3186,6 +3186,19 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             let envInfoByUser =
                     M.fromList [(envInfo.userName, envInfo) | envInfo <- envInfosFiltered]
 
+            migrationDnsCache <- newDnsLookupCache
+
+            let rollbackRetiredCleanedUsers nodeName cleanedUsers = do
+                    let rollbackUsers =
+                            filter
+                                (\(userName, _) -> M.notMember userName desiredNodesByUser)
+                                cleanedUsers
+                    rollbackManagedUserCleanupOnNode
+                        deployUser
+                        resolveNodeConnection
+                        nodeName
+                        rollbackUsers
+
             let deploySystemNode nodeName = do
                     let target = nodeName <> ".system"
                     let targetInstallable = deployProfilePathInstallable nodeName "system"
@@ -3384,33 +3397,68 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                             Right (cleanedUsers, cleanupFailures) -> do
                                                 if null cleanupFailures
                                                     then do
-                                                        systemCode <- deploySystemNode nodeName
-                                                        when (systemCode /= ExitSuccess && not (null cleanedUsers)) $ do
-                                                            let rollbackUsers =
-                                                                    filter
-                                                                        (\(userName, _) -> M.notMember userName desiredNodesByUser)
-                                                                        cleanedUsers
-                                                            rollbackManagedUserCleanupOnNode
-                                                                deployUser
-                                                                resolveNodeConnection
-                                                                nodeName
-                                                                rollbackUsers
-                                                        nodeEnvResults <-
-                                                            if systemCode == ExitSuccess
-                                                                then forM (envsForNode nodeName) deployEnvironmentAndVerify
-                                                                else do
-                                                                    forM_ (envsForNode nodeName) $ \envInfo ->
-                                                                        printProviderLine
-                                                                            ( "hostenv-provider: system deployment failed for node "
-                                                                                <> nodeName
-                                                                                <> "; skipping environment "
-                                                                                <> envInfo.userName
-                                                                            )
-                                                                    pure
+                                                        let movedCleanedUsers =
+                                                                [ userName
+                                                                | (userName, _) <- cleanedUsers
+                                                                , M.member userName desiredNodesByUser
+                                                                ]
+                                                        dnsFailures <-
+                                                            fmap catMaybes $
+                                                                forM movedCleanedUsers $ \userName ->
+                                                                    case M.lookup userName envInfoByUser of
+                                                                        Nothing ->
+                                                                            pure
+                                                                                ( Just
+                                                                                    ( userName
+                                                                                        <> ": destination environment metadata is missing"
+                                                                                    )
+                                                                                )
+                                                                        Just envInfo -> do
+                                                                            result <-
+                                                                                cutoverMigrationDns
+                                                                                    migrationDnsCache
+                                                                                    plan
+                                                                                    hostenvHostname
+                                                                                    envs
+                                                                                    envInfo
+                                                                            pure $
+                                                                                case result of
+                                                                                    Right () -> Nothing
+                                                                                    Left err -> Just (userName <> ": " <> err)
+                                                        if not (null dnsFailures)
+                                                            then do
+                                                                forM_ dnsFailures $ \err ->
+                                                                    printProviderErrLine
+                                                                        ( "hostenv-provider: error: migration DNS cutover failed after source quiescence: "
+                                                                            <> err
+                                                                            <> ". The source remains quiesced; update DNS and rerun deploy."
+                                                                        )
+                                                                rollbackRetiredCleanedUsers nodeName cleanedUsers
+                                                                let failedEnvs =
                                                                         [ ((envInfo.userName, ExitFailure 1), False, Nothing)
                                                                         | envInfo <- envsForNode nodeName
                                                                         ]
-                                                        pure (nodeName, systemCode, nodeEnvResults)
+                                                                pure (nodeName, ExitFailure 1, failedEnvs)
+                                                            else do
+                                                                systemCode <- deploySystemNode nodeName
+                                                                when (systemCode /= ExitSuccess && not (null cleanedUsers)) $
+                                                                    rollbackRetiredCleanedUsers nodeName cleanedUsers
+                                                                nodeEnvResults <-
+                                                                    if systemCode == ExitSuccess
+                                                                        then forM (envsForNode nodeName) deployEnvironmentAndVerify
+                                                                        else do
+                                                                            forM_ (envsForNode nodeName) $ \envInfo ->
+                                                                                printProviderLine
+                                                                                    ( "hostenv-provider: system deployment failed for node "
+                                                                                        <> nodeName
+                                                                                        <> "; skipping environment "
+                                                                                        <> envInfo.userName
+                                                                                    )
+                                                                            pure
+                                                                                [ ((envInfo.userName, ExitFailure 1), False, Nothing)
+                                                                                | envInfo <- envsForNode nodeName
+                                                                                ]
+                                                                pure (nodeName, systemCode, nodeEnvResults)
                                                     else do
                                                         printProviderErrLine
                                                             ( "hostenv-provider: error: failed to prepare Hostenv user retirement on "
