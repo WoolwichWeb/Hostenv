@@ -798,7 +798,7 @@ in
       ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$nixLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
-      ${pkgs.jq}/bin/jq -e '(._dnsGateOriginalVhosts.acme-prod == null)' generated/plan.json >/dev/null
+      ${pkgs.jq}/bin/jq -e '(._dnsGateOriginalVhosts["acme-prod"] == null)' generated/plan.json >/dev/null
 
       # If cleanup mutates the source and then reports failure, the accepted
       # marker plus a live source probe makes the interruption recoverable.
@@ -884,7 +884,7 @@ in
         and .environments["acme-prod"].virtualHosts["acme-prod.hosting.test"].forceSSL == true
         and .nodes["new-node"].services.nginx.virtualHosts["acme-prod.hosting.test"].enableACME == true
         and .nodes["new-node"].services.nginx.virtualHosts["acme-prod.hosting.test"].forceSSL == true
-        and (._dnsGateOriginalVhosts.acme-prod == null)
+        and (._dnsGateOriginalVhosts["acme-prod"] == null)
       ' generated/plan.json >/dev/null
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
 
