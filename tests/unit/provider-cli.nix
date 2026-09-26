@@ -942,24 +942,6 @@ in
 
     cat > "$work/generated/state.json" <<'EOF'
     {
-      "_providerNodes": {
-        "old-node": {
-          "status": "active",
-          "deployUser": "deploy",
-          "connection": {
-            "hostname": "old-node.hosting.test",
-            "sshOpts": []
-          }
-        },
-        "new-node": {
-          "status": "active",
-          "deployUser": "deploy",
-          "connection": {
-            "hostname": "new-node.hosting.test",
-            "sshOpts": []
-          }
-        }
-      },
       "acme-prod": {
         "userName": "acme-prod",
         "uid": 2000,
@@ -999,16 +981,6 @@ in
 
     cat > "$newState" <<'EOF'
     {
-      "_providerNodes": {
-        "new-node": {
-          "status": "active",
-          "deployUser": "deploy",
-          "connection": {
-            "hostname": "new-node.hosting.test",
-            "sshOpts": []
-          }
-        }
-      },
       "acme-prod": {
         "userName": "acme-prod",
         "uid": 2000,
@@ -1110,11 +1082,6 @@ in
         '.nodeStatus["old-node"] = "retiring" | .environments["acme-prod"].node = "new-node"' \
         generated/plan.json > "$TMPDIR/retiring-plan.json"
       mv "$TMPDIR/retiring-plan.json" generated/plan.json
-      ${pkgs.jq}/bin/jq \
-        '._providerNodes["old-node"].status = "retiring"' \
-        generated/state.json > "$TMPDIR/retiring-state.json"
-      mv "$TMPDIR/retiring-state.json" generated/state.json
-
       if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
         ${cliPkg}/bin/hostenv-provider plan --dry-run; then
         echo "retiring node with a live Hostenv account was removed"
@@ -1130,25 +1097,26 @@ in
       PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
 
-      # plan.json is generated output. Losing it must fall back to the durable
-      # provider-node inventory, including its old SSH connection and status.
+      # plan.json is disposable. Without historical plan data, live DNS is
+      # the safety tripwire: a CNAME to the removed node blocks publication.
       rm generated/plan.json
-      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run; then
-        echo "missing previous plan bypassed live retiring-node validation"
+        echo "missing previous plan ignored DNS pointing at the removed node"
         exit 1
       fi
-      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
 
-      # A malformed generated plan uses the same durable fallback.
+      # A malformed generated plan has the same semantics: skip historical
+      # comparison, but still fail closed while DNS identifies the old node.
       printf 'deliberately not JSON\n' > generated/plan.json
-      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run; then
-        echo "malformed previous plan bypassed live retiring-node validation"
+        echo "malformed previous plan ignored DNS pointing at the removed node"
         exit 1
       fi
-      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
 
       # DNS is checked before the candidate plan is published. If live Hostenv

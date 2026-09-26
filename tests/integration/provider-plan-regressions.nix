@@ -110,7 +110,6 @@ let
     nodeStatus.old-node = "retiring";
   };
   retiringPlanData = lib.importJSON retiringPlan.plan;
-  retiringStateData = lib.importJSON retiringPlan.state;
   retiringScheduled = builtins.tryEval (builtins.deepSeq (mkPlan {
     nodeFor.default = "old-node";
     nodeStatus.old-node = "retiring";
@@ -195,12 +194,8 @@ in
     && !(state.retired ? node)
     && !(state.retiredOnActiveNode ? node)
     && !(state.${testingUser} ? node)
-    && state._providerNodes.node-a.status == "active"
-    && state._providerNodes.old-node.status == "active"
-    && state._providerNodes.old-node.deployUser == "deploy"
-    && state._providerNodes.old-node.connection.hostname == "old-node.hosting.test"
-    && !(state._providerNodes ? retired-node)
-  ) "planning must retain durable reservations and provider-node lifecycle metadata while removing environment placement";
+    && !(state ? _providerNodes)
+  ) "planning must retain durable environment reservations without storing node placement or provider inventory";
 
   provider-plan-state-has-no-placement-history = asserts.assertTrue "provider-plan-state-has-no-placement-history" (
     !(plan.environments.${mainUser} ? previousNode)
@@ -224,9 +219,7 @@ in
     && retiringPlanData.nodeStatus.node-a == "active"
     && retiringPlanData.nodes ? old-node
     && retiringPlanData.nodeConnections ? old-node
-    && retiringStateData._providerNodes.old-node.status == "retiring"
-    && retiringStateData._providerNodes.old-node.connection.hostname == "old-node.hosting.test"
-  ) "retiring nodes must remain in provider inventory and durable deployment routing";
+  ) "retiring nodes must remain in the generated provider inventory and deployment routing";
 
   provider-plan-retiring-node-not-scheduled = asserts.assertTrue "provider-plan-retiring-node-not-scheduled" (
     !retiringScheduled.success
