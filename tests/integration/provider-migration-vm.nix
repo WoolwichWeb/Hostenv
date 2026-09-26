@@ -436,6 +436,9 @@ pkgs.testers.runNixOSTest {
             "grep -qx 'quiesced old-node' /var/lib/hostenv/provider/migration-handoffs/${toString uid}"
         )
         new.succeed(
+            "test \"$(stat -c '%U:%G %a' /var/lib/hostenv/provider/migration-handoffs)\" = 'root:root 700'"
+        )
+        new.succeed(
             "test \"$(stat -c '%U:%G %a' /var/lib/hostenv/provider/migration-handoffs/${toString uid})\" = 'root:root 600'"
         )
         new.fail(
