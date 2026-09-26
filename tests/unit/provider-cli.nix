@@ -391,6 +391,12 @@ in
       exit 42
     fi
 
+    if [ "''${FAIL_TLS_SYSTEM:-0}" = 1 ] \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' \
+      && [ "$(${pkgs.gnugrep}/bin/grep -Fc 'generated/.#"new-node"."system"' "$NIX_LOG")" -ge 2 ]; then
+      exit 48
+    fi
+
     exit 0
     EOF
     chmod +x "$fakeBin/nix"
@@ -745,6 +751,38 @@ in
       ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'DNS_NEW acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+
+      # If the destination TLS redeploy fails after DNS cutover, keep the
+      # restore metadata so retry must apply TLS before source removal.
+      cp "$TMPDIR/gated-plan.json" generated/plan.json
+      rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/* "$DNS_STATE_DIR"/*
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_TLS_SYSTEM=1 DNS_AUTOMATIC=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "destination TLS redeploy failure was reported as success"
+        exit 1
+      fi
+      ${pkgs.gnugrep}/bin/grep -Fq 'DNS_UPSERT acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ${pkgs.jq}/bin/jq -e '
+        .environments["acme-prod"].virtualHosts["acme-prod.hosting.test"].enableLetsEncrypt == true
+        and ._dnsGateOriginalVhosts["acme-prod"]["acme-prod.hosting.test"].environment.enableLetsEncrypt == true
+      ' generated/plan.json >/dev/null
+
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_SOURCE_SYSTEM=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "TLS redeploy retry source-system failure was reported as success"
+        exit 1
+      fi
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ${pkgs.jq}/bin/jq -e '(._dnsGateOriginalVhosts.acme-prod == null)' generated/plan.json >/dev/null
 
       # If cleanup mutates the source and then reports failure, the accepted
       # marker plus a live source probe makes the interruption recoverable.
