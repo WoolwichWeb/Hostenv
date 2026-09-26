@@ -1275,6 +1275,96 @@ in
     echo ok > "$out"
   '';
 
+  provider-cli-dns-gate-defers-migration-cutover = pkgs.runCommand "provider-cli-dns-gate-defers-migration-cutover" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+    set -euo pipefail
+
+    work="$TMPDIR/provider"
+    fakeBin="$TMPDIR/bin"
+    curlLog="$TMPDIR/curl.log"
+    mkdir -p "$work/generated" "$fakeBin"
+
+    cat > "$work/generated/plan.json" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "cloudflare": {
+        "zoneId": "zone"
+      },
+      "nodes": {
+        "new-node": {
+          "services": {
+            "nginx": {
+              "virtualHosts": {
+                "acme-prod.hosting.test": {
+                  "enableACME": true,
+                  "forceSSL": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "node": "new-node",
+          "virtualHosts": {
+            "acme-prod.hosting.test": {
+              "enableLetsEncrypt": true,
+              "forceSSL": true
+            }
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$fakeBin/dig" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    args=" $* "
+    if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME' \
+      && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod.hosting.test'; then
+      printf 'old-node.hosting.test.\n'
+    fi
+    EOF
+    chmod +x "$fakeBin/dig"
+
+    cat > "$fakeBin/curl" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    printf '%s\n' "$*" >> "$CURL_LOG"
+    case " $* " in
+      *"/zones/zone "*) printf '{"success":true,"result":{"name":"hosting.test"}}\n' ;;
+      *"/dns_records"*)
+        echo "dns-gate attempted migration DNS cutover" >&2
+        exit 47
+        ;;
+      *)
+        echo "unexpected curl invocation: $*" >&2
+        exit 48
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/curl"
+
+    (
+      cd "$work"
+      PATH="$fakeBin:$PATH" CURL_LOG="$curlLog" CF_API_TOKEN=test-token \
+        ${cliPkg}/bin/hostenv-provider dns-gate --with-dns-update
+
+      ! ${pkgs.gnugrep}/bin/grep -Fq '/dns_records' "$curlLog"
+      ${pkgs.jq}/bin/jq -e '
+        .environments["acme-prod"].virtualHosts["acme-prod.hosting.test"].enableLetsEncrypt == false
+        and .environments["acme-prod"].virtualHosts["acme-prod.hosting.test"].forceSSL == false
+        and .nodes["new-node"].services.nginx.virtualHosts["acme-prod.hosting.test"].enableACME == false
+        and .nodes["new-node"].services.nginx.virtualHosts["acme-prod.hosting.test"].forceSSL == false
+        and ._dnsGateOriginalVhosts["acme-prod"]["acme-prod.hosting.test"].environment.enableLetsEncrypt == true
+        and ._dnsGateOriginalVhosts["acme-prod"]["acme-prod.hosting.test"].node.enableACME == true
+      ' generated/plan.json >/dev/null
+    )
+
+    echo ok > "$out"
+  '';
+
   provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
