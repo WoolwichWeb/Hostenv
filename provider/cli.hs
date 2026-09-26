@@ -932,73 +932,82 @@ cutoverMigrationDns dnsCache plan hostenvHostname envs envInfo = do
                     )
             pure (Right ())
         else do
-            (mToken, mZone, mZoneName) <- loadPlanCloudflareContext plan
-            upsertResults <-
-                forM mismatched $ \item ->
-                    case classifyUpsertEligibility True mToken mZone mZoneName item.dgiDiscoveryHost of
-                        UpsertIneligible reason ->
-                            pure
-                                ( Left
-                                    ( item.dgiDiscoveryHost
-                                        <> " must point to "
-                                        <> item.dgiExpectedHost
-                                        <> " (automatic DNS update unavailable: "
-                                        <> reason
-                                        <> ")"
-                                    )
-                                )
-                        UpsertEligible ->
-                            case (mToken, mZone) of
-                                (Just token, Just zoneId) -> do
-                                    printProviderLine
-                                        ( "hostenv-provider: cutting over migration DNS "
-                                            <> item.dgiDiscoveryHost
-                                            <> " -> "
-                                            <> item.dgiExpectedHost
-                                        )
-                                    result <- cfUpsertCname token zoneId item.dgiDiscoveryHost item.dgiExpectedHost
-                                    pure $
-                                        case result of
-                                            Right () -> Right item
-                                            Left err ->
-                                                Left
-                                                    ( "Cloudflare update failed for "
-                                                        <> item.dgiDiscoveryHost
-                                                        <> ": "
-                                                        <> err
-                                                    )
-                                _ ->
+            cloudflareContext <- tryAny (loadPlanCloudflareContext plan)
+            case cloudflareContext of
+                Left err ->
+                    pure
+                        ( Left
+                            ( "automatic DNS update could not be prepared: "
+                                <> T.pack (displayException err)
+                            )
+                        )
+                Right (mToken, mZone, mZoneName) -> do
+                    upsertResults <-
+                        forM mismatched $ \item ->
+                            case classifyUpsertEligibility True mToken mZone mZoneName item.dgiDiscoveryHost of
+                                UpsertIneligible reason ->
                                     pure
                                         ( Left
                                             ( item.dgiDiscoveryHost
                                                 <> " must point to "
                                                 <> item.dgiExpectedHost
-                                                <> " (Cloudflare credentials are missing)"
+                                                <> " (automatic DNS update unavailable: "
+                                                <> reason
+                                                <> ")"
                                             )
                                         )
-            let failures = [err | Left err <- upsertResults]
-            if not (null failures)
-                then pure (Left (T.intercalate "; " failures))
-                else do
-                    let updatedItems = [item | Right item <- upsertResults]
-                    printProviderLine
-                        ( "hostenv-provider: waiting for migration DNS propagation for "
-                            <> envInfo.userName
-                        )
-                    (_, timedOutItems) <- waitForCnamePropagation dnsCache updatedItems
-                    if null timedOutItems
-                        then pure (Right ())
-                        else
-                            pure
-                                ( Left
-                                    ( "DNS did not propagate to the destination for: "
-                                        <> T.intercalate
-                                            ", "
-                                            [ item.dgiDiscoveryHost <> " -> " <> item.dgiExpectedHost
-                                            | item <- timedOutItems
-                                            ]
-                                    )
+                                UpsertEligible ->
+                                    case (mToken, mZone) of
+                                        (Just token, Just zoneId) -> do
+                                            printProviderLine
+                                                ( "hostenv-provider: cutting over migration DNS "
+                                                    <> item.dgiDiscoveryHost
+                                                    <> " -> "
+                                                    <> item.dgiExpectedHost
+                                                )
+                                            result <- cfUpsertCname token zoneId item.dgiDiscoveryHost item.dgiExpectedHost
+                                            pure $
+                                                case result of
+                                                    Right () -> Right item
+                                                    Left err ->
+                                                        Left
+                                                            ( "Cloudflare update failed for "
+                                                                <> item.dgiDiscoveryHost
+                                                                <> ": "
+                                                                <> err
+                                                            )
+                                        _ ->
+                                            pure
+                                                ( Left
+                                                    ( item.dgiDiscoveryHost
+                                                        <> " must point to "
+                                                        <> item.dgiExpectedHost
+                                                        <> " (Cloudflare credentials are missing)"
+                                                    )
+                                                )
+                    let failures = [err | Left err <- upsertResults]
+                    if not (null failures)
+                        then pure (Left (T.intercalate "; " failures))
+                        else do
+                            let updatedItems = [item | Right item <- upsertResults]
+                            printProviderLine
+                                ( "hostenv-provider: waiting for migration DNS propagation for "
+                                    <> envInfo.userName
                                 )
+                            (_, timedOutItems) <- waitForCnamePropagation dnsCache updatedItems
+                            if null timedOutItems
+                                then pure (Right ())
+                                else
+                                    pure
+                                        ( Left
+                                            ( "DNS did not propagate to the destination for: "
+                                                <> T.intercalate
+                                                    ", "
+                                                    [ item.dgiDiscoveryHost <> " -> " <> item.dgiExpectedHost
+                                                    | item <- timedOutItems
+                                                    ]
+                                            )
+                                        )
 
 -- -------- DNS gate --------
 runDnsGate :: Maybe Text -> Maybe Text -> Maybe Text -> Bool -> Bool -> IO ()
@@ -1928,7 +1937,7 @@ validatePlanTransition planPath statePath newPlanRaw = do
                         printProviderLine
                             ( "hostenv-provider: warning: existing "
                                 <> planPath
-                                <> " is invalid; falling back to durable provider-node state ("
+                                <> " is invalid; skipping previous-plan comparison and relying on DNS safety ("
                                 <> T.pack err
                                 <> ")"
                             )
