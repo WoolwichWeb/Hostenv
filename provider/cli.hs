@@ -921,7 +921,7 @@ runDnsGate mNode mTok mZone withDnsUpdate dryRun = do
                     | (item, False) <- checked
                     ]
 
-            (mismatchOutcomesRev, cfDryRunCallsRev, _seenUpserts) <- foldlM (processMismatch mCfToken mCfZone mCfZoneName withDnsUpdate dryRun) ([], [], M.empty) mismatched
+            (mismatchOutcomesRev, cfDryRunCallsRev, _seenUpserts) <- foldlM (processMismatch dnsCache hostenvHostname mCfToken mCfZone mCfZoneName withDnsUpdate dryRun) ([], [], M.empty) mismatched
             let mismatchOutcomes = reverse mismatchOutcomesRev
             let cfDryRunCalls = reverse cfDryRunCallsRev
 
@@ -1039,7 +1039,7 @@ runDnsGate mNode mTok mZone withDnsUpdate dryRun = do
     readFileTrim p = T.unpack . T.strip . T.pack <$> readFile p
     foldlM f z [] = pure z
     foldlM f z (x : xs) = f z x >>= \z' -> foldlM f z' xs
-    processMismatch mCfToken mCfZone mCfZoneName withDnsUpdate dryRun (outcomes, cfOps, seenUpserts) item =
+    processMismatch dnsCache hostenvHostname mCfToken mCfZone mCfZoneName withDnsUpdate dryRun (outcomes, cfOps, seenUpserts) item =
         let key = dnsGateKey item
          in case M.lookup key seenUpserts of
                 Just cachedOutcome ->
@@ -1048,56 +1048,71 @@ runDnsGate mNode mTok mZone withDnsUpdate dryRun = do
                         , cfOps
                         , seenUpserts
                         )
-                Nothing ->
-                    case classifyUpsertEligibility withDnsUpdate mCfToken mCfZone mCfZoneName item.dgiDiscoveryHost of
-                        UpsertIneligible reason ->
-                            let outcome = UpsertUnavailable reason
+                Nothing -> do
+                    pointsToOtherProviderNode <-
+                        if withDnsUpdate
+                            then dnsPointsToDifferentProviderNode dnsCache hostenvHostname item
+                            else pure False
+                    if pointsToOtherProviderNode
+                        then
+                            let outcome =
+                                    UpsertUnavailable
+                                        "DNS points at another Hostenv node; migration cutover is performed by deploy after the source is quiesced"
                              in pure
                                     ( DnsGateMismatch item outcome : outcomes
                                     , cfOps
                                     , M.insert key outcome seenUpserts
                                     )
-                        UpsertEligible ->
-                            case (mCfToken, mCfZone) of
-                                (Just token, Just zoneId) ->
-                                    if dryRun
-                                        then
-                                            let outcome = UpsertPlanned
-                                             in pure
-                                                    ( DnsGateMismatch item outcome : outcomes
-                                                    , ("upsert CNAME " <> item.dgiDiscoveryHost <> " -> " <> item.dgiExpectedHost <> " in zone " <> zoneId) : cfOps
-                                                    , M.insert key outcome seenUpserts
-                                                    )
-                                        else do
-                                            printProviderLine
-                                                ( "hostenv-provider: upserting Cloudflare CNAME "
-                                                    <> item.dgiDiscoveryHost
-                                                    <> " -> "
-                                                    <> item.dgiExpectedHost
-                                                )
-                                            upsertResult <- cfUpsertCname token zoneId item.dgiDiscoveryHost item.dgiExpectedHost
-                                            case upsertResult of
-                                                Right () ->
-                                                    let outcome = UpsertSucceeded
-                                                     in pure
-                                                            ( DnsGateMismatch item outcome : outcomes
-                                                            , cfOps
-                                                            , M.insert key outcome seenUpserts
-                                                            )
-                                                Left err ->
-                                                    let outcome = UpsertFailed err
-                                                     in pure
-                                                            ( DnsGateMismatch item outcome : outcomes
-                                                            , cfOps
-                                                            , M.insert key outcome seenUpserts
-                                                            )
-                                _ ->
-                                    let outcome = UpsertUnavailable "Cloudflare credentials are missing"
+                        else
+                            case classifyUpsertEligibility withDnsUpdate mCfToken mCfZone mCfZoneName item.dgiDiscoveryHost of
+                                UpsertIneligible reason ->
+                                    let outcome = UpsertUnavailable reason
                                      in pure
                                             ( DnsGateMismatch item outcome : outcomes
                                             , cfOps
                                             , M.insert key outcome seenUpserts
                                             )
+                                UpsertEligible ->
+                                    case (mCfToken, mCfZone) of
+                                        (Just token, Just zoneId) ->
+                                            if dryRun
+                                                then
+                                                    let outcome = UpsertPlanned
+                                                     in pure
+                                                            ( DnsGateMismatch item outcome : outcomes
+                                                            , ("upsert CNAME " <> item.dgiDiscoveryHost <> " -> " <> item.dgiExpectedHost <> " in zone " <> zoneId) : cfOps
+                                                            , M.insert key outcome seenUpserts
+                                                            )
+                                                else do
+                                                    printProviderLine
+                                                        ( "hostenv-provider: upserting Cloudflare CNAME "
+                                                            <> item.dgiDiscoveryHost
+                                                            <> " -> "
+                                                            <> item.dgiExpectedHost
+                                                        )
+                                                    upsertResult <- cfUpsertCname token zoneId item.dgiDiscoveryHost item.dgiExpectedHost
+                                                    case upsertResult of
+                                                        Right () ->
+                                                            let outcome = UpsertSucceeded
+                                                             in pure
+                                                                    ( DnsGateMismatch item outcome : outcomes
+                                                                    , cfOps
+                                                                    , M.insert key outcome seenUpserts
+                                                                    )
+                                                        Left err ->
+                                                            let outcome = UpsertFailed err
+                                                             in pure
+                                                                    ( DnsGateMismatch item outcome : outcomes
+                                                                    , cfOps
+                                                                    , M.insert key outcome seenUpserts
+                                                                    )
+                                        _ ->
+                                            let outcome = UpsertUnavailable "Cloudflare credentials are missing"
+                                             in pure
+                                                    ( DnsGateMismatch item outcome : outcomes
+                                                    , cfOps
+                                                    , M.insert key outcome seenUpserts
+                                                    )
 
 runPlan :: Bool -> IO ()
 runPlan dryRun = do
