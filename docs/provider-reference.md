@@ -97,25 +97,30 @@ environments.
 
 Source retirement is a finalization step: Hostenv first migrates data, deploys
 the destination system, successfully activates the destination environment, and
-passes any enforced deployment verification. It then disables lingering/stops
-the old user manager. Only after that source cleanup succeeds does Hostenv
-record a destination-local migration handoff marker and deploy the source system
-configuration that removes the account.
+passes any enforced deployment verification. It then records an `accepted`
+handoff, disables lingering/stops the old user manager, atomically promotes the
+handoff to `quiesced`, and deploys the source system configuration that removes
+the account.
 
-The marker therefore means that the destination was accepted and the source was
-successfully quiesced. If source cleanup fails, no marker is written, so a retry
-cannot silently skip a newer source backup. If interruption happens after source
-cleanup but before the marker is written, the next deploy has no completed
-handoff to trust and the migration path fails closed unless it can safely run
-again.
+Handoff state is provider-owned root state under
+`/var/lib/hostenv/provider/migration-handoffs/`, keyed by the environment's
+stable UID. Environment users cannot read, forge, redirect, or delete it. Marker
+updates use a same-directory temporary file and atomic rename, so interruption
+while promoting `accepted` to `quiesced` leaves the previous accepted marker
+intact rather than truncating the only recovery state.
 
-If source-system finalization fails after the handoff marker is written, Hostenv
-deliberately leaves the source application quiesced. The marker allows the next
-deploy to skip source backup/restore-plan recreation and retry only destination
-acceptance plus source finalization. This avoids restarting cron, queue workers,
-nginx, or other source services alongside the live destination. Old handoff
-markers are cleared when a node later becomes a source, so a future round-trip
-move cannot reuse an earlier handoff.
+On retry, an `accepted` marker does not suppress a fresh backup while the source
+manager is still live. If the source manager is already stopped (or the passwd
+entry is gone but orphan runtime remains), Hostenv can safely resume source
+finalization without trying to use a dead user bus. Once a `quiesced` handoff
+exists, a failed source-system deployment deliberately leaves the source
+application stopped rather than restarting cron, queue workers, nginx, or other
+source services alongside the live destination. Stale handoffs are cleared when
+the same environment later becomes a live migration source again.
+
+A node-filtered deploy also refuses to start a migration whose source is outside
+the selected node. Run an unfiltered deploy so destination acceptance and source
+finalization participate in the same operation.
 
 `--skip-migrations` and ignored migration failures protect their source
 accounts for that run. Hostenv may defer the corresponding source-node system

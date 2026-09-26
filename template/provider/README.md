@@ -14,7 +14,8 @@ state, and flake used to deploy them.
 7. Run `nix run .#hostenv-provider -- dns-gate`, then `nix run .#hostenv-provider -- deploy`.
 
 Commit `generated/state.json`; it contains Hostenv's durable UID/hostname
-reservations. `generated/plan.json` is disposable generated output. When a
+reservations plus minimal provider-node retirement/routing metadata.
+`generated/plan.json` is disposable generated output. When a
 previous valid plan is present, Hostenv uses it as an additional node-removal
 check before atomically replacing it.
 

@@ -195,7 +195,8 @@ still working on improvements to Provider support.
 
    This writes: `generated/{flake.nix,plan.json,state.json}`. Commit
    `generated/state.json`; it contains Hostenv's durable UID/hostname
-   reservations. `generated/plan.json` is disposable, although an existing
+   reservations plus minimal provider-node retirement/routing metadata.
+   `generated/plan.json` is disposable, although an existing
    valid copy is used as an additional node-removal safety check before it is
    atomically replaced.
 

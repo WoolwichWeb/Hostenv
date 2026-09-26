@@ -401,9 +401,9 @@ in
       exit 0
     fi
 
-    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "migration-handoff-source"; then
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/hostenv/provider/migration-handoffs/"; then
       case "$script" in
-        *acme-stage*) handoff_user="acme-stage" ;;
+        *"/migration-handoffs/2001"*) handoff_user="acme-stage" ;;
         *) handoff_user="acme-prod" ;;
       esac
       case "$target" in
@@ -419,6 +419,10 @@ in
           *"quiesced old-node"*) handoff_phase="quiesced" ;;
           *) echo "unexpected handoff payload" >&2; exit 44 ;;
         esac
+        if [ "$handoff_phase" = quiesced ] && [ "''${FAIL_QUIESCED_MARKER:-0}" = 1 ]; then
+          printf 'HANDOFF_QUIESCED_WRITE_FAIL %s\n' "$handoff_user" >> "$EVENT_LOG"
+          exit 45
+        fi
         printf '%s old-node\n' "$handoff_phase" > "$handoff_file"
         case "$handoff_phase" in
           accepted) printf 'HANDOFF_ACCEPTED %s\n' "$handoff_user" >> "$EVENT_LOG" ;;
@@ -517,6 +521,20 @@ in
       test ! -s "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
 
+      # A destination-only filtered deploy must not activate the destination
+      # while silently leaving its discovered migration source live.
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" \
+        ${cliPkg}/bin/hostenv-provider deploy --node new-node --remote-build --skip-verification; then
+        echo "destination-only filtered migration was reported as success"
+        exit 1
+      fi
+      test ! -s "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
+
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
@@ -592,6 +610,33 @@ in
       ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'failed to inspect user@2000.service' "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'failed to verify user@2000.service after cleanup' "$sshLog"
+
+      # If promotion to quiesced fails after source cleanup, the atomic marker
+      # writer must leave the earlier accepted state intact for recovery.
+      rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/*
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_QUIESCED_MARKER=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "quiesced marker write failure was reported as success"
+        exit 1
+      fi
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED_WRITE_FAIL acme-prod' "$eventLog"
+      grep -qx 'accepted old-node' "$HANDOFF_DIR/new-node-acme-prod"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_SOURCE_SYSTEM=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "retry after quiesced marker write failure was reported as success"
+        exit 1
+      fi
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
 
       # If cleanup mutates the source and then reports failure, the accepted
       # marker plus a live source probe makes the interruption recoverable.
@@ -1147,6 +1192,11 @@ in
   provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
+    echo ok > "$out"
+  '';
+  provider-cli-migration-handoff = pkgs.runCommand "provider-cli-migration-handoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestMigrationHandoff.hs
     echo ok > "$out"
   '';
   provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
