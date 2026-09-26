@@ -11,6 +11,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Hostenv.Provider.DnsGateFilter
     ( DnsGateItem (..)
+    , clearDnsGateOriginalForEnvironment
     , collectDnsGateItems
     , disableAcmeOnNode
     , disableLetsEncryptPaths
@@ -305,9 +306,16 @@ main = do
         True
         ["nodes", "backend05", "services", "nginx", "virtualHosts", "www.customer.com", "enableACME"]
         restoredPlan
-    assertMissingAt
-        "restoring an environment should clear its dns-gate metadata"
-        ["_dnsGateOriginalVhosts", "envA"]
+    assertBoolAt
+        "TLS restore metadata should remain until the destination redeploy succeeds"
+        True
+        ["_dnsGateOriginalVhosts", "envA", "www.customer.com", "environment", "enableLetsEncrypt"]
         restoredPlan
+
+    let cleanedPlan = clearDnsGateOriginalForEnvironment "envA" restoredPlan
+    assertMissingAt
+        "successful destination redeploy should clear dns-gate metadata"
+        ["_dnsGateOriginalVhosts", "envA"]
+        cleanedPlan
 
     TIO.putStrLn "ok"
