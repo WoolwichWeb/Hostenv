@@ -2366,18 +2366,18 @@ writeMigrationHandoff deployUser nodeConnection envInfo sourceNode phase = do
                     <> ")"
                 )
 
-writeMigrationMigrationHandoff.HandoffAccepted ::
+writeMigrationHandoffAccepted ::
     Text ->
     (Text -> NodeConnection) ->
     EnvInfo ->
     Text ->
     IO ()
-writeMigrationMigrationHandoff.HandoffAccepted deployUser nodeConnection envInfo sourceNode = do
+writeMigrationHandoffAccepted deployUser nodeConnection envInfo sourceNode = do
     existing <- readMigrationHandoff deployUser nodeConnection envInfo
     case existing of
         Just handoff
             | MigrationHandoff.handoffSourceNode handoff == sourceNode
-            , MigrationHandoff.handoffPhase handoff == MigrationHandoff.MigrationHandoff.HandoffQuiesced ->
+            , MigrationHandoff.handoffPhase handoff == MigrationHandoff.HandoffQuiesced ->
                 pure ()
         _ ->
             writeMigrationHandoff
@@ -2385,21 +2385,21 @@ writeMigrationMigrationHandoff.HandoffAccepted deployUser nodeConnection envInfo
                 nodeConnection
                 envInfo
                 sourceNode
-                MigrationHandoff.MigrationHandoff.HandoffAccepted
+                MigrationHandoff.HandoffAccepted
 
-writeMigrationMigrationHandoff.HandoffQuiesced ::
+writeMigrationHandoffQuiesced ::
     Text ->
     (Text -> NodeConnection) ->
     EnvInfo ->
     Text ->
     IO ()
-writeMigrationMigrationHandoff.HandoffQuiesced deployUser nodeConnection envInfo sourceNode =
+writeMigrationHandoffQuiesced deployUser nodeConnection envInfo sourceNode =
     writeMigrationHandoff
         deployUser
         nodeConnection
         envInfo
         sourceNode
-        MigrationHandoff.MigrationHandoff.HandoffQuiesced
+        MigrationHandoff.HandoffQuiesced
 
 clearMigrationHandoffOnNode ::
     Text ->
@@ -2993,7 +2993,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                             if sourceQuiesced
                                                 then do
                                                     when (MigrationHandoff.handoffPhase handoff == MigrationHandoff.HandoffAccepted) $
-                                                        writeMigrationMigrationHandoff.HandoffQuiesced
+                                                        writeMigrationHandoffQuiesced
                                                             deployUser
                                                             resolveNodeConnection
                                                             envInfo
@@ -3210,7 +3210,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             when accepted $
                                 forM_ (M.lookup envName acceptedMigrationSources) $ \sourceNode ->
                                     when (not (null envInfo.migrateBackups)) $
-                                        writeMigrationMigrationHandoff.HandoffAccepted
+                                        writeMigrationHandoffAccepted
                                             deployUser
                                             resolveNodeConnection
                                             envInfo
@@ -3251,7 +3251,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                                 case M.lookup userName acceptedMigrationSources of
                                                                     Just sourceNode
                                                                         | sourceNode == nodeName ->
-                                                                            writeMigrationMigrationHandoff.HandoffQuiesced
+                                                                            writeMigrationHandoffQuiesced
                                                                                 deployUser
                                                                                 resolveNodeConnection
                                                                                 envInfo
