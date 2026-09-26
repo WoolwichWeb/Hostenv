@@ -41,6 +41,7 @@ import Hostenv.Provider.DnsGateFilter (
     collectDnsGateItems,
     disableAcmeOnNode,
     disableLetsEncryptPaths,
+    clearDnsGateOriginalForEnvironment,
     filterEnvironmentsByNode,
     rememberDnsGateOriginal,
     restoreDnsGateOriginalForEnvironment,
@@ -1342,6 +1343,24 @@ restoreMigrationTlsSettings planPath envInfos = do
                 <> T.intercalate ", " restoredUsers
             )
     pure restoredUsers
+
+clearMigrationTlsRestoreState :: Text -> [Text] -> IO ()
+clearMigrationTlsRestoreState planPath envNames =
+    unless (null envNames) $ do
+        raw <- BL.readFile (T.unpack planPath)
+        plan <-
+            case A.eitherDecode' raw of
+                Left err ->
+                    error ("hostenv-provider: cannot clear migration TLS restore state because " <> T.unpack planPath <> " is invalid JSON: " <> err)
+                Right value -> pure (value :: KM.KeyMap A.Value)
+        let cleaned =
+                foldl
+                    (flip clearDnsGateOriginalForEnvironment)
+                    plan
+                    envNames
+        pretty <- prettyJson (A.encode cleaned)
+        withSameDirectoryTempFile planPath pretty $ \candidatePath ->
+            Dir.renameFile candidatePath (T.unpack planPath)
 
 -- -------- Deploy wrapper --------
 shellEscape :: Text -> Text
@@ -3519,6 +3538,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                                                 ]
                                                                         pure (nodeName, ExitFailure 1, failedEnvs)
                                                                     else do
+                                                                        clearMigrationTlsRestoreState planPath restoredTlsUsers
                                                                         systemCode <- deploySystemNode nodeName
                                                                         when (systemCode /= ExitSuccess && not (null cleanedUsers)) $
                                                                             rollbackRetiredCleanedUsers nodeName cleanedUsers
