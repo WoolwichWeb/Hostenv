@@ -207,6 +207,7 @@ in
       # Real deploys observe node passwd state, but state.json itself is an
       # input/reservation file and must remain byte-for-byte unchanged.
       cp generated/state.json "$TMPDIR/state-before.json"
+      cp generated/plan.json "$TMPDIR/gated-plan.json"
       : > "$log"
       : > "$sshLog"
       PATH="$fakeBin:$PATH" NIX_LOG="$log" SSH_LOG="$sshLog" \
@@ -297,7 +298,18 @@ in
       "hostenvHostname": "hosting.test",
       "nodes": {
         "old-node": {},
-        "new-node": {}
+        "new-node": {
+          "services": {
+            "nginx": {
+              "virtualHosts": {
+                "acme-prod.hosting.test": {
+                  "enableACME": false,
+                  "forceSSL": false
+                }
+              }
+            }
+          }
+        }
       },
       "environments": {
         "acme-prod": {
@@ -329,7 +341,24 @@ in
             ]
           },
           "virtualHosts": {
-            "acme-prod.hosting.test": {}
+            "acme-prod.hosting.test": {
+              "enableLetsEncrypt": false,
+              "forceSSL": false
+            }
+          }
+        }
+      },
+      "_dnsGateOriginalVhosts": {
+        "acme-prod": {
+          "acme-prod.hosting.test": {
+            "environment": {
+              "enableLetsEncrypt": true,
+              "forceSSL": true
+            },
+            "node": {
+              "enableACME": true,
+              "forceSSL": true
+            }
           }
         }
       }
@@ -768,6 +797,7 @@ in
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
+      cp "$TMPDIR/gated-plan.json" generated/plan.json
       rm -f "$DNS_STATE_DIR"/*
       if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_SOURCE_SYSTEM=1 DNS_AUTOMATIC=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
@@ -786,13 +816,22 @@ in
       cleanup_line="$(${pkgs.gnugrep}/bin/grep -n -F 'CLEANUP acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       quiesced_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_QUIESCED acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       dns_line="$(${pkgs.gnugrep}/bin/grep -n -F 'DNS_UPSERT acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
+      tls_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."system"' "$eventLog" | tail -n1 | cut -d: -f1)"
       source_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"old-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
       test "$dest_system_line" -lt "$dest_env_line"
       test "$dest_env_line" -lt "$accepted_line"
       test "$accepted_line" -lt "$cleanup_line"
       test "$cleanup_line" -lt "$quiesced_line"
       test "$quiesced_line" -lt "$dns_line"
-      test "$dns_line" -lt "$source_system_line"
+      test "$dns_line" -lt "$tls_system_line"
+      test "$tls_system_line" -lt "$source_system_line"
+      ${pkgs.jq}/bin/jq -e '
+        .environments["acme-prod"].virtualHosts["acme-prod.hosting.test"].enableLetsEncrypt == true
+        and .environments["acme-prod"].virtualHosts["acme-prod.hosting.test"].forceSSL == true
+        and .nodes["new-node"].services.nginx.virtualHosts["acme-prod.hosting.test"].enableACME == true
+        and .nodes["new-node"].services.nginx.virtualHosts["acme-prod.hosting.test"].forceSSL == true
+        and (._dnsGateOriginalVhosts.acme-prod == null)
+      ' generated/plan.json >/dev/null
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
 
       # A matching accepted handoff is also sufficient to resume finalization
