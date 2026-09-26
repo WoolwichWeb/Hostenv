@@ -481,13 +481,6 @@ data EnvInfo = EnvInfo
     , uid :: Integer
     }
 
-data StoredProviderNode = StoredProviderNode
-    { spnStatus :: Text
-    , spnDeployUser :: Text
-    , spnConnection :: NodeConnection
-    }
-    deriving (Eq, Show)
-
 -- Note: check the nix code that generates plan.json
 -- (modules/entrypoints/provider/plan.nix)
 -- The name key is always == userName. So, it's okay to use
@@ -1646,45 +1639,6 @@ stateReservedHostnames hostenvHostname state =
     | (userName, _) <- EnvironmentState.managedIdentities state
     ]
 
-storedProviderNodes :: KM.KeyMap A.Value -> Either Text (M.Map Text StoredProviderNode)
-storedProviderNodes state =
-    case lookupObj (K.fromString "_providerNodes") state of
-        Nothing -> Right M.empty
-        Just nodes ->
-            M.fromList <$> mapM parseNode (KM.toList nodes)
-  where
-    parseNode (key, A.Object nodeObj) = do
-        let nodeName = K.toText key
-        status <-
-            case lookupText (K.fromString "status") nodeObj of
-                Just "active" -> Right "active"
-                Just "retiring" -> Right "retiring"
-                Just other -> Left ("invalid stored provider node status for " <> nodeName <> ": " <> other)
-                Nothing -> Left ("stored provider node " <> nodeName <> " is missing status")
-        deployUser <-
-            maybe
-                (Left ("stored provider node " <> nodeName <> " is missing deployUser"))
-                Right
-                (lookupText (K.fromString "deployUser") nodeObj)
-        connectionObj <-
-            maybe
-                (Left ("stored provider node " <> nodeName <> " is missing connection"))
-                Right
-                (lookupObj (K.fromString "connection") nodeObj)
-        connectionHost <-
-            maybe
-                (Left ("stored provider node " <> nodeName <> " connection is missing hostname"))
-                Right
-                (lookupText (K.fromString "hostname") connectionObj)
-        let connection =
-                NodeConnection
-                    { hostname = connectionHost
-                    , sshOpts = lookupTextList (K.fromString "sshOpts") connectionObj
-                    }
-        Right (nodeName, StoredProviderNode status deployUser connection)
-    parseNode (key, _) =
-        Left ("stored provider node " <> K.toText key <> " is not an object")
-
 loadProviderState :: Text -> IO (KM.KeyMap A.Value)
 loadProviderState statePath = do
     stateExists <- Dir.doesFileExist (T.unpack statePath)
@@ -1902,39 +1856,11 @@ validatePlanTransition planPath statePath newPlanRaw = do
                         deployUser
                         (resolveOldConnection nodeName)
                         managedIdentityState
-        Nothing -> do
-            storedNodes <-
-                case storedProviderNodes state of
-                    Left err ->
-                        error
-                            ( "hostenv-provider: cannot use durable provider-node state to validate plan transition: "
-                                <> T.unpack err
-                            )
-                    Right nodes -> pure nodes
-            let managedIdentities = EnvironmentState.managedIdentities state
-            when (M.null storedNodes && not (null managedIdentities)) $
-                error
-                    ( "hostenv-provider: refusing provider plan because "
-                        <> T.unpack planPath
-                        <> " is unavailable and "
-                        <> T.unpack statePath
-                        <> " predates durable provider-node inventory. Restore the last generated plan, run plan once to upgrade state.json, then retry."
-                    )
-            let removedNodes = M.keys storedNodes \\ newNodes
-            forM_ removedNodes $ \nodeName ->
-                case M.lookup nodeName storedNodes of
-                    Nothing -> pure ()
-                    Just stored ->
-                        validateRemovedNode
-                            nodeName
-                            stored.spnStatus
-                            stored.spnDeployUser
-                            stored.spnConnection
-                            state
+        Nothing -> pure ()
 
-    -- This check happens before plan.json is published and before dns-gate can
-    -- update records. It remains an independent live tripwire in addition to
-    -- durable provider-node transition checks.
+    -- This check happens before plan.json is published. The previous plan is
+    -- only additional evidence; DNS is the live safety tripwire when generated
+    -- history is missing.
     validatePlanDnsSafety state previousPlan newPlan
 prepareManagedUserCleanupOnNode ::
     Text ->
