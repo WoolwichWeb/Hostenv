@@ -2871,14 +2871,14 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
             let deployArgs' = deployArgs True False
             let inventoryNodes = planSystemTargetNodes plan Nothing
 
-            let migrationEnvInfos =
+            let lifecycleEnvInfos =
                     filter
-                        (\envInfo -> envInfo.userName `notElem` skipMigrations && envInfo.migrateBackups /= [])
+                        (\envInfo -> envInfo.userName `notElem` skipMigrations)
                         envInfosFiltered
             let observationNodes =
                     S.toList . S.fromList $
                         targetNodes
-                            ++ if null migrationEnvInfos then [] else discoveryNodes
+                            ++ if null lifecycleEnvInfos then [] else discoveryNodes
             observedResults <-
                 forM observationNodes $
                     readNodeUsers deployUser resolveNodeConnection
