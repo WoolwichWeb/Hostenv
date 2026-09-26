@@ -3468,25 +3468,67 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                                         ]
                                                                 pure (nodeName, ExitFailure 1, failedEnvs)
                                                             else do
-                                                                systemCode <- deploySystemNode nodeName
-                                                                when (systemCode /= ExitSuccess && not (null cleanedUsers)) $
-                                                                    rollbackRetiredCleanedUsers nodeName cleanedUsers
-                                                                nodeEnvResults <-
-                                                                    if systemCode == ExitSuccess
-                                                                        then forM (envsForNode nodeName) deployEnvironmentAndVerify
-                                                                        else do
-                                                                            forM_ (envsForNode nodeName) $ \envInfo ->
-                                                                                printProviderLine
-                                                                                    ( "hostenv-provider: system deployment failed for node "
-                                                                                        <> nodeName
-                                                                                        <> "; skipping environment "
-                                                                                        <> envInfo.userName
-                                                                                    )
-                                                                            pure
+                                                                let movedCleanedEnvInfos =
+                                                                        mapMaybe
+                                                                            (\userName -> M.lookup userName envInfoByUser)
+                                                                            movedCleanedUsers
+                                                                restoredTlsUsers <-
+                                                                    restoreMigrationTlsSettings
+                                                                        planPath
+                                                                        movedCleanedEnvInfos
+                                                                let tlsDestinationNodes =
+                                                                        S.toList . S.fromList $
+                                                                            [ envInfo.node
+                                                                            | userName <- restoredTlsUsers
+                                                                            , Just envInfo <- [M.lookup userName envInfoByUser]
+                                                                            ]
+                                                                tlsDeployResults <-
+                                                                    forM tlsDestinationNodes $ \destinationNode -> do
+                                                                        printProviderLine
+                                                                            ( "hostenv-provider: redeploying destination system "
+                                                                                <> destinationNode
+                                                                                <> " after restoring TLS configuration"
+                                                                            )
+                                                                        code <- deploySystemNode destinationNode
+                                                                        pure (destinationNode, code)
+                                                                let tlsDeploymentFailures =
+                                                                        [ destinationNode
+                                                                        | (destinationNode, code) <- tlsDeployResults
+                                                                        , code /= ExitSuccess
+                                                                        ]
+                                                                if not (null tlsDeploymentFailures)
+                                                                    then do
+                                                                        printProviderErrLine
+                                                                            ( "hostenv-provider: error: destination TLS redeployment failed after DNS cutover for node(s): "
+                                                                                <> T.intercalate ", " tlsDeploymentFailures
+                                                                                <> ". Source accounts remain quiesced and have not been removed."
+                                                                            )
+                                                                        rollbackRetiredCleanedUsers nodeName cleanedUsers
+                                                                        let failedEnvs =
                                                                                 [ ((envInfo.userName, ExitFailure 1), False, Nothing)
                                                                                 | envInfo <- envsForNode nodeName
                                                                                 ]
-                                                                pure (nodeName, systemCode, nodeEnvResults)
+                                                                        pure (nodeName, ExitFailure 1, failedEnvs)
+                                                                    else do
+                                                                        systemCode <- deploySystemNode nodeName
+                                                                        when (systemCode /= ExitSuccess && not (null cleanedUsers)) $
+                                                                            rollbackRetiredCleanedUsers nodeName cleanedUsers
+                                                                        nodeEnvResults <-
+                                                                            if systemCode == ExitSuccess
+                                                                                then forM (envsForNode nodeName) deployEnvironmentAndVerify
+                                                                                else do
+                                                                                    forM_ (envsForNode nodeName) $ \envInfo ->
+                                                                                        printProviderLine
+                                                                                            ( "hostenv-provider: system deployment failed for node "
+                                                                                                <> nodeName
+                                                                                                <> "; skipping environment "
+                                                                                                <> envInfo.userName
+                                                                                            )
+                                                                                    pure
+                                                                                        [ ((envInfo.userName, ExitFailure 1), False, Nothing)
+                                                                                        | envInfo <- envsForNode nodeName
+                                                                                        ]
+                                                                        pure (nodeName, systemCode, nodeEnvResults)
                                                     else do
                                                         printProviderErrLine
                                                             ( "hostenv-provider: error: failed to prepare Hostenv user retirement on "
