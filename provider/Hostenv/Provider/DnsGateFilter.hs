@@ -8,6 +8,7 @@ module Hostenv.Provider.DnsGateFilter
     , disableAcmeOnNode
     , disableLetsEncryptPaths
     , filterEnvironmentsByNode
+    , clearDnsGateOriginalForEnvironment
     , rememberDnsGateOriginal
     , restoreDnsGateOriginalForEnvironment
     ) where
@@ -184,12 +185,15 @@ restoreDnsGateOriginalForEnvironment envName root =
                     _ -> withEnv
         restoreOne acc _ = acc
         restored = foldl restoreOne root (KM.toList savedVhosts)
-        withoutEnvMetadata = deleteAt savedPath restored
-        cleaned =
-            case KM.lookup dnsGateOriginalKey withoutEnvMetadata of
-                Just (A.Object remaining) | KM.null remaining -> KM.delete dnsGateOriginalKey withoutEnvMetadata
-                _ -> withoutEnvMetadata
-     in (cleaned, not (KM.null savedVhosts))
+     in (restored, not (KM.null savedVhosts))
+
+clearDnsGateOriginalForEnvironment :: Text -> KM.KeyMap A.Value -> KM.KeyMap A.Value
+clearDnsGateOriginalForEnvironment envName root =
+    let savedPath = [dnsGateOriginalKey, K.fromText envName]
+        withoutEnvMetadata = deleteAt savedPath root
+     in case KM.lookup dnsGateOriginalKey withoutEnvMetadata of
+            Just (A.Object remaining) | KM.null remaining -> KM.delete dnsGateOriginalKey withoutEnvMetadata
+            _ -> withoutEnvMetadata
 
 disableLetsEncryptPaths :: Text -> Text -> KM.KeyMap A.Value -> KM.KeyMap A.Value
 disableLetsEncryptPaths name vhostName root =
