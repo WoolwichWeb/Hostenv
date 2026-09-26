@@ -814,14 +814,14 @@ classifyUpsertEligibility withDnsUpdate mToken mZoneId mZoneName vhName
                     else UpsertIneligible ("host is outside Cloudflare zone " <> zoneName)
             Nothing -> UpsertIneligible "could not resolve Cloudflare zone name"
 
-waitForDnsPropagation :: DnsLookupCache -> [DnsGateItem] -> IO (S.Set DnsGateKey, [DnsGateItem])
-waitForDnsPropagation dnsCache items = do
+waitForDnsPropagationBy :: (DnsGateItem -> IO Bool) -> [DnsGateItem] -> IO (S.Set DnsGateKey, [DnsGateItem])
+waitForDnsPropagationBy pointsToExpected items = do
     (resolved0, unresolved0) <- partitionByDns items
     go resolved0 unresolved0 (backoffDelays 1 30 600)
   where
     partitionByDns recs = do
         checks <- forM recs $ \item -> do
-            ok <- dnsPointsToWith dnsCache item.dgiDiscoveryHost item.dgiExpectedHost
+            ok <- pointsToExpected item
             pure (item, ok)
         pure
             ( [ item
@@ -844,6 +844,35 @@ waitForDnsPropagation dnsCache items = do
         threadDelay (delaySec * 1000000)
         (resolvedNow, unresolvedNow) <- partitionByDns unresolved
         go (resolved <> resolvedNow) unresolvedNow restDelays
+
+waitForDnsPropagation :: DnsLookupCache -> [DnsGateItem] -> IO (S.Set DnsGateKey, [DnsGateItem])
+waitForDnsPropagation dnsCache =
+    waitForDnsPropagationBy
+        (\item -> dnsPointsToWith dnsCache item.dgiDiscoveryHost item.dgiExpectedHost)
+
+dnsCnamePointsToWith :: DnsLookupCache -> DnsGateItem -> IO Bool
+dnsCnamePointsToWith dnsCache item = do
+    cnames <- digRRWith dnsCache item.dgiDiscoveryHost "CNAME"
+    pure (normalizeDnsName item.dgiExpectedHost `elem` cnames)
+
+waitForCnamePropagation :: DnsLookupCache -> [DnsGateItem] -> IO (S.Set DnsGateKey, [DnsGateItem])
+waitForCnamePropagation dnsCache =
+    waitForDnsPropagationBy (dnsCnamePointsToWith dnsCache)
+
+dnsPointsToDifferentProviderNode :: DnsLookupCache -> Text -> DnsGateItem -> IO Bool
+dnsPointsToDifferentProviderNode dnsCache hostenvHostname item = do
+    cnames <- digRRWith dnsCache item.dgiDiscoveryHost "CNAME"
+    let suffix = "." <> normalizeDnsName hostenvHostname
+    let expected = normalizeDnsName item.dgiExpectedHost
+    pure $
+        any
+            (\cname ->
+                cname /= expected
+                    && case T.stripSuffix suffix cname of
+                        Just nodeName -> not (T.null nodeName)
+                        Nothing -> False
+            )
+            cnames
 
 -- -------- DNS gate --------
 runDnsGate :: Maybe Text -> Maybe Text -> Maybe Text -> Bool -> Bool -> IO ()
