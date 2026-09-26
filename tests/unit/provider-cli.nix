@@ -207,7 +207,6 @@ in
       # Real deploys observe node passwd state, but state.json itself is an
       # input/reservation file and must remain byte-for-byte unchanged.
       cp generated/state.json "$TMPDIR/state-before.json"
-      cp generated/plan.json "$TMPDIR/gated-plan.json"
       : > "$log"
       : > "$sshLog"
       PATH="$fakeBin:$PATH" NIX_LOG="$log" SSH_LOG="$sshLog" \
@@ -593,6 +592,7 @@ in
       export DNS_STATE_DIR="$TMPDIR/dns-state"
       mkdir -p "$HANDOFF_DIR" "$SOURCE_STATE_DIR" "$DNS_STATE_DIR"
       cp generated/state.json "$TMPDIR/state-before.json"
+      cp generated/plan.json "$TMPDIR/gated-plan.json"
 
       # Pointing --migration-source at the destination must not suppress a
       # real observed source. --skip-migrations is the explicit no-migrate path.
