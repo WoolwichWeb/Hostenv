@@ -2957,7 +2957,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
 
             migrationResolutions <-
                 forM envInfosFiltered $ \envInfo ->
-                    if envInfo.userName `elem` skipMigrations || envInfo.migrateBackups == []
+                    if envInfo.userName `elem` skipMigrations
                         then pure (Right Nothing)
                         else do
                             let resolution =
@@ -3020,27 +3020,38 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                     deployUser
                                                     resolveNodeConnection
                                                     envInfo
-                                            if maybe False ((== sourceNode) . MigrationHandoff.handoffSourceNode) completedHandoff
+                                            if null envInfo.migrateBackups
                                                 then do
                                                     printProviderLine
                                                         ( "hostenv-provider: Hostenv runtime for "
                                                             <> envInfo.userName
                                                             <> " remains on "
                                                             <> sourceNode
-                                                            <> " without a passwd entry, but the destination records an accepted handoff; resuming source finalization"
+                                                            <> " without a passwd entry; no migration backups are configured, so source cleanup can resume after destination acceptance"
                                                         )
                                                     pure (Right (Just (envInfo, sourceNode)))
                                                 else
-                                                    pure
-                                                        ( Left
-                                                            ( "Hostenv runtime for "
-                                                                <> envInfo.userName
-                                                                <> " remains on "
-                                                                <> sourceNode
-                                                                <> " but the passwd account is missing. Refusing to treat the destination as fresh because migration data cannot be safely recovered. "
-                                                                <> "Restore the source account/runtime or resolve the environment manually."
-                                                            )
-                                                        )
+                                                    if maybe False ((== sourceNode) . MigrationHandoff.handoffSourceNode) completedHandoff
+                                                        then do
+                                                            printProviderLine
+                                                                ( "hostenv-provider: Hostenv runtime for "
+                                                                    <> envInfo.userName
+                                                                    <> " remains on "
+                                                                    <> sourceNode
+                                                                    <> " without a passwd entry, but the destination records an accepted handoff; resuming source finalization"
+                                                                )
+                                                            pure (Right (Just (envInfo, sourceNode)))
+                                                        else
+                                                            pure
+                                                                ( Left
+                                                                    ( "Hostenv runtime for "
+                                                                        <> envInfo.userName
+                                                                        <> " remains on "
+                                                                        <> sourceNode
+                                                                        <> " but the passwd account is missing. Refusing to treat the destination as fresh because migration data cannot be safely recovered. "
+                                                                        <> "Restore the source account/runtime or resolve the environment manually."
+                                                                    )
+                                                                )
                                         sources ->
                                             pure
                                                 ( Left
@@ -3173,8 +3184,9 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
 
             let migrationsToRun =
                     [ migration
-                    | (migration, alreadyQuiesced) <- migrationHandoffStates
+                    | (migration@(envInfo, _), alreadyQuiesced) <- migrationHandoffStates
                     , not alreadyQuiesced
+                    , not (null envInfo.migrateBackups)
                     ]
 
             let runMigration (envInfo, prevNode) = do
@@ -3369,12 +3381,11 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             (accepted, verificationFailure) <- verifyDeployedEnvironment envInfo
                             when accepted $
                                 forM_ (M.lookup envName acceptedMigrationSources) $ \sourceNode ->
-                                    when (not (null envInfo.migrateBackups)) $
-                                        writeMigrationHandoffAccepted
-                                            deployUser
-                                            resolveNodeConnection
-                                            envInfo
-                                            sourceNode
+                                    writeMigrationHandoffAccepted
+                                        deployUser
+                                        resolveNodeConnection
+                                        envInfo
+                                        sourceNode
                             pure (envResult, accepted, verificationFailure)
 
             let deployReadyNodes pendingNodes systemResults envResults successfulEnvironments verificationFailures =
@@ -3407,31 +3418,30 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                                 envInfo.userName
                                                                 envInfo.uid
                                                                 nodeName
-                                                            when (not (null envInfo.migrateBackups)) $
-                                                                case M.lookup userName acceptedMigrationSources of
-                                                                    Just sourceNode
-                                                                        | sourceNode == nodeName ->
-                                                                            writeMigrationHandoffQuiesced
-                                                                                deployUser
-                                                                                resolveNodeConnection
-                                                                                envInfo
-                                                                                sourceNode
-                                                                    Just sourceNode ->
-                                                                        error
-                                                                            ( "migration source mismatch while finalizing "
-                                                                                <> T.unpack userName
-                                                                                <> ": cleaning "
-                                                                                <> T.unpack nodeName
-                                                                                <> " but accepted source is "
-                                                                                <> T.unpack sourceNode
-                                                                            )
-                                                                    Nothing ->
-                                                                        error
-                                                                            ( "missing accepted migration source while finalizing "
-                                                                                <> T.unpack userName
-                                                                                <> " on "
-                                                                                <> T.unpack nodeName
-                                                                            )
+                                                            case M.lookup userName acceptedMigrationSources of
+                                                                Just sourceNode
+                                                                    | sourceNode == nodeName ->
+                                                                        writeMigrationHandoffQuiesced
+                                                                            deployUser
+                                                                            resolveNodeConnection
+                                                                            envInfo
+                                                                            sourceNode
+                                                                Just sourceNode ->
+                                                                    error
+                                                                        ( "migration source mismatch while finalizing "
+                                                                            <> T.unpack userName
+                                                                            <> ": cleaning "
+                                                                            <> T.unpack nodeName
+                                                                            <> " but accepted source is "
+                                                                            <> T.unpack sourceNode
+                                                                        )
+                                                                Nothing ->
+                                                                    error
+                                                                        ( "missing accepted migration source while finalizing "
+                                                                            <> T.unpack userName
+                                                                            <> " on "
+                                                                            <> T.unpack nodeName
+                                                                        )
                                         prepared <-
                                             prepareManagedUserCleanupOnNode
                                                 deployUser
