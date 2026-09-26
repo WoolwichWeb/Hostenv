@@ -42,6 +42,8 @@ import Hostenv.Provider.DnsGateFilter (
     disableAcmeOnNode,
     disableLetsEncryptPaths,
     filterEnvironmentsByNode,
+    rememberDnsGateOriginal,
+    restoreDnsGateOriginalForEnvironment,
  )
 import Hostenv.Provider.SigningTarget (deployProfilePathInstallable)
 import Options.Applicative qualified as OA
@@ -1133,7 +1135,8 @@ runDnsGate mNode mTok mZone withDnsUpdate dryRun = do
 
             let applyDisable planAcc mismatch =
                     let item = mismatch.dgmItem
-                        plan1 = disableLetsEncryptPaths item.dgiEnvName item.dgiVhostName planAcc
+                        remembered = rememberDnsGateOriginal plan item planAcc
+                        plan1 = disableLetsEncryptPaths item.dgiEnvName item.dgiVhostName remembered
                      in disableAcmeOnNode item.dgiNodeName item.dgiVhostName plan1
 
             let plan' = foldl applyDisable plan disableTargets
@@ -1305,6 +1308,31 @@ runPlan dryRun = do
     nixBuildPath :: Text -> IO Text
     nixBuildPath attr =
         T.strip <$> Sh.strict (Sh.inproc "nix" (nixCommonArgs ++ ["build", "--no-link", "--print-out-paths", attr]) Sh.empty)
+
+
+restoreMigrationTlsSettings :: Text -> [EnvInfo] -> IO [Text]
+restoreMigrationTlsSettings planPath envInfos = do
+    raw <- BL.readFile (T.unpack planPath)
+    plan <-
+        case A.eitherDecode' raw of
+            Left err ->
+                error ("hostenv-provider: cannot restore migration TLS settings because " <> T.unpack planPath <> " is invalid JSON: " <> err)
+            Right value -> pure (value :: KM.KeyMap A.Value)
+    let restoreOne (current, restoredUsers) envInfo =
+            let (restored, changed) =
+                    restoreDnsGateOriginalForEnvironment envInfo.userName current
+             in (restored, if changed then envInfo.userName : restoredUsers else restoredUsers)
+    let (restoredPlan, restoredUsersRev) = foldl restoreOne (plan, []) envInfos
+    let restoredUsers = reverse restoredUsersRev
+    unless (null restoredUsers) $ do
+        pretty <- prettyJson (A.encode restoredPlan)
+        withSameDirectoryTempFile planPath pretty $ \candidatePath ->
+            Dir.renameFile candidatePath (T.unpack planPath)
+        printProviderLine
+            ( "hostenv-provider: restored desired TLS configuration after migration DNS cutover for "
+                <> T.intercalate ", " restoredUsers
+            )
+    pure restoredUsers
 
 -- -------- Deploy wrapper --------
 shellEscape :: Text -> Text
