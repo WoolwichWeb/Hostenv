@@ -117,16 +117,15 @@ let
         else
           true;
 
-      rawState =
-        if statePath == null || !(builtins.pathExists statePath) then { } else lib.importJSON statePath;
-
-      # Environment state contains durable reservations only. Provider-node
-      # lifecycle/connection metadata is stored separately so plan.json remains
-      # disposable without making node retirement fail open.
-      state = lib.mapAttrs (
-        _: entry:
-        if builtins.isAttrs entry then removeAttrs entry [ "node" ] else entry
-      ) (removeAttrs rawState [ "_description" "_providerNodes" ]);
+      state =
+        let
+          rawState =
+            if statePath == null || !(builtins.pathExists statePath) then { } else lib.importJSON statePath;
+        in
+        lib.mapAttrs (
+          _: entry:
+          if builtins.isAttrs entry then removeAttrs entry [ "node" ] else entry
+        ) (removeAttrs rawState [ "_description" ]);
 
       lockData =
         if builtins.pathExists lockPath then
@@ -282,34 +281,35 @@ let
         else
           evaluatedEnvironments;
 
-      effectiveNodeStatus =
+      nodeStatuses =
         lib.genAttrs (builtins.attrNames nodeSystems) (
           node: nodeStatus.${node} or "active"
         );
 
-      unknownStatusNodes =
-        lib.filter (node: !(builtins.hasAttr node nodeSystems)) (builtins.attrNames nodeStatus);
-
-      configuredSchedulingNodes =
-        lib.filter
-          (node: builtins.isString node && node != "" && node != "default")
-          (lib.unique (builtins.attrValues nodeFor));
-
-      unknownSchedulingNodes =
-        lib.filter (node: !(builtins.hasAttr node nodeSystems)) configuredSchedulingNodes;
-
-      scheduledRetiringNodes =
-        lib.filter
-          (node: (effectiveNodeStatus.${node} or "active") == "retiring")
-          configuredSchedulingNodes;
-
       assertNodeLifecycle =
+        let
+          unknownStatusNodes =
+            lib.filter (node: !(builtins.hasAttr node nodeSystems)) (builtins.attrNames nodeStatus);
+
+          nodeForTargets =
+            lib.filter
+              (node: builtins.isString node && node != "" && node != "default")
+              (lib.unique (builtins.attrValues nodeFor));
+
+          unknownNodeForTargets =
+            lib.filter (node: !(builtins.hasAttr node nodeSystems)) nodeForTargets;
+
+          retiringNodeForTargets =
+            lib.filter
+              (node: nodeStatuses.${node} == "retiring")
+              nodeForTargets;
+        in
         if unknownStatusNodes != [ ] then
           throw "provider plan: provider.nodeStatus contains nodes missing from provider.nodeSystems: ${lib.concatStringsSep ", " unknownStatusNodes}"
-        else if unknownSchedulingNodes != [ ] then
-          throw "provider plan: provider.nodeFor selects nodes missing from provider.nodeSystems: ${lib.concatStringsSep ", " unknownSchedulingNodes}"
-        else if scheduledRetiringNodes != [ ] then
-          throw "provider plan: retiring nodes cannot be selected by provider.nodeFor: ${lib.concatStringsSep ", " scheduledRetiringNodes}"
+        else if unknownNodeForTargets != [ ] then
+          throw "provider plan: provider.nodeFor selects nodes missing from provider.nodeSystems: ${lib.concatStringsSep ", " unknownNodeForTargets}"
+        else if retiringNodeForTargets != [ ] then
+          throw "provider plan: retiring nodes cannot be selected by provider.nodeFor: ${lib.concatStringsSep ", " retiringNodeForTargets}"
         else
           true;
 
@@ -472,7 +472,7 @@ let
               nodeRemoteBuild
               nodeConnections
               ;
-            nodeStatus = effectiveNodeStatus;
+            nodeStatus = nodeStatuses;
             nixSigning.trustedPublicKeys = nixSigning.trustedPublicKeys or [ ];
             environments = { };
 
@@ -567,7 +567,7 @@ let
 
       generatedState =
         let
-          identityState = builtins.listToAttrs (
+          environmentState = builtins.listToAttrs (
             map (env: {
               name = env.hostenv.userName;
               value = {
@@ -577,25 +577,17 @@ let
               };
             }) environmentsWithUid
           );
-          providerNodes = lib.mapAttrs (
-            nodeName: _:
-            {
-              status = effectiveNodeStatus.${nodeName};
-              inherit deployUser;
-              connection = nodeConnections.${nodeName};
-            }
-          ) nodeSystems;
         in
         pkgs.writers.writeJSON "state.json" (
           {
             _description = ''
               Persistent state to retain across deployments. Should be committed to version control.
             '';
-            _providerNodes = providerNodes;
           }
-          # Preserve retired identities and extra durable fields. Environment
-          # placement is intentionally absent: deploy derives it from the nodes.
-          // lib.recursiveUpdate state identityState
+          # Keep reservations for old environments and update the reservations
+          # for environments in the current plan. We do not store which node an
+          # environment is on; deploy discovers that from the provider nodes.
+          // lib.recursiveUpdate state environmentState
         );
 
     in
