@@ -477,7 +477,6 @@ data EnvInfo = EnvInfo
     , node :: Text
     , migrateBackups :: [Text]
     , runtimeDir :: Text
-    , stateDir :: Text
     , hostname :: Text
     , uid :: Integer
     }
@@ -501,7 +500,6 @@ instance A.FromJSON EnvInfo where
         hostenvObj <- o .: "hostenv"
         userName <- hostenvObj .: "userName"
         runtimeDir <- hostenvObj .: "runtimeDir"
-        stateDir <- hostenvObj .:? "stateDir" .!= ("/home/" <> userName <> "/.local/state")
         hostname <- hostenvObj .: "hostname"
         node <- o .: "node"
         migrateBackups <- o .:? "migrations" .!= []
@@ -512,7 +510,6 @@ instance A.FromJSON EnvInfo where
                 , node = node
                 , migrateBackups = migrateBackups
                 , runtimeDir = runtimeDir
-                , stateDir = stateDir
                 , hostname = hostname
                 , uid = uid
                 }
