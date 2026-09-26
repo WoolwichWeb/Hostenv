@@ -496,24 +496,24 @@ in
     #!${pkgs.runtimeShell}
     set -euo pipefail
     args=" $* "
-    case "$args" in
-      *" CNAME "*acme-prod.hosting.test*|*" CNAME "*acme-stage.hosting.test*)
-        case "$args" in
-          *acme-stage.hosting.test*) dns_user="acme-stage" ;;
-          *) dns_user="acme-prod" ;;
-        esac
-        if [ "''${DNS_OLD:-0}" = 1 ]; then
-          printf 'old-node.hosting.test.\n'
-          printf 'DNS_OLD %s\n' "$dns_user" >> "$EVENT_LOG"
-        elif [ "''${DNS_AUTOMATIC:-0}" = 1 ] && [ ! -f "$DNS_STATE_DIR/$dns_user-new" ]; then
-          printf 'old-node.hosting.test.\n'
-          printf 'DNS_OLD %s\n' "$dns_user" >> "$EVENT_LOG"
-        else
-          printf 'new-node.hosting.test.\n'
-          printf 'DNS_NEW %s\n' "$dns_user" >> "$EVENT_LOG"
-        fi
-        ;;
-    esac
+    if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME ' \
+      && { printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod.hosting.test' \
+        || printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-stage.hosting.test'; }; then
+      case "$args" in
+        *acme-stage.hosting.test*) dns_user="acme-stage" ;;
+        *) dns_user="acme-prod" ;;
+      esac
+      if [ "''${DNS_OLD:-0}" = 1 ]; then
+        printf 'old-node.hosting.test.\n'
+        printf 'DNS_OLD %s\n' "$dns_user" >> "$EVENT_LOG"
+      elif [ "''${DNS_AUTOMATIC:-0}" = 1 ] && [ ! -f "$DNS_STATE_DIR/$dns_user-new" ]; then
+        printf 'old-node.hosting.test.\n'
+        printf 'DNS_OLD %s\n' "$dns_user" >> "$EVENT_LOG"
+      else
+        printf 'new-node.hosting.test.\n'
+        printf 'DNS_NEW %s\n' "$dns_user" >> "$EVENT_LOG"
+      fi
+    fi
     EOF
     chmod +x "$fakeBin/dig"
 
