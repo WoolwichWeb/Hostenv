@@ -620,6 +620,22 @@ in
       ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
 
+      # The same guard applies to a move with no backup hooks. Moving between
+      # nodes is a lifecycle transaction even when there is no data snapshot.
+      ${pkgs.jq}/bin/jq '.environments["acme-prod"].migrations = []' generated/plan.json > "$TMPDIR/no-backup-plan.json"
+      mv "$TMPDIR/no-backup-plan.json" generated/plan.json
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" \
+        ${cliPkg}/bin/hostenv-provider deploy --node new-node --remote-build --skip-verification; then
+        echo "destination-only filtered move without backup hooks was reported as success"
+        exit 1
+      fi
+      test ! -s "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
+      cp "$TMPDIR/gated-plan.json" generated/plan.json
+
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
