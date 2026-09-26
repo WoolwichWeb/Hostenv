@@ -15,6 +15,8 @@ import Hostenv.Provider.DnsGateFilter
     , disableAcmeOnNode
     , disableLetsEncryptPaths
     , filterEnvironmentsByNode
+    , rememberDnsGateOriginal
+    , restoreDnsGateOriginalForEnvironment
     )
 import System.Exit (exitFailure)
 
@@ -64,7 +66,8 @@ mkGatePlan =
                     [ ( K.fromString "envA"
                       , A.Object $
                             KM.fromList
-                                [ ( K.fromString "virtualHosts"
+                                [ (K.fromString "node", A.String "backend05")
+                                , ( K.fromString "virtualHosts"
                                   , A.Object $
                                         KM.fromList
                                             [ (K.fromString "www.customer.com", mkTlsVhost)
@@ -259,5 +262,52 @@ main = do
         , "enableLetsEncrypt"
         ]
         gatedPlan
+
+    let migrationItem =
+            DnsGateItem
+                { dgiEnvName = "envA"
+                , dgiNodeName = Just "backend05"
+                , dgiVhostName = "www.customer.com"
+                , dgiDiscoveryHost = "www.customer.com"
+                , dgiExpectedHost = "backend05.hosting.test"
+                }
+    let rememberedPlan = rememberDnsGateOriginal mkGatePlan migrationItem mkGatePlan
+    let gatedWithOriginal =
+            disableAcmeOnNode (Just "backend05") "www.customer.com" $
+                disableLetsEncryptPaths "envA" "www.customer.com" rememberedPlan
+
+    assertBoolAt
+        "dns-gate should remember desired environment TLS"
+        True
+        ["_dnsGateOriginalVhosts", "envA", "www.customer.com", "environment", "enableLetsEncrypt"]
+        gatedWithOriginal
+    assertBoolAt
+        "dns-gate should remember desired node ACME"
+        True
+        ["_dnsGateOriginalVhosts", "envA", "www.customer.com", "node", "enableACME"]
+        gatedWithOriginal
+
+    let (restoredPlan, restored) =
+            restoreDnsGateOriginalForEnvironment "envA" gatedWithOriginal
+    if restored
+        then pure ()
+        else do
+            TIO.putStrLn "assertion failed (dns-gate original settings should be restorable)"
+            exitFailure
+
+    assertBoolAt
+        "restored environment TLS should be enabled"
+        True
+        ["environments", "envA", "virtualHosts", "www.customer.com", "enableLetsEncrypt"]
+        restoredPlan
+    assertBoolAt
+        "restored node ACME should be enabled"
+        True
+        ["nodes", "backend05", "services", "nginx", "virtualHosts", "www.customer.com", "enableACME"]
+        restoredPlan
+    assertMissingAt
+        "restoring an environment should clear its dns-gate metadata"
+        ["_dnsGateOriginalVhosts", "envA"]
+        restoredPlan
 
     TIO.putStrLn "ok"
