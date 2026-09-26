@@ -328,7 +328,9 @@ in
               }
             ]
           },
-          "virtualHosts": {}
+          "virtualHosts": {
+            "acme-prod.hosting.test": {}
+          }
         }
       }
     }
@@ -490,9 +492,56 @@ in
     EOF
     chmod +x "$fakeBin/ssh"
 
+    cat > "$fakeBin/dig" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    args=" $* "
+    case "$args" in
+      *" CNAME "*acme-prod.hosting.test*|*" CNAME "*acme-stage.hosting.test*)
+        case "$args" in
+          *acme-stage.hosting.test*) dns_user="acme-stage" ;;
+          *) dns_user="acme-prod" ;;
+        esac
+        if [ "''${DNS_OLD:-0}" = 1 ]; then
+          printf 'old-node.hosting.test.\n'
+          printf 'DNS_OLD %s\n' "$dns_user" >> "$EVENT_LOG"
+        elif [ "''${DNS_AUTOMATIC:-0}" = 1 ] && [ ! -f "$DNS_STATE_DIR/$dns_user-new" ]; then
+          printf 'old-node.hosting.test.\n'
+          printf 'DNS_OLD %s\n' "$dns_user" >> "$EVENT_LOG"
+        else
+          printf 'new-node.hosting.test.\n'
+          printf 'DNS_NEW %s\n' "$dns_user" >> "$EVENT_LOG"
+        fi
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/dig"
+
     cat > "$fakeBin/curl" <<'EOF'
     #!${pkgs.runtimeShell}
     set -euo pipefail
+    args=" $* "
+    if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'api.cloudflare.com'; then
+      case "$args" in
+        *"/zones/zone/dns_records?per_page=1000&name="*)
+          printf '{"success":true,"result":[{"id":"old-record","type":"CNAME","name":"acme-prod.hosting.test","content":"old-node.hosting.test","proxied":false}]}\n'
+          ;;
+        *"-X PUT "*"dns_records/old-record"*)
+          touch "$DNS_STATE_DIR/acme-prod-new"
+          printf 'DNS_UPSERT acme-prod\n' >> "$EVENT_LOG"
+          printf '{"success":true,"errors":[]}\n'
+          ;;
+        *"/zones/zone"*)
+          printf '{"success":true,"result":{"name":"hosting.test"}}\n'
+          ;;
+        *)
+          echo "unexpected Cloudflare curl invocation: $args" >&2
+          exit 46
+          ;;
+      esac
+      exit 0
+    fi
+
     if [ "''${VERIFY_FAIL:-0}" = 1 ]; then
       body="broken"
     else
@@ -506,7 +555,8 @@ in
       cd "$work"
       export HANDOFF_DIR="$TMPDIR/handoff"
       export SOURCE_STATE_DIR="$TMPDIR/source-state"
-      mkdir -p "$HANDOFF_DIR" "$SOURCE_STATE_DIR"
+      export DNS_STATE_DIR="$TMPDIR/dns-state"
+      mkdir -p "$HANDOFF_DIR" "$SOURCE_STATE_DIR" "$DNS_STATE_DIR"
       cp generated/state.json "$TMPDIR/state-before.json"
 
       # Pointing --migration-source at the destination must not suppress a
@@ -638,6 +688,35 @@ in
       ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
 
+      # DNS is part of migration finalization. If automatic updates are
+      # unavailable, a moved source is quiesced but its account is not removed
+      # until DNS is changed and deploy is rerun.
+      rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/* "$DNS_STATE_DIR"/*
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "migration finalized before DNS cutover"
+        exit 1
+      fi
+      ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'DNS_OLD acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_SOURCE_SYSTEM=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "manual DNS cutover retry was reported as success"
+        exit 1
+      fi
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'DNS_NEW acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+
       # If cleanup mutates the source and then reports failure, the accepted
       # marker plus a live source probe makes the interruption recoverable.
       rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/*
@@ -689,7 +768,8 @@ in
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
-      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_SOURCE_SYSTEM=1 \
+      rm -f "$DNS_STATE_DIR"/*
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_SOURCE_SYSTEM=1 DNS_AUTOMATIC=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
         echo "source system failure was reported as success"
         exit 1
@@ -705,12 +785,14 @@ in
       accepted_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_ACCEPTED acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       cleanup_line="$(${pkgs.gnugrep}/bin/grep -n -F 'CLEANUP acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       quiesced_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_QUIESCED acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
+      dns_line="$(${pkgs.gnugrep}/bin/grep -n -F 'DNS_UPSERT acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       source_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"old-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
       test "$dest_system_line" -lt "$dest_env_line"
       test "$dest_env_line" -lt "$accepted_line"
       test "$accepted_line" -lt "$cleanup_line"
       test "$cleanup_line" -lt "$quiesced_line"
-      test "$quiesced_line" -lt "$source_system_line"
+      test "$quiesced_line" -lt "$dns_line"
+      test "$dns_line" -lt "$source_system_line"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
 
       # A matching accepted handoff is also sufficient to resume finalization
@@ -753,7 +835,9 @@ in
           "uid": 2001,
           "node": "new-node",
           "migrations": [ "demo-migrate" ],
-          "virtualHosts": {}
+          "virtualHosts": {
+            "acme-stage.hosting.test": {}
+          }
         }
       ' generated/plan.json > "$TMPDIR/multi-plan.json"
       mv "$TMPDIR/multi-plan.json" generated/plan.json
