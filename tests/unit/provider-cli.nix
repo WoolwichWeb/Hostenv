@@ -624,7 +624,7 @@ in
       fi
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED_WRITE_FAIL acme-prod' "$eventLog"
-      grep -qx 'accepted old-node' "$HANDOFF_DIR/new-node-acme-prod"
+      ${pkgs.gnugrep}/bin/grep -qx 'accepted old-node' "$HANDOFF_DIR/new-node-acme-prod"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
 
       : > "$nixLog"
