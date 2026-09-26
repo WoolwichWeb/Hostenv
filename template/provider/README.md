@@ -13,17 +13,17 @@ state, and flake used to deploy them.
 6. Run `nix run .#hostenv-provider -- plan`.
 7. Run `nix run .#hostenv-provider -- dns-gate`, then `nix run .#hostenv-provider -- deploy`.
 
-Commit `generated/state.json`; it contains Hostenv's durable UID/hostname
-reservations plus minimal provider-node retirement/routing metadata.
-`generated/plan.json` is disposable generated output. When a
-previous valid plan is present, Hostenv uses it as an additional node-removal
-check before atomically replacing it.
+Commit `generated/state.json`; it contains Hostenv's durable UID and hostname
+reservations, not environment placement or provider-node history.
+`generated/plan.json` is disposable generated output. When a previous valid
+plan is present, Hostenv uses it as an additional node-removal check; live DNS
+remains the safety tripwire when that generated history is unavailable.
 
 When draining a provider node, keep it in `provider.nodeSystems`, remove it
 from `provider.nodeFor`, and set
-`provider.nodeStatus.<node> = "retiring"`. Hostenv will keep the node
-available for migration/cleanup and will reject removing it from inventory
-until it is clean.
+`provider.nodeStatus.<node> = "retiring"`. Hostenv keeps the node available
+for migration/cleanup. During a move, `deploy` quiesces the source before DNS
+cutover and removes the source account only after DNS reaches the destination.
 
 ## Runtime secrets
 

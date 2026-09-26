@@ -76,16 +76,15 @@ nix run .#hostenv-provider -- plan
 This writes the deployment files under `generated/`.
 
 Commit `generated/state.json` to the provider repository. It contains the
-durable information Hostenv cannot safely reconstruct: stable environment UIDs,
-hostname ownership, and a minimal provider-node inventory used to enforce safe
-node retirement. Environment placement is not stored there.
+durable information Hostenv cannot safely reconstruct: stable environment UIDs
+and hostname reservations. It does not store environment placement or
+provider-node history.
 
 `generated/plan.json` is disposable generated output. When a previous copy is
 present, `hostenv-provider plan` uses its environment assignments as an
-additional transition check. If it is missing or malformed, planning uses the
-durable provider-node inventory from `state.json` plus the pre-publication DNS
-safety check. A legacy state file must be upgraded once with a valid previous
-plan before this fallback is available.
+additional transition check. If it is missing or malformed, planning skips that
+historical comparison and relies on live Hostenv DNS as the node-removal safety
+tripwire. A CNAME to a node outside the proposed inventory blocks the plan.
 
 ## 6. Check DNS
 
@@ -93,8 +92,10 @@ plan before this fallback is available.
 nix run .#hostenv-provider -- dns-gate
 ```
 
-If you have configured Hostenv's Cloudflare integration and want it to update
-DNS records, add `--with-dns-update`.
+If you have configured Hostenv's Cloudflare integration, `--with-dns-update`
+can create or repair DNS for new environments. It will not move a hostname that
+currently CNAMEs to another Hostenv node; that is a migration, and `deploy`
+owns the cutover after the source is safely quiesced.
 
 ## 7. Deploy
 
@@ -111,10 +112,15 @@ it in `provider.nodeSystems` and set:
 provider.nodeStatus.old-node = "retiring";
 ```
 
-Hostenv keeps retiring nodes deployable for migration and cleanup, deploys and
-activates each destination before retiring its source account, and refuses to
-remove the node from inventory until a live check confirms no reserved Hostenv
-account or orphan runtime state remains.
+Hostenv keeps retiring nodes deployable for migration and cleanup. For a move,
+it deploys and verifies the destination, quiesces the source, cuts DNS over to
+the destination and waits for propagation, restores any TLS settings that
+`dns-gate` temporarily disabled, and only then removes the old account.
+
+If automatic Cloudflare cutover is unavailable, `deploy` stops after
+quiescing the source. Update the CNAME manually and rerun `deploy`; Hostenv
+resumes from the handoff instead of taking another backup. After a node is
+clean and DNS no longer points at it, remove it from the provider inventory.
 
 ## Next steps
 

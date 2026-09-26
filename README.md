@@ -194,22 +194,23 @@ still working on improvements to Provider support.
    ```
 
    This writes: `generated/{flake.nix,plan.json,state.json}`. Commit
-   `generated/state.json`; it contains Hostenv's durable UID/hostname
-   reservations plus minimal provider-node retirement/routing metadata.
-   `generated/plan.json` is disposable, although an existing
-   valid copy is used as an additional node-removal safety check before it is
+   `generated/state.json`; it contains Hostenv's durable UID and hostname
+   reservations. It does not store environment placement or provider-node
+   history. `generated/plan.json` is disposable, although an existing valid
+   copy is used as an additional node-removal safety check before it is
    atomically replaced.
 
    ```bash
    nix run .#hostenv-provider -- dns-gate
    ```
 
-   This updates `plan.json` so Let's Encrypt is disabled for any environments
-   where the DNS does not point to the correct server. This prevents
-   entire deployments failing when ACME systemd units cannot start.
-
-   @TODO: `nix run .#hostenv-provider` is capable of updating Cloudflare
-   DNS records automatically, which should be documented here.
+   This updates `plan.json` so Let's Encrypt is temporarily disabled for any
+   environments whose DNS does not yet point to the destination. This prevents
+   ACME units from blocking the destination deployment. With
+   `--with-dns-update`, Hostenv can create or repair Cloudflare records, but it
+   deliberately does not move a CNAME away from another Hostenv node: migration
+   cutover happens inside `deploy` after the old environment has been
+   quiesced.
 
 6. **Deploy**
 
