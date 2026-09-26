@@ -874,6 +874,130 @@ dnsPointsToDifferentProviderNode dnsCache hostenvHostname item = do
             )
             cnames
 
+
+loadPlanCloudflareContext :: KM.KeyMap A.Value -> IO (Maybe Text, Maybe Text, Maybe Text)
+loadPlanCloudflareContext plan = do
+    let cfPlan = lookupObj (K.fromString "cloudflare") plan
+    mToken <-
+        case cfPlan >>= lookupText (K.fromString "apiTokenFile") of
+            Just path -> Just . T.strip . T.pack <$> readFile (T.unpack path)
+            Nothing -> fmap T.pack <$> Env.lookupEnv "CF_API_TOKEN"
+    mZone <-
+        case cfPlan >>= lookupText (K.fromString "zoneId") of
+            Just zoneId -> pure (Just zoneId)
+            Nothing -> fmap T.pack <$> Env.lookupEnv "CF_ZONE_ID"
+    mZoneName <-
+        case (mToken, mZone) of
+            (Just token, Just zoneId) -> cfZoneName token zoneId
+            _ -> pure Nothing
+    pure (mToken, mZone, mZoneName)
+
+migrationDnsItems :: Text -> KM.KeyMap A.Value -> EnvInfo -> [DnsGateItem]
+migrationDnsItems hostenvHostname envs envInfo =
+    case KM.lookup (K.fromText envInfo.userName) envs of
+        Nothing -> []
+        Just envValue ->
+            uniqueDnsGateItems $
+                collectDnsGateItems
+                    hostenvHostname
+                    (KM.singleton (K.fromText envInfo.userName) envValue)
+
+cutoverMigrationDns ::
+    DnsLookupCache ->
+    KM.KeyMap A.Value ->
+    Text ->
+    KM.KeyMap A.Value ->
+    EnvInfo ->
+    IO (Either Text ())
+cutoverMigrationDns dnsCache plan hostenvHostname envs envInfo = do
+    let items = migrationDnsItems hostenvHostname envs envInfo
+    checks <-
+        forM items $ \item -> do
+            pointsToDestination <- dnsCnamePointsToWith dnsCache item
+            pure (item, pointsToDestination)
+    let mismatched =
+            [ item
+            | (item, False) <- checks
+            ]
+    if null mismatched
+        then do
+            when (not (null items)) $
+                printProviderLine
+                    ( "hostenv-provider: migration DNS already points to "
+                        <> envInfo.node
+                        <> " for "
+                        <> envInfo.userName
+                    )
+            pure (Right ())
+        else do
+            (mToken, mZone, mZoneName) <- loadPlanCloudflareContext plan
+            upsertResults <-
+                forM mismatched $ \item ->
+                    case classifyUpsertEligibility True mToken mZone mZoneName item.dgiDiscoveryHost of
+                        UpsertIneligible reason ->
+                            pure
+                                ( Left
+                                    ( item.dgiDiscoveryHost
+                                        <> " must point to "
+                                        <> item.dgiExpectedHost
+                                        <> " (automatic DNS update unavailable: "
+                                        <> reason
+                                        <> ")"
+                                    )
+                                )
+                        UpsertEligible ->
+                            case (mToken, mZone) of
+                                (Just token, Just zoneId) -> do
+                                    printProviderLine
+                                        ( "hostenv-provider: cutting over migration DNS "
+                                            <> item.dgiDiscoveryHost
+                                            <> " -> "
+                                            <> item.dgiExpectedHost
+                                        )
+                                    result <- cfUpsertCname token zoneId item.dgiDiscoveryHost item.dgiExpectedHost
+                                    pure $
+                                        case result of
+                                            Right () -> Right item
+                                            Left err ->
+                                                Left
+                                                    ( "Cloudflare update failed for "
+                                                        <> item.dgiDiscoveryHost
+                                                        <> ": "
+                                                        <> err
+                                                    )
+                                _ ->
+                                    pure
+                                        ( Left
+                                            ( item.dgiDiscoveryHost
+                                                <> " must point to "
+                                                <> item.dgiExpectedHost
+                                                <> " (Cloudflare credentials are missing)"
+                                            )
+                                        )
+            let failures = [err | Left err <- upsertResults]
+            if not (null failures)
+                then pure (Left (T.intercalate "; " failures))
+                else do
+                    let updatedItems = [item | Right item <- upsertResults]
+                    printProviderLine
+                        ( "hostenv-provider: waiting for migration DNS propagation for "
+                            <> envInfo.userName
+                        )
+                    (_, timedOutItems) <- waitForCnamePropagation dnsCache updatedItems
+                    if null timedOutItems
+                        then pure (Right ())
+                        else
+                            pure
+                                ( Left
+                                    ( "DNS did not propagate to the destination for: "
+                                        <> T.intercalate
+                                            ", "
+                                            [ item.dgiDiscoveryHost <> " -> " <> item.dgiExpectedHost
+                                            | item <- timedOutItems
+                                            ]
+                                    )
+                                )
+
 -- -------- DNS gate --------
 runDnsGate :: Maybe Text -> Maybe Text -> Maybe Text -> Bool -> Bool -> IO ()
 runDnsGate mNode mTok mZone withDnsUpdate dryRun = do
