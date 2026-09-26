@@ -1886,14 +1886,11 @@ validatePlanDnsSafety state previousPlan newPlan = do
                 (error "hostenv-provider: generated plan is missing hostenvHostname")
                 (lookupText (K.fromString "hostenvHostname") newPlan)
     let inventory = S.fromList (map normalizeDnsName (planSystemTargetNodes newPlan Nothing))
-    let historicalHostnames =
-            case previousPlan of
-                Just oldPlan -> planEnvironmentHostnames oldPlan
-                Nothing -> stateReservedHostnames hostenvHostname state
     let hostnames =
             S.toList . S.fromList $
                 planEnvironmentHostnames newPlan
-                    ++ historicalHostnames
+                    ++ maybe [] planEnvironmentHostnames previousPlan
+                    ++ stateReservedHostnames hostenvHostname state
 
     lookupResults <-
         forM hostnames $ \hostname -> do
