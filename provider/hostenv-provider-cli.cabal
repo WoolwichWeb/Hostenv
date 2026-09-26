@@ -15,6 +15,7 @@ executable hostenv-provider
     Hostenv.Provider.DeployVerification
     Hostenv.Provider.DeployPreflight
     Hostenv.Provider.EnvironmentState
+    Hostenv.Provider.MigrationHandoff
     Hostenv.Provider.SigningTarget
   build-depends:
     base >=4.14 && <5,

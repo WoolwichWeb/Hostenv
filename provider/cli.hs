@@ -34,6 +34,7 @@ import Hostenv.Provider.DeployPreflight qualified as Preflight
 import Hostenv.Provider.DeployVerification (NodeConnection (..), nodeConnectionFor)
 import Hostenv.Provider.DeployVerification qualified as Verify
 import Hostenv.Provider.EnvironmentState qualified as EnvironmentState
+import Hostenv.Provider.MigrationHandoff qualified as MigrationHandoff
 import Hostenv.Provider.DnsBackoff (backoffDelays)
 import Hostenv.Provider.DnsGateFilter (
     DnsGateItem (..),
@@ -480,17 +481,6 @@ data EnvInfo = EnvInfo
     , hostname :: Text
     , uid :: Integer
     }
-
-data MigrationHandoffPhase
-    = HandoffAccepted
-    | HandoffQuiesced
-    deriving (Eq, Show)
-
-data MigrationHandoff = MigrationHandoff
-    { mhSourceNode :: Text
-    , mhPhase :: MigrationHandoffPhase
-    }
-    deriving (Eq, Show)
 
 data StoredProviderNode = StoredProviderNode
     { spnStatus :: Text
@@ -2319,80 +2309,47 @@ clearRestorePlan deployUser nodeConnection envInfo = do
         _ ->
             printProviderLine ("hostenv-provider: no pending restore plan for skipped environment " <> envInfo.userName)
 
-migrationHandoffPath :: EnvInfo -> Text
-migrationHandoffPath envInfo =
-    envInfo.stateDir <> "/hostenv/migration-handoff-source"
-
-retiredMigrationHandoffPath :: Text -> Text
-retiredMigrationHandoffPath userName =
-    "/home/" <> userName <> "/.local/state/hostenv/migration-handoff-source"
-
-parseMigrationHandoff :: Text -> Maybe MigrationHandoff
-parseMigrationHandoff raw =
-    case T.words (T.strip raw) of
-        [] -> Nothing
-        [sourceNode] ->
-            Just (MigrationHandoff sourceNode HandoffQuiesced)
-        ["accepted", sourceNode] ->
-            Just (MigrationHandoff sourceNode HandoffAccepted)
-        ["quiesced", sourceNode] ->
-            Just (MigrationHandoff sourceNode HandoffQuiesced)
-        _ ->
-            error ("invalid migration handoff marker: " <> T.unpack raw)
-
 readMigrationHandoff ::
     Text ->
     (Text -> NodeConnection) ->
     EnvInfo ->
-    IO (Maybe MigrationHandoff)
+    IO (Maybe MigrationHandoff.MigrationHandoff)
 readMigrationHandoff deployUser nodeConnection envInfo = do
     let target = mkSshTarget deployUser (nodeConnection envInfo.node)
-    let markerPath = migrationHandoffPath envInfo
-    let cmd =
-            "if sudo test -f "
-                <> shellEscape markerPath
-                <> "; then sudo cat "
-                <> shellEscape markerPath
-                <> "; fi"
-    source <- T.strip <$> runRemoteStrict target ["bash", "-lc", cmd]
-    pure (parseMigrationHandoff source)
+    raw <- runRemoteStrict target ["bash", "-lc", MigrationHandoff.readCommand envInfo.uid]
+    case MigrationHandoff.parseMigrationHandoff raw of
+        Left err ->
+            error
+                ( "invalid migration handoff state for "
+                    <> T.unpack envInfo.userName
+                    <> ": "
+                    <> T.unpack err
+                )
+        Right handoff -> pure handoff
 
 writeMigrationHandoff ::
     Text ->
     (Text -> NodeConnection) ->
     EnvInfo ->
     Text ->
-    MigrationHandoffPhase ->
+    MigrationHandoff.MigrationHandoffPhase ->
     IO ()
 writeMigrationHandoff deployUser nodeConnection envInfo sourceNode phase = do
     let target = mkSshTarget deployUser (nodeConnection envInfo.node)
-    let markerPath = migrationHandoffPath envInfo
-    let markerDir = FP.takeDirectory (T.unpack markerPath)
-    let ownerSpec = T.pack (show envInfo.uid)
-    let phaseText =
-            case phase of
-                HandoffAccepted -> "accepted"
-                HandoffQuiesced -> "quiesced"
-    let markerText = phaseText <> " " <> sourceNode
-    let cmd =
-            T.intercalate
-                " && "
-                [ "sudo mkdir -p " <> shellEscape (T.pack markerDir)
-                , "sudo chown " <> ownerSpec <> ":" <> ownerSpec <> " " <> shellEscape (T.pack markerDir)
-                , "printf '%s\\n' "
-                    <> shellEscape markerText
-                    <> " | sudo tee "
-                    <> shellEscape markerPath
-                    <> " >/dev/null"
-                , "sudo chown " <> ownerSpec <> ":" <> ownerSpec <> " " <> shellEscape markerPath
-                , "sudo chmod 0600 " <> shellEscape markerPath
-                ]
-    result <- runRemote target ["bash", "-lc", cmd]
+    let handoff = MigrationHandoff.MigrationHandoff sourceNode phase
+    let phaseName = MigrationHandoff.phaseText phase
+    result <-
+        runRemote
+            target
+            [ "bash"
+            , "-lc"
+            , MigrationHandoff.writeAtomicCommand envInfo.uid handoff
+            ]
     case result of
         ExitSuccess ->
             printProviderLine
                 ( "hostenv-provider: recorded migration handoff "
-                    <> phaseText
+                    <> phaseName
                     <> " for "
                     <> envInfo.userName
                     <> " from "
@@ -2401,7 +2358,7 @@ writeMigrationHandoff deployUser nodeConnection envInfo sourceNode phase = do
         ExitFailure code ->
             error
                 ( "failed to record migration handoff "
-                    <> T.unpack phaseText
+                    <> T.unpack phaseName
                     <> " for "
                     <> T.unpack envInfo.userName
                     <> " (exit "
@@ -2409,75 +2366,62 @@ writeMigrationHandoff deployUser nodeConnection envInfo sourceNode phase = do
                     <> ")"
                 )
 
-writeMigrationHandoffAccepted ::
+writeMigrationMigrationHandoff.HandoffAccepted ::
     Text ->
     (Text -> NodeConnection) ->
     EnvInfo ->
     Text ->
     IO ()
-writeMigrationHandoffAccepted deployUser nodeConnection envInfo sourceNode = do
+writeMigrationMigrationHandoff.HandoffAccepted deployUser nodeConnection envInfo sourceNode = do
     existing <- readMigrationHandoff deployUser nodeConnection envInfo
     case existing of
         Just handoff
-            | handoff.mhSourceNode == sourceNode
-            , handoff.mhPhase == HandoffQuiesced ->
+            | MigrationHandoff.handoffSourceNode handoff == sourceNode
+            , MigrationHandoff.handoffPhase handoff == MigrationHandoff.MigrationHandoff.HandoffQuiesced ->
                 pure ()
         _ ->
-            writeMigrationHandoff deployUser nodeConnection envInfo sourceNode HandoffAccepted
+            writeMigrationHandoff
+                deployUser
+                nodeConnection
+                envInfo
+                sourceNode
+                MigrationHandoff.MigrationHandoff.HandoffAccepted
 
-writeMigrationHandoffQuiesced ::
+writeMigrationMigrationHandoff.HandoffQuiesced ::
     Text ->
     (Text -> NodeConnection) ->
     EnvInfo ->
     Text ->
     IO ()
-writeMigrationHandoffQuiesced deployUser nodeConnection envInfo sourceNode =
-    writeMigrationHandoff deployUser nodeConnection envInfo sourceNode HandoffQuiesced
+writeMigrationMigrationHandoff.HandoffQuiesced deployUser nodeConnection envInfo sourceNode =
+    writeMigrationHandoff
+        deployUser
+        nodeConnection
+        envInfo
+        sourceNode
+        MigrationHandoff.MigrationHandoff.HandoffQuiesced
 
-clearMigrationHandoffSourceOnNode ::
+clearMigrationHandoffOnNode ::
     Text ->
     (Text -> NodeConnection) ->
-    EnvInfo ->
+    Text ->
+    Integer ->
     Text ->
     IO ()
-clearMigrationHandoffSourceOnNode deployUser nodeConnection envInfo nodeName = do
+clearMigrationHandoffOnNode deployUser nodeConnection userName uid nodeName = do
     let target = mkSshTarget deployUser (nodeConnection nodeName)
-    let markerPath = migrationHandoffPath envInfo
     result <-
         runRemote
             target
             [ "bash"
             , "-lc"
-            , "sudo rm -f " <> shellEscape markerPath
+            , MigrationHandoff.clearCommand uid
             ]
     case result of
         ExitSuccess -> pure ()
         ExitFailure code ->
             error
-                ( "failed to clear stale migration handoff marker for "
-                    <> T.unpack envInfo.userName
-                    <> " on "
-                    <> T.unpack nodeName
-                    <> " (exit "
-                    <> show code
-                    <> ")"
-                )
-
-clearRetiredMigrationHandoffOnNode ::
-    Text ->
-    (Text -> NodeConnection) ->
-    Text ->
-    Text ->
-    IO ()
-clearRetiredMigrationHandoffOnNode deployUser nodeConnection userName nodeName = do
-    let target = mkSshTarget deployUser (nodeConnection nodeName)
-    let markerPath = retiredMigrationHandoffPath userName
-    result <- runRemote target ["bash", "-lc", "sudo rm -f " <> shellEscape markerPath]
-    case result of
-        ExitSuccess -> pure ()
-        ExitFailure code ->
-            error
-                ( "failed to clear retired migration handoff marker for "
+                ( "failed to clear migration handoff marker for "
                     <> T.unpack userName
                     <> " on "
                     <> T.unpack nodeName
@@ -2929,7 +2873,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                     deployUser
                                                     resolveNodeConnection
                                                     envInfo
-                                            if maybe False ((== sourceNode) . (.mhSourceNode)) completedHandoff
+                                            if maybe False ((== sourceNode) . MigrationHandoff.handoffSourceNode) completedHandoff
                                                 then do
                                                     printProviderLine
                                                         ( "hostenv-provider: Hostenv runtime for "
@@ -2976,6 +2920,27 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                     | Right (Just migration) <- migrationResolutions
                     ]
 
+            case mNode of
+                Nothing -> pure ()
+                Just selectedNode -> do
+                    let externalMigrationSources =
+                            [ (envInfo.userName, sourceNode)
+                            | (envInfo, sourceNode) <- migrations
+                            , sourceNode /= selectedNode
+                            ]
+                    unless (null externalMigrationSources) $ do
+                        forM_ externalMigrationSources $ \(userName, sourceNode) ->
+                            printProviderErrLine
+                                ( "hostenv-provider: error: cannot complete migration "
+                                    <> userName
+                                    <> " with --node "
+                                    <> selectedNode
+                                    <> ": source "
+                                    <> sourceNode
+                                    <> " also requires finalization; run an unfiltered deploy"
+                                )
+                        Sh.exitWith (ExitFailure 1)
+
             migrationHandoffStates <-
                 forM migrations $ \migration@(envInfo, prevNode) -> do
                     completedHandoff <-
@@ -2987,19 +2952,20 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                         case completedHandoff of
                             Nothing -> pure False
                             Just handoff
-                                | handoff.mhSourceNode /= prevNode -> do
+                                | MigrationHandoff.handoffSourceNode handoff /= prevNode -> do
                                     printProviderLine
                                         ( "hostenv-provider: warning: discarding stale migration handoff for "
                                             <> envInfo.userName
                                             <> " from "
-                                            <> handoff.mhSourceNode
+                                            <> MigrationHandoff.handoffSourceNode handoff
                                             <> "; current source is "
                                             <> prevNode
                                         )
-                                    clearMigrationHandoffSourceOnNode
+                                    clearMigrationHandoffOnNode
                                         deployUser
                                         resolveNodeConnection
-                                        envInfo
+                                        envInfo.userName
+                                        envInfo.uid
                                         envInfo.node
                                     pure False
                                 | otherwise -> do
@@ -3026,8 +2992,8 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                     prevNode
                                             if sourceQuiesced
                                                 then do
-                                                    when (handoff.mhPhase == HandoffAccepted) $
-                                                        writeMigrationHandoffQuiesced
+                                                    when (MigrationHandoff.handoffPhase handoff == MigrationHandoff.HandoffAccepted) $
+                                                        writeMigrationMigrationHandoff.HandoffQuiesced
                                                             deployUser
                                                             resolveNodeConnection
                                                             envInfo
@@ -3041,7 +3007,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                         )
                                                     pure True
                                                 else do
-                                                    when (handoff.mhPhase == HandoffQuiesced) $ do
+                                                    when (MigrationHandoff.handoffPhase handoff == MigrationHandoff.HandoffQuiesced) $ do
                                                         printProviderLine
                                                             ( "hostenv-provider: warning: stale quiesced migration handoff for "
                                                                 <> envInfo.userName
@@ -3049,10 +3015,11 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                                                                 <> prevNode
                                                                 <> " has a live source; taking a fresh migration backup"
                                                             )
-                                                        clearMigrationHandoffSourceOnNode
+                                                        clearMigrationHandoffOnNode
                                                             deployUser
                                                             resolveNodeConnection
-                                                            envInfo
+                                                            envInfo.userName
+                                                            envInfo.uid
                                                             envInfo.node
                                                     pure False
                     pure (migration, alreadyQuiesced)
@@ -3243,7 +3210,7 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             when accepted $
                                 forM_ (M.lookup envName acceptedMigrationSources) $ \sourceNode ->
                                     when (not (null envInfo.migrateBackups)) $
-                                        writeMigrationHandoffAccepted
+                                        writeMigrationMigrationHandoff.HandoffAccepted
                                             deployUser
                                             resolveNodeConnection
                                             envInfo
@@ -3263,26 +3230,28 @@ runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations
                             else do
                                 roundResults <-
                                     forM readyNodes $ \nodeName -> do
-                                        let onCleaned userName _uid =
+                                        let onCleaned userName uid =
                                                 case M.lookup userName desiredNodesByUser of
                                                     Nothing ->
-                                                        clearRetiredMigrationHandoffOnNode
+                                                        clearMigrationHandoffOnNode
                                                             deployUser
                                                             resolveNodeConnection
                                                             userName
+                                                            uid
                                                             nodeName
                                                     Just _ ->
                                                         forM_ (M.lookup userName envInfoByUser) $ \envInfo -> do
-                                                            clearMigrationHandoffSourceOnNode
+                                                            clearMigrationHandoffOnNode
                                                                 deployUser
                                                                 resolveNodeConnection
-                                                                envInfo
+                                                                envInfo.userName
+                                                                envInfo.uid
                                                                 nodeName
                                                             when (not (null envInfo.migrateBackups)) $
                                                                 case M.lookup userName acceptedMigrationSources of
                                                                     Just sourceNode
                                                                         | sourceNode == nodeName ->
-                                                                            writeMigrationHandoffQuiesced
+                                                                            writeMigrationMigrationHandoff.HandoffQuiesced
                                                                                 deployUser
                                                                                 resolveNodeConnection
                                                                                 envInfo
