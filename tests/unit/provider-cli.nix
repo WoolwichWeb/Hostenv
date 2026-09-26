@@ -1123,6 +1123,11 @@ in
         "userName": "acme-prod",
         "uid": 2000,
         "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
       }
     }
     EOF
@@ -1161,6 +1166,11 @@ in
       "acme-prod": {
         "userName": "acme-prod",
         "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
         "virtualHosts": []
       }
     }
@@ -1236,7 +1246,11 @@ in
     fi
 
     printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
-    if [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME'; then
+    if [ "''${DNS_RETIRED:-0}" = 1 ] \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME' \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'retired.hosting.test'; then
+      printf 'retired.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    elif [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME'; then
       printf 'acme-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
     fi
     EOF
@@ -1273,6 +1287,14 @@ in
 
       PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # Reservations for environments already absent from the previous plan
+      # still participate in DNS safety.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_RETIRED=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "reserved retired environment DNS did not block node removal"
+        exit 1
+      fi
 
       # plan.json is disposable. Without historical plan data, live DNS is
       # the safety tripwire: a CNAME to the removed node blocks publication.
