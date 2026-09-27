@@ -2583,7 +2583,6 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                 printProviderLine "hostenv-provider: aborting deployment because one or more preflight checks failed"
                 Sh.exitWith (ExitFailure 1)
 
-            let deployArgs' = deployArgs "generated" True False
             let inventoryNodes = planSystemTargetNodes plan Nothing
 
             let lifecycleEnvInfos =
@@ -2811,6 +2810,48 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                 )
                         Sh.exitWith (ExitFailure 1)
 
+            deployDnsCache <- newDnsLookupCache
+            dnsStateRows <-
+                forM envInfosFiltered $ \envInfo -> do
+                    let items = environmentDnsItems hostenvHostname envs envInfo
+                    mismatched <- checkDnsItems deployDnsCache items
+                    let destinationPresent =
+                            (M.lookup envInfo.node observedNodeUsers >>= M.lookup envInfo.userName)
+                                == Just envInfo.uid
+                    let migrationSource =
+                            lookup envInfo.userName
+                                [ (migrationEnv.userName, sourceNode)
+                                | (migrationEnv, sourceNode) <- migrations
+                                ]
+                    let lifecycleText =
+                            case migrationSource of
+                                Just sourceNode -> "migration " <> sourceNode <> " -> " <> envInfo.node
+                                Nothing ->
+                                    if destinationPresent
+                                        then "existing environment on " <> envInfo.node
+                                        else "fresh environment on " <> envInfo.node
+                    printProviderLine
+                        ( "hostenv-provider: DNS preflight for "
+                            <> envInfo.userName
+                            <> " ("
+                            <> lifecycleText
+                            <> "): "
+                            <> if null mismatched
+                                then "ready"
+                                else T.pack (show (length mismatched)) <> " vhost(s) require HTTP-only staging"
+                        )
+                    pure (envInfo.userName, items, mismatched)
+            let dnsItemsByUser =
+                    M.fromList
+                        [ (userName, items)
+                        | (userName, items, _) <- dnsStateRows
+                        ]
+            gatedItemsRef <-
+                newIORef
+                    ( uniqueDnsItems
+                        (concat [mismatched | (_, _, mismatched) <- dnsStateRows])
+                    )
+
             migrationHandoffStates <-
                 forM migrations $ \migration@(envInfo, prevNode) -> do
                     completedHandoff <-
@@ -2966,8 +3007,6 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
             let envInfoByUser =
                     M.fromList [(envInfo.userName, envInfo) | envInfo <- envInfosFiltered]
 
-            migrationDnsCache <- newDnsLookupCache
-
             let rollbackRetiredCleanedUsers nodeName cleanedUsers = do
                     let rollbackUsers =
                             filter
@@ -2979,50 +3018,137 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                         nodeName
                         rollbackUsers
 
+            let gatedItemsForNode nodeName = do
+                    gated <- readIORef gatedItemsRef
+                    pure
+                        [ item
+                        | item <- gated
+                        , item.diNodeName == Just nodeName
+                        ]
+            let gatedItemsForEnvironment userName = do
+                    gated <- readIORef gatedItemsRef
+                    pure [item | item <- gated, item.diEnvName == userName]
+            let removeGatedEnvironment userName =
+                    modifyIORef' gatedItemsRef (filter ((/= userName) . (.diEnvName)))
+            let addGatedItems items =
+                    modifyIORef' gatedItemsRef (\current -> uniqueDnsItems (current <> items))
+            let allDnsItemsForNode nodeName =
+                    uniqueDnsItems
+                        ( concat
+                            [ M.findWithDefault [] envInfo.userName dnsItemsByUser
+                            | envInfo <- envInfosFiltered
+                            , envInfo.node == nodeName
+                            ]
+                        )
+
+            let deploySystemNodeOnce nodeName = do
+                    gated <- gatedItemsForNode nodeName
+                    withTransientDeployFlake plan gated $ \flakeRoot -> do
+                        let target = nodeName <> ".system"
+                        let targetInstallable = deployProfilePathInstallableAt flakeRoot nodeName "system"
+                        signRes <-
+                            if S.member nodeName localPushSet
+                                then case signingKeyInfo of
+                                    Just keyInfo -> signInstallable keyInfo targetInstallable target
+                                    Nothing -> do
+                                        printProviderLine ("hostenv-provider: signing configuration missing for node " <> nodeName)
+                                        pure (ExitFailure 1)
+                                else pure ExitSuccess
+                        if signRes /= ExitSuccess
+                            then do
+                                printProviderLine ("hostenv-provider: failed to sign deployment target " <> target)
+                                pure signRes
+                            else do
+                                let args = deployArgs flakeRoot True False (Just target)
+                                printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
+                                res <- Sh.proc "nix" args Sh.empty
+                                deployGuard res args
+                                pure res
+
             let deploySystemNode nodeName = do
-                    let target = nodeName <> ".system"
-                    let targetInstallable = deployProfilePathInstallable nodeName "system"
-                    signRes <-
-                        if S.member nodeName localPushSet
-                            then case signingKeyInfo of
-                                Just keyInfo -> signInstallable keyInfo targetInstallable target
-                                Nothing -> do
-                                    printProviderLine ("hostenv-provider: signing configuration missing for node " <> nodeName)
-                                    pure (ExitFailure 1)
-                            else pure ExitSuccess
-                    if signRes /= ExitSuccess
-                        then do
-                            printProviderLine ("hostenv-provider: failed to sign deployment target " <> target)
-                            pure signRes
-                        else do
-                            let args = deployArgs' (Just target)
-                            printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
-                            res <- Sh.proc "nix" args Sh.empty
-                            deployGuard res args
-                            pure res
+                    firstResult <- deploySystemNodeOnce nodeName
+                    case firstResult of
+                        ExitSuccess -> pure ExitSuccess
+                        ExitFailure _ -> do
+                            currentlyGated <- gatedItemsForNode nodeName
+                            let fallbackItems = allDnsItemsForNode nodeName
+                            let currentKeys = S.fromList (map dnsKey currentlyGated)
+                            let addsTlsFallback =
+                                    any (\item -> not (S.member (dnsKey item) currentKeys)) fallbackItems
+                            if null fallbackItems || not addsTlsFallback
+                                then pure firstResult
+                                else do
+                                    printProviderErrLine
+                                        ( "hostenv-provider: warning: desired TLS/ACME activation failed on "
+                                            <> nodeName
+                                            <> "; retrying with transient HTTP-only configuration"
+                                        )
+                                    addGatedItems fallbackItems
+                                    fallbackResult <- deploySystemNodeOnce nodeName
+                                    case fallbackResult of
+                                        ExitSuccess -> do
+                                            printProviderErrLine
+                                                ( "hostenv-provider: warning: "
+                                                    <> nodeName
+                                                    <> " remains HTTP-only because desired TLS/ACME activation failed; a later deploy will retry TLS"
+                                                )
+                                            pure ExitSuccess
+                                        ExitFailure _ -> pure fallbackResult
 
             let deployEnvironment envInfo = do
+                    gated <- gatedItemsForNode envInfo.node
+                    withTransientDeployFlake plan gated $ \flakeRoot -> do
+                        let envName = envInfo.userName
+                        let target = envInfo.node <> "." <> envInfo.userName
+                        let targetInstallable = deployProfilePathInstallableAt flakeRoot envInfo.node envInfo.userName
+                        let args = deployArgs flakeRoot True False (Just target)
+                        printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
+                        signRes <-
+                            if S.member envInfo.node localPushSet
+                                then case signingKeyInfo of
+                                    Just keyInfo -> signInstallable keyInfo targetInstallable target
+                                    Nothing -> do
+                                        printProviderLine ("hostenv-provider: signing configuration missing for node " <> envInfo.node)
+                                        pure (ExitFailure 1)
+                                else pure ExitSuccess
+                        if signRes /= ExitSuccess
+                            then do
+                                printProviderLine ("hostenv-provider: failed to sign deployment target " <> target)
+                                pure (envName, signRes)
+                            else do
+                                res <- Sh.proc "nix" args Sh.empty
+                                deployGuard res args
+                                pure (envName, res)
+
+            let reconcileDnsAfterDeployment envInfo = do
                     let envName = envInfo.userName
-                    let target = envInfo.node <> "." <> envInfo.userName
-                    let targetInstallable = deployProfilePathInstallable envInfo.node envInfo.userName
-                    let args = deployArgs' (Just target)
-                    printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
-                    signRes <-
-                        if S.member envInfo.node localPushSet
-                            then case signingKeyInfo of
-                                Just keyInfo -> signInstallable keyInfo targetInstallable target
-                                Nothing -> do
-                                    printProviderLine ("hostenv-provider: signing configuration missing for node " <> envInfo.node)
-                                    pure (ExitFailure 1)
-                            else pure ExitSuccess
-                    if signRes /= ExitSuccess
-                        then do
-                            printProviderLine ("hostenv-provider: failed to sign deployment target " <> target)
-                            pure (envName, signRes)
+                    gatedBefore <- gatedItemsForEnvironment envName
+                    if null gatedBefore
+                        then pure (Right ())
                         else do
-                            res <- Sh.proc "nix" args Sh.empty
-                            deployGuard res args
-                            pure (envName, res)
+                            let allItems = M.findWithDefault [] envName dnsItemsByUser
+                            result <-
+                                ensureEnvironmentDns
+                                    deployDnsCache
+                                    mCfTokenOverride
+                                    mCfZoneOverride
+                                    plan
+                                    envInfo
+                                    allItems
+                            case result of
+                                Left err -> pure (Left err)
+                                Right () -> do
+                                    removeGatedEnvironment envName
+                                    finalSystemResult <- deploySystemNode envInfo.node
+                                    pure $
+                                        case finalSystemResult of
+                                            ExitSuccess -> Right ()
+                                            ExitFailure code ->
+                                                Left
+                                                    ( "failed to activate destination system after DNS became ready (exit "
+                                                        <> T.pack (show code)
+                                                        <> ")"
+                                                    )
 
             when skipVerification $
                 printProviderLine "hostenv-provider: --skip-verification enabled; skipping post-deploy verification checks"
@@ -3091,14 +3217,33 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                         ExitFailure _ -> pure (envResult, False, Nothing)
                         ExitSuccess -> do
                             (accepted, verificationFailure) <- verifyDeployedEnvironment envInfo
-                            when accepted $
-                                forM_ (M.lookup envName acceptedMigrationSources) $ \sourceNode ->
-                                    writeMigrationHandoffAccepted
-                                        deployUser
-                                        resolveNodeConnection
-                                        envInfo
-                                        sourceNode
-                            pure (envResult, accepted, verificationFailure)
+                            if not accepted
+                                then pure (envResult, False, verificationFailure)
+                                else
+                                    case M.lookup envName acceptedMigrationSources of
+                                        Just sourceNode -> do
+                                            writeMigrationHandoffAccepted
+                                                deployUser
+                                                resolveNodeConnection
+                                                envInfo
+                                                sourceNode
+                                            pure (envResult, True, verificationFailure)
+                                        Nothing ->
+                                            if envName `S.member` protectedSourceUsers
+                                                then pure (envResult, True, verificationFailure)
+                                                else do
+                                                    dnsResult <- reconcileDnsAfterDeployment envInfo
+                                                    case dnsResult of
+                                                        Right () -> pure (envResult, True, verificationFailure)
+                                                        Left err -> do
+                                                            printProviderErrLine
+                                                                ( "hostenv-provider: error: DNS reconciliation failed for "
+                                                                    <> envName
+                                                                    <> " after staging deployment: "
+                                                                    <> err
+                                                                    <> ". The environment remains in HTTP-only staging; update DNS and rerun deploy."
+                                                                )
+                                                            pure ((envName, ExitFailure 1), False, verificationFailure)
 
             let deployReadyNodes pendingNodes systemResults envResults successfulEnvironments verificationFailures =
                     let ready nodeName =
@@ -3192,24 +3337,37 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                                     )
                                                                                 )
                                                                         Just envInfo -> do
+                                                                            let allItems = M.findWithDefault [] userName dnsItemsByUser
                                                                             result <-
-                                                                                cutoverMigrationDns
-                                                                                    migrationDnsCache
+                                                                                ensureEnvironmentDns
+                                                                                    deployDnsCache
+                                                                                    mCfTokenOverride
+                                                                                    mCfZoneOverride
                                                                                     plan
-                                                                                    hostenvHostname
-                                                                                    envs
                                                                                     envInfo
-                                                                            pure $
-                                                                                case result of
-                                                                                    Right () -> Nothing
-                                                                                    Left err -> Just (userName <> ": " <> err)
+                                                                                    allItems
+                                                                            case result of
+                                                                                Left err -> pure (Just (userName <> ": " <> err))
+                                                                                Right () -> do
+                                                                                    removeGatedEnvironment userName
+                                                                                    destinationResult <- deploySystemNode envInfo.node
+                                                                                    pure $
+                                                                                        case destinationResult of
+                                                                                            ExitSuccess -> Nothing
+                                                                                            ExitFailure code ->
+                                                                                                Just
+                                                                                                    ( userName
+                                                                                                        <> ": destination system failed after DNS became ready (exit "
+                                                                                                        <> T.pack (show code)
+                                                                                                        <> ")"
+                                                                                                    )
                                                         if not (null dnsFailures)
                                                             then do
                                                                 forM_ dnsFailures $ \err ->
                                                                     printProviderErrLine
-                                                                        ( "hostenv-provider: error: migration DNS cutover failed after source quiescence: "
+                                                                        ( "hostenv-provider: error: migration DNS/TLS transition failed after source quiescence: "
                                                                             <> err
-                                                                            <> ". The source remains quiesced; update DNS and rerun deploy."
+                                                                            <> ". The source remains quiesced; update DNS if necessary and rerun deploy."
                                                                         )
                                                                 rollbackRetiredCleanedUsers nodeName cleanedUsers
                                                                 let failedEnvs =
@@ -3218,68 +3376,34 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                         ]
                                                                 pure (nodeName, ExitFailure 1, failedEnvs)
                                                             else do
-                                                                let movedCleanedEnvInfos =
-                                                                        mapMaybe
-                                                                            (\userName -> M.lookup userName envInfoByUser)
-                                                                            movedCleanedUsers
-                                                                restoredTlsUsers <-
-                                                                    restoreMigrationTlsSettings
-                                                                        planPath
-                                                                        movedCleanedEnvInfos
-                                                                let tlsDestinationNodes =
-                                                                        S.toList . S.fromList $
-                                                                            [ envInfo.node
-                                                                            | userName <- restoredTlsUsers
-                                                                            , Just envInfo <- [M.lookup userName envInfoByUser]
-                                                                            ]
-                                                                tlsDeployResults <-
-                                                                    forM tlsDestinationNodes $ \destinationNode -> do
-                                                                        printProviderLine
-                                                                            ( "hostenv-provider: redeploying destination system "
-                                                                                <> destinationNode
-                                                                                <> " after restoring TLS configuration"
-                                                                            )
-                                                                        code <- deploySystemNode destinationNode
-                                                                        pure (destinationNode, code)
-                                                                let tlsDeploymentFailures =
-                                                                        [ destinationNode
-                                                                        | (destinationNode, code) <- tlsDeployResults
-                                                                        , code /= ExitSuccess
-                                                                        ]
-                                                                if not (null tlsDeploymentFailures)
-                                                                    then do
-                                                                        printProviderErrLine
-                                                                            ( "hostenv-provider: error: destination TLS redeployment failed after DNS cutover for node(s): "
-                                                                                <> T.intercalate ", " tlsDeploymentFailures
-                                                                                <> ". Source accounts remain quiesced and have not been removed."
-                                                                            )
-                                                                        rollbackRetiredCleanedUsers nodeName cleanedUsers
-                                                                        let failedEnvs =
+                                                                systemCode <- deploySystemNode nodeName
+                                                                when (systemCode /= ExitSuccess && not (null cleanedUsers)) $
+                                                                    rollbackRetiredCleanedUsers nodeName cleanedUsers
+                                                                when (systemCode == ExitSuccess) $
+                                                                    forM_ movedCleanedUsers $ \userName ->
+                                                                        forM_ (M.lookup userName envInfoByUser) $ \envInfo ->
+                                                                            clearMigrationHandoffOnNode
+                                                                                deployUser
+                                                                                resolveNodeConnection
+                                                                                envInfo.userName
+                                                                                envInfo.uid
+                                                                                envInfo.node
+                                                                nodeEnvResults <-
+                                                                    if systemCode == ExitSuccess
+                                                                        then forM (envsForNode nodeName) deployEnvironmentAndVerify
+                                                                        else do
+                                                                            forM_ (envsForNode nodeName) $ \envInfo ->
+                                                                                printProviderLine
+                                                                                    ( "hostenv-provider: system deployment failed for node "
+                                                                                        <> nodeName
+                                                                                        <> "; skipping environment "
+                                                                                        <> envInfo.userName
+                                                                                    )
+                                                                            pure
                                                                                 [ ((envInfo.userName, ExitFailure 1), False, Nothing)
                                                                                 | envInfo <- envsForNode nodeName
                                                                                 ]
-                                                                        pure (nodeName, ExitFailure 1, failedEnvs)
-                                                                    else do
-                                                                        clearMigrationTlsRestoreState planPath restoredTlsUsers
-                                                                        systemCode <- deploySystemNode nodeName
-                                                                        when (systemCode /= ExitSuccess && not (null cleanedUsers)) $
-                                                                            rollbackRetiredCleanedUsers nodeName cleanedUsers
-                                                                        nodeEnvResults <-
-                                                                            if systemCode == ExitSuccess
-                                                                                then forM (envsForNode nodeName) deployEnvironmentAndVerify
-                                                                                else do
-                                                                                    forM_ (envsForNode nodeName) $ \envInfo ->
-                                                                                        printProviderLine
-                                                                                            ( "hostenv-provider: system deployment failed for node "
-                                                                                                <> nodeName
-                                                                                                <> "; skipping environment "
-                                                                                                <> envInfo.userName
-                                                                                            )
-                                                                                    pure
-                                                                                        [ ((envInfo.userName, ExitFailure 1), False, Nothing)
-                                                                                        | envInfo <- envsForNode nodeName
-                                                                                        ]
-                                                                        pure (nodeName, systemCode, nodeEnvResults)
+                                                                pure (nodeName, systemCode, nodeEnvResults)
                                                     else do
                                                         printProviderErrLine
                                                             ( "hostenv-provider: error: failed to prepare Hostenv user retirement on "
