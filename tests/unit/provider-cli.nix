@@ -71,6 +71,7 @@ in
       }
     }
     EOF
+    printf '{}\n' > "$work/generated/flake.nix"
 
     cat > "$work/generated/state.json" <<'EOF'
     {
@@ -1212,6 +1213,13 @@ in
       exit 0
     fi
 
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/hostenv/provider/migration-handoffs"; then
+      if [ "''${HANDOFF_PENDING:-0}" = 1 ]; then
+        printf '2000\tquiesced old-node\n'
+      fi
+      exit 0
+    fi
+
     exit 0
     EOF
     chmod +x "$fakeBin/ssh"
@@ -1285,6 +1293,15 @@ in
       fi
       PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS may already have moved before source-system finalization. In that
+      # window the provider-owned handoff is the durable tripwire preventing
+      # the source node from disappearing from inventory.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PENDING=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "pending migration handoff did not block source-node removal"
+        exit 1
+      fi
 
       # A malformed generated plan has the same semantics: skip historical
       # comparison, but still fail closed while DNS identifies the old node.

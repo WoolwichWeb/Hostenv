@@ -53,6 +53,20 @@ main = do
         (Right (Just quiesced))
         (parseMigrationHandoff "old-node\n")
     assertEqual "empty parse" (Right Nothing) (parseMigrationHandoff "")
+    assertEqual
+        "handoff listing parse"
+        (Right [(2000, quiesced), (2001, MigrationHandoff "older-node" HandoffAccepted)])
+        (parseHandoffListing "2000\tquiesced old-node\n2001\taccepted older-node\n")
+    case parseHandoffListing "not-a-uid\tquiesced old-node\n" of
+        Left _ -> pure ()
+        Right parsed -> do
+            TIO.putStrLn ("assertion failed (invalid handoff listing accepted): " <> T.pack (show parsed))
+            exitFailure
+
+    assertContains
+        "handoff listing is provider-rooted"
+        "/var/lib/hostenv/provider/migration-handoffs"
+        listCommand
 
     let writeScript = writeAtomicCommand 2000 quiesced
     assertContains "provider root" "/var/lib/hostenv/provider/migration-handoffs" writeScript
