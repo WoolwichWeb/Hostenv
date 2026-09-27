@@ -349,6 +349,7 @@ in
       }
     }
     EOF
+    printf '{}\n' > "$work/generated/flake.nix"
 
     cat > "$work/generated/state.json" <<'EOF'
     {
