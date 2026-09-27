@@ -866,17 +866,10 @@ in
       : > "$eventLog"
       PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" ORPHAN_SOURCE=1 \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
+      ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
-
-      : > "$nixLog"
-      : > "$sshLog"
-      : > "$eventLog"
-      PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" ORPHAN_SOURCE=1 \
-        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
-      ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'ROLLBACK acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq '/var/lib/systemd/linger/acme-prod' "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq '/run/user/2000' "$sshLog"
