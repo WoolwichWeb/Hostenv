@@ -376,8 +376,7 @@ in
     fi
 
     if [ "''${FAIL_TLS_SYSTEM:-0}" = 1 ] \
-      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."system"' \
-      && [ "$(${pkgs.gnugrep}/bin/grep -Fc '.#"new-node"."system"' "$NIX_LOG")" -ge 2 ]; then
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"'; then
       exit 48
     fi
 
@@ -763,7 +762,8 @@ in
       PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_TLS_SYSTEM=1 DNS_AUTOMATIC=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
       ${pkgs.gnugrep}/bin/grep -Fq 'DNS_UPSERT acme-prod' "$eventLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.hostenv-deploy-stage-' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/canonical-plan.json" generated/plan.json
 
       : > "$nixLog"
