@@ -200,19 +200,20 @@ still working on improvements to Provider support.
    copy is used as an additional node-removal safety check before it is
    atomically replaced.
 
-   ```bash
-   nix run .#hostenv-provider -- dns-gate
-   ```
-
-   This updates `plan.json` so Let's Encrypt is temporarily disabled for any
-   environments whose DNS does not yet point to the destination. This prevents
-   ACME units from blocking the destination deployment. With
-   `--with-dns-update`, Hostenv can create or repair Cloudflare records, but it
-   deliberately does not move a CNAME away from another Hostenv node: migration
-   cutover happens inside `deploy` after the old environment has been
-   quiesced.
-
 6. **Deploy**
+
+   `generated/plan.json` always describes the desired end state. During deploy,
+   Hostenv checks DNS and, where necessary, derives a temporary HTTP-only flake
+   with ACME/forceSSL disabled. The canonical plan is never rewritten for this
+   staging state. After the staged environment is deployed and verified, deploy
+   updates or waits for DNS and then attempts the desired TLS configuration.
+
+   If ACME/TLS activation fails but the HTTP-only staging configuration deploys
+   successfully, Hostenv leaves the environment available over HTTP, reports a
+   warning, and retries the desired TLS state on a later deploy rather than
+   failing the entire application deployment.
+
+
 
   Deploy using `deploy-rs` and `generated/flake.nix`:
 

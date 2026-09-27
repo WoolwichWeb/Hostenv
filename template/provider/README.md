@@ -11,7 +11,7 @@ state, and flake used to deploy them.
 4. Enter the development shell with `direnv allow` or `nix develop`.
 5. Configure the encrypted provider secrets in `secrets/secrets.yaml`. See [Managing Provider Secrets](../../docs/provider-secrets.md) for a complete SOPS/age example.
 6. Run `nix run .#hostenv-provider -- plan`.
-7. Run `nix run .#hostenv-provider -- dns-gate`, then `nix run .#hostenv-provider -- deploy`.
+7. Run `nix run .#hostenv-provider -- deploy`.
 
 Commit `generated/state.json`; it contains Hostenv's durable UID and hostname
 reservations, not environment placement or provider-node history.
@@ -22,8 +22,10 @@ remains the safety tripwire when that generated history is unavailable.
 When draining a provider node, keep it in `provider.nodeSystems`, remove it
 from `provider.nodeFor`, and set
 `provider.nodeStatus.<node> = "retiring"`. Hostenv keeps the node available
-for migration/cleanup. During a move, `deploy` quiesces the source before DNS
-cutover and removes the source account only after DNS reaches the destination.
+for migration/cleanup. During a move, `deploy` stages and verifies the destination, quiesces the
+source, cuts DNS over, and only then removes the source account. Temporary
+HTTP-only staging is derived in a transient flake; `generated/plan.json`
+always remains the desired end state.
 
 ## Runtime secrets
 

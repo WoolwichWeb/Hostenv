@@ -621,17 +621,14 @@ runWebhookWith runner loadPlan cfg ref = do
     Right _ ->
       step runner (CommandSpec "nix" ["run", ".#hostenv-provider", "--", "plan"] (cfg.whWorkDir)) >>= \case
         Left err -> pure (Left err)
-        Right _ ->
-          step runner (CommandSpec "nix" ["run", ".#hostenv-provider", "--", "dns-gate"] (cfg.whWorkDir)) >>= \case
-            Left err -> pure (Left err)
-            Right _ -> do
-              planRaw <- loadPlan
-              nodesForProjectWithDns ref.prOrg ref.prProject planRaw >>= \case
-                Left err -> pure (Left (WebhookPlanError err))
-                Right nodes -> do
-                  deploys <- foldM (deployNode runner cfg) [] nodes
-                  let ok = all (\d -> d.deploySuccess) deploys
-                  pure (Right (WebhookResult nodes deploys ok))
+        Right _ -> do
+          planRaw <- loadPlan
+          nodesForProjectWithDns ref.prOrg ref.prProject planRaw >>= \case
+            Left err -> pure (Left (WebhookPlanError err))
+            Right nodes -> do
+              deploys <- foldM (deployNode runner cfg) [] nodes
+              let ok = all (\d -> d.deploySuccess) deploys
+              pure (Right (WebhookResult nodes deploys ok))
   where
     step run spec = do
       res <- run spec

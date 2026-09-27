@@ -86,24 +86,32 @@ additional transition check. If it is missing or malformed, planning skips that
 historical comparison and relies on live Hostenv DNS as the node-removal safety
 tripwire. A CNAME to a node outside the proposed inventory blocks the plan.
 
-## 6. Check DNS
-
-```bash
-nix run .#hostenv-provider -- dns-gate
-```
-
-If you have configured Hostenv's Cloudflare integration, `--with-dns-update`
-can create or repair DNS for new environments. It will not move a hostname that
-currently CNAMEs to another Hostenv node; that is a migration, and `deploy`
-owns the cutover after the source is safely quiesced.
-
-## 7. Deploy
+## 6. Deploy
 
 ```bash
 nix run .#hostenv-provider -- deploy
 ```
 
-Use `-n node-a` to deploy only that node.
+Use `-n node-a` to deploy only that node when no cross-node migration is
+required. Migrations must run unfiltered so destination deployment, source
+quiescence, DNS cutover, and source cleanup stay in one resumable operation.
+
+Before changing any public DNS, `deploy` checks every environment's vhosts. A
+fresh environment or an existing same-node environment whose DNS is not ready is
+first deployed with a transient HTTP-only configuration. For a migration, the
+destination is staged and verified before the source is quiesced. Only then does
+Hostenv move DNS to the destination.
+
+When Cloudflare credentials are configured, deploy creates or repairs the
+required CNAMEs and waits for propagation. Without automatic DNS credentials,
+deploy stops at the safe staging/quiesced point; update DNS manually and rerun.
+
+`generated/plan.json` is never changed to represent staging. It always
+describes the desired end state. Once DNS is ready, Hostenv attempts that desired
+TLS/ACME configuration. If certificate activation fails but the HTTP-only
+configuration succeeds, the environment remains available over HTTP and deploy
+reports a warning instead of failing the whole application deployment. A later
+deploy retries TLS.
 
 When draining a node, remove it from any `provider.nodeFor` mapping but keep
 it in `provider.nodeSystems` and set:
@@ -112,15 +120,9 @@ it in `provider.nodeSystems` and set:
 provider.nodeStatus.old-node = "retiring";
 ```
 
-Hostenv keeps retiring nodes deployable for migration and cleanup. For a move,
-it deploys and verifies the destination, quiesces the source, cuts DNS over to
-the destination and waits for propagation, restores any TLS settings that
-`dns-gate` temporarily disabled, and only then removes the old account.
-
-If automatic Cloudflare cutover is unavailable, `deploy` stops after
-quiescing the source. Update the CNAME manually and rerun `deploy`; Hostenv
-resumes from the handoff instead of taking another backup. After a node is
-clean and DNS no longer points at it, remove it from the provider inventory.
+Hostenv keeps retiring nodes deployable for migration and cleanup. Source
+accounts are removed only after destination verification, source quiescence and
+DNS cutover have completed.
 
 ## Next steps
 

@@ -92,14 +92,20 @@ destination environment, and passes any enforced deployment verification. It
 then records an `accepted` handoff, disables lingering/stops the old user
 manager, and atomically promotes the handoff to `quiesced`.
 
-Only after the source is quiesced does Hostenv cut the environment CNAME over to
+Only after the source is quiesced does Hostenv cut the environment DNS over to
 the destination. If Cloudflare credentials are configured, `deploy` performs
-the update and waits for the new CNAME to propagate. Otherwise it stops with the
-source safely quiesced; update DNS manually and rerun `deploy`. Once DNS is
-confirmed at the destination, Hostenv restores any desired TLS/ACME settings
-that `dns-gate` temporarily disabled, redeploys the destination system, and
-only then deploys the source system configuration that removes the old
-account.
+the update and waits for propagation. Otherwise it stops with the source safely
+quiesced; update DNS manually and rerun `deploy`.
+
+`generated/plan.json` always describes the desired end state. When current DNS
+cannot support the desired ACME configuration, deploy derives a temporary
+sibling flake with ACME/forceSSL disabled for the affected vhosts and uses that
+only for staging. It never writes this temporary state back to `plan.json`.
+After DNS is ready, deploy attempts the desired TLS configuration and only then
+removes the source account. If desired TLS activation fails but the HTTP-only
+staging configuration succeeds, Hostenv keeps the environment available over
+HTTP, warns, and leaves the canonical plan unchanged so a later deploy retries
+TLS.
 
 Handoff state is provider-owned root state under
 `/var/lib/hostenv/provider/migration-handoffs/`, keyed by the environment's
@@ -122,10 +128,10 @@ the selected node. Run an unfiltered deploy so destination acceptance, source
 quiescence, DNS cutover, and source finalization participate in the same
 operation.
 
-`dns-gate --with-dns-update` may create or repair Cloudflare records for new
-environments, but it refuses to move a CNAME that currently identifies another
-Hostenv node. In that case it only gates ACME/forceSSL and saves the desired TLS
-settings for `deploy` to restore after migration cutover.
+DNS reconciliation is part of `deploy`, not a separate provider command.
+Fresh and same-node environments are staged before any required DNS update.
+Migrations defer DNS changes until the destination has been verified and the
+source has been quiesced.
 
 `--skip-migrations` and ignored migration failures protect their source
 accounts for that run. Hostenv may defer the corresponding source-node system
@@ -214,7 +220,7 @@ publishing the replacement plan.
 Before publishing a proposed plan, Hostenv also checks Hostenv-controlled DNS.
 If an environment hostname still CNAMEs to a provider-looking node that is
 missing from the proposed `provider.nodeSystems`, planning stops before
-`dns-gate` can update that DNS record. DNS lookup failure is also fatal for
+deployment can update that DNS record. DNS lookup failure is also fatal for
 this safety check; it is not treated as an empty answer.
 
 A successful plan is published with a same-directory atomic rename, so

@@ -38,8 +38,8 @@ normalizeHost = T.toLower . stripDot . T.strip
 {- | Normalize a label into a hostname within the hostenv domain.
   If the label already ends with that domain, keep it as-is.
 TODO: Give this a typed hostname/domain API.
-Today it still returns raw Text because other callers outside previous-node
-discovery, such as dns-gate code, have not moved to Hostname/NodeName yet.
+Today it still returns raw Text because other DNS callers have not moved to
+Hostname/NodeName yet.
 -}
 canonicalHostInDomain :: Text -> Text -> Text
 canonicalHostInDomain label hostenvHostname =
