@@ -53,7 +53,13 @@ waitForTrustedHttpsWith wait delays isReady hosts = do
     go unresolved delays
   where
     unresolvedHosts candidates = do
-        checks <- mapM (\host -> (host,) <$> isReady host) candidates
+        checks <-
+            mapM
+                (\host -> do
+                    ready <- isReady host
+                    pure (host, ready)
+                )
+                candidates
         pure [host | (host, False) <- checks]
 
     go [] _ = pure []

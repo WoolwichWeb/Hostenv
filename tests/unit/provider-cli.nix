@@ -22,6 +22,11 @@ let
     ${ghc}/bin/runghc -i${src} ${src}/TestDnsObservationCache.hs
     echo ok > "$out"
   '';
+  providerCliTlsReadiness = pkgs.runCommand "provider-cli-tls-readiness" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestTlsReadiness.hs
+    echo ok > "$out"
+  '';
   providerCliDnsTransition = pkgs.runCommand "provider-cli-dns-transition" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDnsTransition.hs
@@ -37,6 +42,7 @@ in
   '';
   provider-cli-dns-observation-cache = providerCliDnsObservationCache;
   provider-cli-dns-transition = providerCliDnsTransition;
+  provider-cli-tls-readiness = providerCliTlsReadiness;
   provider-cli-dry-run-help = pkgs.runCommand "provider-cli-dry-run-help" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
     set -euo pipefail
     for subcmd in plan deploy; do
