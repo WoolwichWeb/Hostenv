@@ -957,7 +957,18 @@ in
     {
       "hostenvHostname": "hosting.test",
       "nodes": {
-        "new-node": {}
+        "new-node": {
+          "services": {
+            "nginx": {
+              "virtualHosts": {
+                "fresh-prod.hosting.test": {
+                  "enableACME": true,
+                  "forceSSL": true
+                }
+              }
+            }
+          }
+        }
       },
       "environments": {
         "fresh-prod": {
@@ -969,11 +980,18 @@ in
           "uid": 3000,
           "node": "new-node",
           "migrations": [ "demo-migrate" ],
-          "virtualHosts": {}
+          "virtualHosts": {
+            "fresh-prod.hosting.test": {
+              "enableLetsEncrypt": true,
+              "forceSSL": true
+            }
+          }
         }
       }
     }
     EOF
+    printf '{}\n' > "$work/generated/flake.nix"
+    cp "$work/generated/plan.json" "$TMPDIR/fresh-canonical-plan.json"
 
     cat > "$work/generated/state.json" <<'EOF'
     {
@@ -1003,6 +1021,9 @@ in
     fi
 
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
+      if [ "''${EXISTING_DEST:-0}" = 1 ]; then
+        printf 'fresh-prod:x:3000:100::/home/fresh-prod:/bin/sh\n'
+      fi
       exit 0
     fi
 
@@ -1013,34 +1034,73 @@ in
     cat > "$fakeBin/dig" <<'EOF'
     #!${pkgs.runtimeShell}
     set -euo pipefail
-    if [ "''${DNS_STRANDED:-0}" = 1 ]; then
-      printf 'old-node.hosting.test.\n'
+    args=" $* "
+    if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME'; then
+      if [ "''${DNS_STRANDED:-0}" = 1 ]; then
+        printf 'old-node.hosting.test.\n'
+      elif [ -f "$DNS_STATE_DIR/fresh-prod-new" ]; then
+        printf 'new-node.hosting.test.\n'
+      fi
     fi
     EOF
     chmod +x "$fakeBin/dig"
 
+    cat > "$fakeBin/curl" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    args=" $* "
+    case "$args" in
+      *"/zones/zone/dns_records?per_page=1000&name=fresh-prod.hosting.test"*)
+        printf '{"success":true,"result":[]}\n'
+        ;;
+      *"-X POST "*"zones/zone/dns_records"*)
+        touch "$DNS_STATE_DIR/fresh-prod-new"
+        printf '{"success":true,"errors":[]}\n'
+        ;;
+      *"/zones/zone"*)
+        printf '{"success":true,"result":{"name":"hosting.test"}}\n'
+        ;;
+      *)
+        echo "unexpected curl invocation: $args" >&2
+        exit 46
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/curl"
+
     (
       cd "$work"
 
-      : > "$log"
-      PATH="$fakeBin:$PATH" NIX_LOG="$log" \
-        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
+      mkdir -p "$TMPDIR/dns-state"
 
-      ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."system"' "$log"
-      ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
-      test "$(wc -l < "$log")" -eq 2
-
-      # A reservation in state.json must not make a fresh environment look
-      # previously deployed: the same no-source deployment remains valid.
+      # Fresh environment: DNS is initially absent, so deploy must stage with a
+      # transient HTTP-only flake, create DNS, then apply the canonical TLS end
+      # state without rewriting generated/plan.json.
       : > "$log"
-      PATH="$fakeBin:$PATH" NIX_LOG="$log" \
-        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
+      rm -f "$TMPDIR/dns-state/fresh-prod-new"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/fresh.out" 2>&1
+      ${pkgs.gnugrep}/bin/grep -Fq 'fresh environment on new-node' "$TMPDIR/fresh.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # Existing environment on the same node follows the same staging/DNS/final
+      # TLS flow, but is classified from the live username+UID observation.
+      : > "$log"
+      rm -f "$TMPDIR/dns-state/fresh-prod-new"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" EXISTING_DEST=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/existing.out" 2>&1
+      ${pkgs.gnugrep}/bin/grep -Fq 'existing environment on new-node' "$TMPDIR/existing.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
 
       # If DNS explicitly identifies a provider node that has been removed from
       # inventory, do not silently reinterpret the deployment as fresh.
       : > "$log"
-      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STRANDED=1 \
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_STRANDED=1 \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
         echo "environment pointing at a removed provider node was treated as fresh"
         exit 1
