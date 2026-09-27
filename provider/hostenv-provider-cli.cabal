@@ -10,6 +10,7 @@ executable hostenv-provider
   hs-source-dirs: .
   other-modules:
     Hostenv.Provider.DnsBackoff
+    Hostenv.Provider.DnsObservationCache
     Hostenv.Provider.DeployGuidance
     Hostenv.Provider.DnsTransition
     Hostenv.Provider.DeployVerification

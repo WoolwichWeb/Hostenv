@@ -17,6 +17,11 @@ let
         p.scientific
         p.text
       ]);
+  providerCliDnsObservationCache = pkgs.runCommand "provider-cli-dns-observation-cache" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDnsObservationCache.hs
+    echo ok > "$out"
+  '';
   providerCliDnsTransition = pkgs.runCommand "provider-cli-dns-transition" { } ''
     set -euo pipefail
     ${ghc}/bin/runghc -i${src} ${src}/TestDnsTransition.hs
@@ -30,6 +35,7 @@ in
     ${ghc}/bin/runghc -i${src} ${src}/TestSigningTargets.hs
     echo ok > "$out"
   '';
+  provider-cli-dns-observation-cache = providerCliDnsObservationCache;
   provider-cli-dns-transition = providerCliDnsTransition;
   provider-cli-dry-run-help = pkgs.runCommand "provider-cli-dry-run-help" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
     set -euo pipefail

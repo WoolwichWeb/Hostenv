@@ -40,6 +40,11 @@ import Hostenv.Provider.DnsTransition (
     collectDnsItems,
     gateTlsForItems,
  )
+import Hostenv.Provider.DnsObservationCache (
+    DnsObservationCache,
+    cacheDnsObservation,
+    newDnsObservationCache,
+ )
 import Hostenv.Provider.SigningTarget (deployProfilePathInstallableAt)
 import Options.Applicative qualified as OA
 import System.Directory qualified as Dir
@@ -173,14 +178,13 @@ hostname, then asks those nameservers for CNAME, A, or AAAA records. A single de
 vhosts, so this value keeps the expensive discovery results for the duration
 of that operation.
 
-This is intentionally a short-lived cache. Command-level callers create one
-'DnsLookupCache' near the start of the operation and pass it through every DNS
-comparison and propagation recheck in that operation.
-This is not a general DNS cache and it does not persist answers between
-commands. It also does not cache CNAME, A, or AAAA answers, so propagation
-rechecks still ask nameservers for current record data. The first map stores
-the authoritative nameservers selected for a full hostname. The second map
-stores NS records found for zone names while walking up a hostname.
+This command-scoped cache stores DNS infrastructure discovery only. Record
+answers are cached separately in a short-lived 'DnsObservationCache' for one
+logical observation phase. Starting a new phase creates a new answer cache, so
+post-update propagation checks never reuse CNAME/A/AAAA data observed before
+the update. The first map here stores the authoritative nameservers selected
+for a full hostname. The second map stores NS records found for zone names
+while walking up a hostname.
 -}
 data DnsLookupCache
     = DnsLookupCache
@@ -346,6 +350,41 @@ dnsPointsToWith cache vhost expectedHost = do
         else do
             expIPs <- digAddrsWith cache expectedHost
             vhIPs <- digAddrsWith cache vhost
+            pure $ not (null (expIPs `intersect` vhIPs))
+
+digRRObserved ::
+    DnsLookupCache ->
+    DnsObservationCache ->
+    Text ->
+    Text ->
+    IO [Text]
+digRRObserved dnsCache observationCache =
+    cacheDnsObservation observationCache (digRRWith dnsCache)
+
+digAddrsObserved ::
+    DnsLookupCache ->
+    DnsObservationCache ->
+    Text ->
+    IO [Text]
+digAddrsObserved dnsCache observationCache name = do
+    a4 <- digRRObserved dnsCache observationCache name "A"
+    a6 <- digRRObserved dnsCache observationCache name "AAAA"
+    pure $ a4 ++ a6
+
+dnsPointsToObserved ::
+    DnsLookupCache ->
+    DnsObservationCache ->
+    Text ->
+    Text ->
+    IO Bool
+dnsPointsToObserved dnsCache observationCache vhost expectedHost = do
+    let expectHostNorm = normalizeDnsName expectedHost
+    cn <- digRRObserved dnsCache observationCache vhost "CNAME"
+    if expectHostNorm `elem` cn
+        then pure True
+        else do
+            expIPs <- digAddrsObserved dnsCache observationCache expectedHost
+            vhIPs <- digAddrsObserved dnsCache observationCache vhost
             pure $ not (null (expIPs `intersect` vhIPs))
 
 -- -------- JSON helpers --------
@@ -791,12 +830,16 @@ classifyUpsertEligibility mToken mZoneId mZoneName vhName
                     else UpsertIneligible ("host is outside Cloudflare zone " <> zoneName)
             Nothing -> UpsertIneligible "could not resolve Cloudflare zone name"
 
-waitForDnsPropagationBy :: (DnsItem -> IO Bool) -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
-waitForDnsPropagationBy pointsToExpected items = do
+waitForDnsPropagationBy ::
+    IO (DnsItem -> IO Bool) ->
+    [DnsItem] ->
+    IO (S.Set DnsKey, [DnsItem])
+waitForDnsPropagationBy newPhaseCheck items = do
     (resolved0, unresolved0) <- partitionByDns items
     go resolved0 unresolved0 (backoffDelays 1 30 600)
   where
     partitionByDns recs = do
+        pointsToExpected <- newPhaseCheck
         checks <- forM recs $ \item -> do
             ok <- pointsToExpected item
             pure (item, ok)
@@ -824,17 +867,27 @@ waitForDnsPropagationBy pointsToExpected items = do
 
 waitForDnsPropagation :: DnsLookupCache -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
 waitForDnsPropagation dnsCache =
-    waitForDnsPropagationBy
-        (\item -> dnsPointsToWith dnsCache item.diDiscoveryHost item.diExpectedHost)
-
-dnsCnamePointsToWith :: DnsLookupCache -> DnsItem -> IO Bool
-dnsCnamePointsToWith dnsCache item = do
-    cnames <- digRRWith dnsCache item.diDiscoveryHost "CNAME"
-    pure (normalizeDnsName item.diExpectedHost `elem` cnames)
+    waitForDnsPropagationBy $ do
+        observationCache <- newDnsObservationCache
+        pure $ \item ->
+            dnsPointsToObserved
+                dnsCache
+                observationCache
+                item.diDiscoveryHost
+                item.diExpectedHost
 
 waitForCnamePropagation :: DnsLookupCache -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
 waitForCnamePropagation dnsCache =
-    waitForDnsPropagationBy (dnsCnamePointsToWith dnsCache)
+    waitForDnsPropagationBy $ do
+        observationCache <- newDnsObservationCache
+        pure $ \item -> do
+            cnames <-
+                digRRObserved
+                    dnsCache
+                    observationCache
+                    item.diDiscoveryHost
+                    "CNAME"
+            pure (normalizeDnsName item.diExpectedHost `elem` cnames)
 
 loadPlanCloudflareContext ::
     Maybe Text ->
@@ -873,11 +926,16 @@ environmentDnsItems hostenvHostname envs envInfo =
                     hostenvHostname
                     (KM.singleton (K.fromText envInfo.userName) envValue)
 
-checkDnsItems :: DnsLookupCache -> [DnsItem] -> IO [DnsItem]
-checkDnsItems dnsCache items = do
+checkDnsItems :: DnsLookupCache -> DnsObservationCache -> [DnsItem] -> IO [DnsItem]
+checkDnsItems dnsCache observationCache items = do
     checks <-
         forM items $ \item -> do
-            pointsToDestination <- dnsPointsToWith dnsCache item.diDiscoveryHost item.diExpectedHost
+            pointsToDestination <-
+                dnsPointsToObserved
+                    dnsCache
+                    observationCache
+                    item.diDiscoveryHost
+                    item.diExpectedHost
             pure (item, pointsToDestination)
     pure
         [ item
@@ -893,7 +951,8 @@ ensureEnvironmentDns ::
     [DnsItem] ->
     IO (Either Text ())
 ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = do
-    mismatched <- checkDnsItems dnsCache items
+    observationCache <- newDnsObservationCache
+    mismatched <- checkDnsItems dnsCache observationCache items
     if null mismatched
         then do
             when (not (null items)) $
@@ -2884,10 +2943,11 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                         Sh.exitWith (ExitFailure 1)
 
             deployDnsCache <- newDnsLookupCache
+            preflightDnsObservation <- newDnsObservationCache
             dnsStateRows <-
                 forM envInfosFiltered $ \envInfo -> do
                     let items = environmentDnsItems hostenvHostname envs envInfo
-                    mismatched <- checkDnsItems deployDnsCache items
+                    mismatched <- checkDnsItems deployDnsCache preflightDnsObservation items
                     let destinationPresent =
                             (M.lookup envInfo.node observedNodeUsers >>= M.lookup envInfo.userName)
                                 == Just envInfo.uid
