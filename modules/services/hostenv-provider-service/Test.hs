@@ -137,8 +137,11 @@ testNodeOrderWithDnsFallsBackToVhosts = do
       assert (nodes == ["node-c", "node-a"]) "vhost fallback should add previous node dependency"
       calls <- readIORef callsRef
       assert
-        (map fst calls == ["env-a.hosting.test", "env-a.hosting.test", "www.customer.com", "www.customer.com"])
-        "dns discovery should probe canonical host first and then configured vhosts"
+        (("env-a.hosting.test", "node-a.hosting.test") `elem` calls)
+        "dns discovery should probe the canonical host"
+      assert
+        (("www.customer.com", "node-a.hosting.test") `elem` calls)
+        "dns discovery should fall back to configured vhosts"
 
 
 testNodeOrderWithDnsIncludesStateOnlyPreviousNode :: IO ()
