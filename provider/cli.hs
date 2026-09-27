@@ -335,23 +335,6 @@ digRRWith cache name rr = do
                 then digRRRaw Nothing name rr
                 else pure (S.toList (S.fromList (concat nonEmptyAnswers)))
 
-digAddrsWith :: DnsLookupCache -> Text -> IO [Text]
-digAddrsWith cache name = do
-    a4 <- digRRWith cache name "A"
-    a6 <- digRRWith cache name "AAAA"
-    pure $ a4 ++ a6
-
-dnsPointsToWith :: DnsLookupCache -> Text -> Text -> IO Bool
-dnsPointsToWith cache vhost expectedHost = do
-    let expectHostNorm = T.toLower expectedHost
-    cn <- digRRWith cache vhost "CNAME"
-    if expectHostNorm `elem` cn
-        then pure True
-        else do
-            expIPs <- digAddrsWith cache expectedHost
-            vhIPs <- digAddrsWith cache vhost
-            pure $ not (null (expIPs `intersect` vhIPs))
-
 digRRObserved ::
     DnsLookupCache ->
     DnsObservationCache ->
@@ -864,17 +847,6 @@ waitForDnsPropagationBy newPhaseCheck items = do
         threadDelay (delaySec * 1000000)
         (resolvedNow, unresolvedNow) <- partitionByDns unresolved
         go (resolved <> resolvedNow) unresolvedNow restDelays
-
-waitForDnsPropagation :: DnsLookupCache -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
-waitForDnsPropagation dnsCache =
-    waitForDnsPropagationBy $ do
-        observationCache <- newDnsObservationCache
-        pure $ \item ->
-            dnsPointsToObserved
-                dnsCache
-                observationCache
-                item.diDiscoveryHost
-                item.diExpectedHost
 
 waitForCnamePropagation :: DnsLookupCache -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
 waitForCnamePropagation dnsCache =
