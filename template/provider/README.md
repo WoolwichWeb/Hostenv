@@ -16,8 +16,9 @@ state, and flake used to deploy them.
 Commit `generated/state.json`; it contains Hostenv's durable UID and hostname
 reservations, not environment placement or provider-node history.
 `generated/plan.json` is disposable generated output. When a previous valid
-plan is present, Hostenv uses it as an additional node-removal check; live DNS
-remains the safety tripwire when that generated history is unavailable.
+plan is present, Hostenv uses it as an additional node-removal check. When that
+generated history is unavailable, live DNS and pending provider-owned migration
+handoffs remain the node-removal safety tripwires.
 
 When draining a provider node, keep it in `provider.nodeSystems`, remove it
 from `provider.nodeFor`, and set

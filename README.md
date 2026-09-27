@@ -215,32 +215,20 @@ still working on improvements to Provider support.
 
 
 
-  Deploy using `deploy-rs` and `generated/flake.nix`:
+   Run the provider deployment transaction:
 
-  ```bash
-  nix run github:serokell/deploy-rs -- --debug-logs generated/#<node>
-  ```
+   ```bash
+   nix run .#hostenv-provider -- deploy
+   ```
 
-  A concrete example:
+   Use `--node <node>` for a node-local deployment only when no cross-node
+   migration is involved. Cross-node migrations must run unfiltered so Hostenv
+   can keep destination staging, source quiescence, DNS cutover, TLS activation,
+   and source cleanup in one resumable operation.
 
-  ```bash
-  nix run github:serokell/deploy-rs -- --debug-logs generated/#backend01
-  ```
-
-  NixOS-anywhere also works:
-
-  ```bash
-  nix run github:numtide/nixos-anywhere -- --flake generated#<node> --target-host root@<node>.hosting.example.com
-  ```
-
-  A concrete nixos-anywhere example:
-
-  ```bash
-  nix run github:numtide/nixos-anywhere -- --flake /home/amir/hosting/generated#backend01 --target-host root@backend01.hostenv.sh
-  ```
-
-  Because hostenv is just Nix (for the most part), deploying using your
-  favourite tool should work.
+   The generated flake remains available for debugging and inspection, but
+   invoking deploy-rs directly bypasses Hostenv's DNS/TLS and migration safety
+   ordering and is not the normal deployment workflow.
 
 ---
 

@@ -169,8 +169,7 @@ expected host.
 
 These checks do more than ask the local resolver for one record. For each
 hostname, the code first looks for the authoritative nameservers for that
-hostname, then asks those nameservers for CNAME, A, or AAAA records. A single
-dns-gate run can ask the same questions repeatedly while comparing many
+hostname, then asks those nameservers for CNAME, A, or AAAA records. A single deploy can ask the same questions repeatedly while comparing many
 vhosts, so this value keeps the expensive discovery results for the duration
 of that operation.
 

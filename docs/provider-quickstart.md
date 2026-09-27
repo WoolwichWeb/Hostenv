@@ -83,8 +83,10 @@ provider-node history.
 `generated/plan.json` is disposable generated output. When a previous copy is
 present, `hostenv-provider plan` uses its environment assignments as an
 additional transition check. If it is missing or malformed, planning skips that
-historical comparison and relies on live Hostenv DNS as the node-removal safety
-tripwire. A CNAME to a node outside the proposed inventory blocks the plan.
+historical comparison and relies on live Hostenv DNS plus any pending
+provider-owned migration handoffs as node-removal safety tripwires. A CNAME to
+a node outside the proposed inventory, or a handoff that still names a removed
+source node, blocks the plan.
 
 ## 6. Deploy
 
