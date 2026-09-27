@@ -40,7 +40,7 @@ import Hostenv.Provider.DnsTransition (
     collectDnsItems,
     gateTlsForItems,
  )
-import Hostenv.Provider.SigningTarget (deployProfilePathInstallable)
+import Hostenv.Provider.SigningTarget (deployProfilePathInstallableAt)
 import Options.Applicative qualified as OA
 import System.Directory qualified as Dir
 import System.Environment qualified as Env
@@ -1038,6 +1038,30 @@ runPlan dryRun = do
     nixBuildPath attr =
         T.strip <$> Sh.strict (Sh.inproc "nix" (nixCommonArgs ++ ["build", "--no-link", "--print-out-paths", attr]) Sh.empty)
 
+
+withTransientDeployFlake ::
+    KM.KeyMap A.Value ->
+    [DnsItem] ->
+    (Text -> IO a) ->
+    IO a
+withTransientDeployFlake plan gatedItems action
+    | null gatedItems = action "generated"
+    | otherwise = do
+        (tempPath, handle) <- openTempFile "." ".hostenv-deploy-stage-"
+        hClose handle
+        Dir.removeFile tempPath
+        Dir.createDirectory tempPath
+        let cleanup = Dir.removePathForcibly tempPath
+        let tempRoot = T.pack tempPath
+        flip finally cleanup $ do
+            Dir.copyFile "generated/flake.nix" (tempPath FP.</> "flake.nix")
+            lockExists <- Dir.doesFileExist "generated/flake.lock"
+            when lockExists $
+                Dir.copyFile "generated/flake.lock" (tempPath FP.</> "flake.lock")
+            let stagedPlan = gateTlsForItems gatedItems plan
+            pretty <- prettyJson (A.encode stagedPlan)
+            BL.writeFile (tempPath FP.</> "plan.json") pretty
+            action tempRoot
 
 -- -------- Deploy wrapper --------
 shellEscape :: Text -> Text
@@ -2427,12 +2451,12 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                 Left err -> error ("failed to parse " <> T.unpack statePath <> ": " <> err)
                 Right value -> pure (value :: KM.KeyMap A.Value)
 
-            let deployArgs useCheckSigs useDryActivate deployArgM =
+            let deployArgs flakeRoot useCheckSigs useDryActivate deployArgM =
                     let remoteBuildArgs =
                             if forceRemoteBuild then ["--remote-build"] else []
                         targetArgs = case deployArgM of
-                            Just dArg -> ["generated/.#" <> quoteDeployTarget dArg]
-                            Nothing -> ["generated/"]
+                            Just dArg -> [flakeRoot <> "/.#" <> quoteDeployTarget dArg]
+                            Nothing -> [flakeRoot <> "/"]
                         sigArgs = if useCheckSigs then ["--checksigs"] else []
                         dryActivateArgs = if useDryActivate then ["--dry-activate"] else []
                      in [ "run"
@@ -2448,7 +2472,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
 
             when dryRun $ do
                 printProviderLine "hostenv-provider: --dry-run enabled; skipping migrations, signing, and deploy preflight checks"
-                let dryArgs = deployArgs False True
+                let dryArgs = deployArgs "generated" False True
                 systemDeployRes <-
                     forM targetNodes $ \nodeName -> do
                         let target = nodeName <> ".system"
@@ -2545,7 +2569,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                 printProviderLine "hostenv-provider: aborting deployment because one or more preflight checks failed"
                 Sh.exitWith (ExitFailure 1)
 
-            let deployArgs' = deployArgs True False
+            let deployArgs' = deployArgs "generated" True False
             let inventoryNodes = planSystemTargetNodes plan Nothing
 
             let lifecycleEnvInfos =
