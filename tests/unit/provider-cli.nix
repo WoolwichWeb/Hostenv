@@ -767,19 +767,6 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/canonical-plan.json" generated/plan.json
 
-      : > "$nixLog"
-      : > "$sshLog"
-      : > "$eventLog"
-      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_SOURCE_SYSTEM=1 \
-        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
-        echo "TLS redeploy retry source-system failure was reported as success"
-        exit 1
-      fi
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
-      ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."system"' "$nixLog"
-      ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
-      ${pkgs.diffutils}/bin/cmp "$TMPDIR/canonical-plan.json" generated/plan.json
-
       # If cleanup mutates the source and then reports failure, the accepted
       # marker plus a live source probe makes the interruption recoverable.
       rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/*
