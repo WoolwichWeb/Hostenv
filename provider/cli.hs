@@ -1792,11 +1792,52 @@ validatePlanTransition planPath statePath newPlanRaw = do
                         deployUser
                         (resolveOldConnection nodeName)
                         managedIdentityState
-        Nothing -> pure ()
+        Nothing -> do
+            let hostenvHostname =
+                    fromMaybe
+                        (error "hostenv-provider: generated plan is missing hostenvHostname")
+                        (lookupText (K.fromString "hostenvHostname") newPlan)
+            let deployUser = planDeployUser newPlan
+            let resolveConnection = nodeConnectionFor newPlan hostenvHostname
+            handoffResults <-
+                forM newNodes $ \nodeName ->
+                    readNodeMigrationHandoffs
+                        deployUser
+                        resolveConnection
+                        nodeName
+            let handoffErrors = [err | Left err <- handoffResults]
+            unless (null handoffErrors) $
+                error
+                    ( "hostenv-provider: refusing provider plan because pending migration handoffs could not be verified: "
+                        <> T.unpack (T.intercalate "; " handoffErrors)
+                    )
+            let pendingRemovedSources =
+                    [ (destinationNode, uid, MigrationHandoff.handoffSourceNode handoff)
+                    | (destinationNode, Right handoffs) <- zip newNodes handoffResults
+                    , (uid, handoff) <- handoffs
+                    , MigrationHandoff.handoffSourceNode handoff `notElem` newNodes
+                    ]
+            unless (null pendingRemovedSources) $
+                error
+                    ( "hostenv-provider: refusing provider plan because pending migration finalization still references node(s) missing from provider.nodeSystems: "
+                        <> T.unpack
+                            ( T.intercalate
+                                ", "
+                                [ "uid "
+                                    <> T.pack (show uid)
+                                    <> " on "
+                                    <> destinationNode
+                                    <> " -> "
+                                    <> sourceNode
+                                | (destinationNode, uid, sourceNode) <- pendingRemovedSources
+                                ]
+                            )
+                        <> ". Keep each source node in inventory until deploy removes its old account and clears the handoff."
+                    )
 
     -- This check happens before plan.json is published. The previous plan is
-    -- only additional evidence; DNS is the live safety tripwire when generated
-    -- history is missing.
+    -- only additional evidence; DNS and pending provider-owned migration
+    -- handoffs are the live safety tripwires when generated history is missing.
     validatePlanDnsSafety state previousPlan newPlan
 prepareManagedUserCleanupOnNode ::
     Text ->
@@ -2185,6 +2226,38 @@ readMigrationHandoff deployUser nodeConnection envInfo = do
                     <> T.unpack err
                 )
         Right handoff -> pure handoff
+
+readNodeMigrationHandoffs ::
+    Text ->
+    (Text -> NodeConnection) ->
+    Text ->
+    IO (Either Text [(Integer, MigrationHandoff.MigrationHandoff)])
+readNodeMigrationHandoffs deployUser nodeConnection nodeName = do
+    let target = mkSshTarget deployUser (nodeConnection nodeName)
+    (code, out, err) <- runRemoteScriptOutput target MigrationHandoff.listCommand
+    case code of
+        ExitFailure exitCode ->
+            pure
+                ( Left
+                    ( "failed to inspect migration handoffs on "
+                        <> nodeName
+                        <> " (exit "
+                        <> T.pack (show exitCode)
+                        <> "): "
+                        <> T.strip err
+                    )
+                )
+        ExitSuccess ->
+            pure $
+                case MigrationHandoff.parseHandoffListing out of
+                    Left parseErr ->
+                        Left
+                            ( "invalid migration handoff state on "
+                                <> nodeName
+                                <> ": "
+                                <> parseErr
+                            )
+                    Right handoffs -> Right handoffs
 
 writeMigrationHandoff ::
     Text ->
