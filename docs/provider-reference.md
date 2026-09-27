@@ -223,6 +223,13 @@ missing from the proposed `provider.nodeSystems`, planning stops before
 deployment can update that DNS record. DNS lookup failure is also fatal for
 this safety check; it is not treated as an empty answer.
 
+DNS can legitimately move before old-account removal finishes during a
+migration. If generated plan history is unavailable in that window, pending
+root-owned migration handoffs provide the second live tripwire: planning
+refuses to forget any source node still named by a handoff. The handoff is
+cleared only after the source-system deployment that removes the old account
+succeeds.
+
 A successful plan is published with a same-directory atomic rename, so
 interruption cannot leave a partially written `generated/plan.json`.
 

@@ -172,11 +172,11 @@ hostname, the code first looks for the authoritative nameservers for that
 hostname, then asks those nameservers for CNAME, A, or AAAA records. A single
 dns-gate run can ask the same questions repeatedly while comparing many
 vhosts, so this value keeps the expensive discovery results for the duration
-of that run.
+of that operation.
 
-This is intentionally a short-lived cache. Command-level callers such as
-dns-gate create one 'DnsLookupCache' near the start of the command and pass
-it through every DNS comparison and propagation recheck in that command.
+This is intentionally a short-lived cache. Command-level callers create one
+'DnsLookupCache' near the start of the operation and pass it through every DNS
+comparison and propagation recheck in that operation.
 This is not a general DNS cache and it does not persist answers between
 commands. It also does not cache CNAME, A, or AAAA answers, so propagation
 rechecks still ask nameservers for current record data. The first map stores
