@@ -9,6 +9,7 @@ let
   runtimeInputs = [
     pkgs.jq
     pkgs.bind
+    pkgs.curl
   ];
   wrapped = pkgs.writeShellApplication {
     name = "hostenv-provider";

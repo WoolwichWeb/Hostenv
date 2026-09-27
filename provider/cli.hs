@@ -38,7 +38,6 @@ import Hostenv.Provider.DnsBackoff (backoffDelays)
 import Hostenv.Provider.DnsTransition (
     DnsItem (..),
     collectDnsItems,
-    gateTlsForItems,
  )
 import Hostenv.Provider.DnsObservationCache (
     DnsObservationCache,
@@ -46,6 +45,7 @@ import Hostenv.Provider.DnsObservationCache (
     newDnsObservationCache,
  )
 import Hostenv.Provider.SigningTarget (deployProfilePathInstallableAt)
+import Hostenv.Provider.TlsReadiness qualified as TlsReadiness
 import Options.Applicative qualified as OA
 import System.Directory qualified as Dir
 import System.Environment qualified as Env
@@ -1082,31 +1082,6 @@ runPlan dryRun = do
     nixBuildPath attr =
         T.strip <$> Sh.strict (Sh.inproc "nix" (nixCommonArgs ++ ["build", "--no-link", "--print-out-paths", attr]) Sh.empty)
 
-
-withTransientDeployFlake ::
-    KM.KeyMap A.Value ->
-    [DnsItem] ->
-    (Text -> IO a) ->
-    IO a
-withTransientDeployFlake plan gatedItems action
-    | null gatedItems = action "generated/."
-    | otherwise = do
-        (tempPath, handle) <- openTempFile "." ".hostenv-deploy-stage-"
-        hClose handle
-        Dir.removeFile tempPath
-        Dir.createDirectory tempPath
-        let cleanup = Dir.removePathForcibly tempPath
-        absoluteTempPath <- Dir.makeAbsolute tempPath
-        let tempRoot = "path:" <> T.pack absoluteTempPath
-        flip finally cleanup $ do
-            Dir.copyFile "generated/flake.nix" (tempPath FP.</> "flake.nix")
-            lockExists <- Dir.doesFileExist "generated/flake.lock"
-            when lockExists $
-                Dir.copyFile "generated/flake.lock" (tempPath FP.</> "flake.lock")
-            let stagedPlan = gateTlsForItems gatedItems plan
-            pretty <- prettyJson (A.encode stagedPlan)
-            BL.writeFile (tempPath FP.</> "plan.json") pretty
-            action tempRoot
 
 -- -------- Deploy wrapper --------
 shellEscape :: Text -> Text
@@ -2943,19 +2918,10 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                             <> "): "
                             <> if null mismatched
                                 then "ready"
-                                else T.pack (show (length mismatched)) <> " vhost(s) require HTTP-only staging"
+                                else T.pack (show (length mismatched)) <> " vhost(s) require DNS reconciliation after deployment"
                         )
-                    pure (envInfo.userName, items, mismatched)
-            let dnsItemsByUser =
-                    M.fromList
-                        [ (userName, items)
-                        | (userName, items, _) <- dnsStateRows
-                        ]
-            gatedItemsRef <-
-                newIORef
-                    ( uniqueDnsItems
-                        (concat [mismatched | (_, _, mismatched) <- dnsStateRows])
-                    )
+                    pure (envInfo.userName, items)
+            let dnsItemsByUser = M.fromList dnsStateRows
 
             migrationHandoffStates <-
                 forM migrations $ \migration@(envInfo, prevNode) -> do
@@ -3123,137 +3089,100 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                         nodeName
                         rollbackUsers
 
-            let gatedItemsForNode nodeName = do
-                    gated <- readIORef gatedItemsRef
-                    pure
-                        [ item
-                        | item <- gated
-                        , item.diNodeName == Just nodeName
-                        ]
-            let gatedItemsForEnvironment userName = do
-                    gated <- readIORef gatedItemsRef
-                    pure [item | item <- gated, item.diEnvName == userName]
-            let removeGatedEnvironment userName =
-                    modifyIORef' gatedItemsRef (filter ((/= userName) . (.diEnvName)))
-            let addGatedItems items =
-                    modifyIORef' gatedItemsRef (\current -> uniqueDnsItems (current <> items))
-            let allDnsItemsForNode nodeName =
-                    uniqueDnsItems
-                        ( concat
-                            [ M.findWithDefault [] envInfo.userName dnsItemsByUser
-                            | envInfo <- envInfosFiltered
-                            , envInfo.node == nodeName
-                            ]
-                        )
-
-            let deploySystemNodeOnce nodeName = do
-                    gated <- gatedItemsForNode nodeName
-                    withTransientDeployFlake plan gated $ \flakeRoot -> do
-                        let target = nodeName <> ".system"
-                        let targetInstallable = deployProfilePathInstallableAt flakeRoot nodeName "system"
-                        signRes <-
-                            if S.member nodeName localPushSet
-                                then case signingKeyInfo of
-                                    Just keyInfo -> signInstallable keyInfo targetInstallable target
-                                    Nothing -> do
-                                        printProviderLine ("hostenv-provider: signing configuration missing for node " <> nodeName)
-                                        pure (ExitFailure 1)
-                                else pure ExitSuccess
-                        if signRes /= ExitSuccess
-                            then do
-                                printProviderLine ("hostenv-provider: failed to sign deployment target " <> target)
-                                pure signRes
-                            else do
-                                let args = deployArgs flakeRoot True False (Just target)
-                                printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
-                                res <- Sh.proc "nix" args Sh.empty
-                                deployGuard res args
-                                pure res
+            let generatedFlake = "generated/."
 
             let deploySystemNode nodeName = do
-                    firstResult <- deploySystemNodeOnce nodeName
-                    case firstResult of
-                        ExitSuccess -> pure ExitSuccess
-                        ExitFailure _ -> do
-                            currentlyGated <- gatedItemsForNode nodeName
-                            let fallbackItems = allDnsItemsForNode nodeName
-                            let currentKeys = S.fromList (map dnsKey currentlyGated)
-                            let addsTlsFallback =
-                                    any (\item -> not (S.member (dnsKey item) currentKeys)) fallbackItems
-                            if null fallbackItems || not addsTlsFallback
-                                then pure firstResult
-                                else do
-                                    printProviderErrLine
-                                        ( "hostenv-provider: warning: desired TLS/ACME activation failed on "
-                                            <> nodeName
-                                            <> "; retrying with transient HTTP-only configuration"
-                                        )
-                                    addGatedItems fallbackItems
-                                    fallbackResult <- deploySystemNodeOnce nodeName
-                                    case fallbackResult of
-                                        ExitSuccess -> do
-                                            printProviderErrLine
-                                                ( "hostenv-provider: warning: "
-                                                    <> nodeName
-                                                    <> " remains HTTP-only because desired TLS/ACME activation failed; a later deploy will retry TLS"
-                                                )
-                                            pure ExitSuccess
-                                        ExitFailure _ -> pure fallbackResult
+                    let target = nodeName <> ".system"
+                    let targetInstallable = deployProfilePathInstallableAt generatedFlake nodeName "system"
+                    signRes <-
+                        if S.member nodeName localPushSet
+                            then case signingKeyInfo of
+                                Just keyInfo -> signInstallable keyInfo targetInstallable target
+                                Nothing -> do
+                                    printProviderLine ("hostenv-provider: signing configuration missing for node " <> nodeName)
+                                    pure (ExitFailure 1)
+                            else pure ExitSuccess
+                    if signRes /= ExitSuccess
+                        then do
+                            printProviderLine ("hostenv-provider: failed to sign deployment target " <> target)
+                            pure signRes
+                        else do
+                            let args = deployArgs generatedFlake True False (Just target)
+                            printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
+                            res <- Sh.proc "nix" args Sh.empty
+                            deployGuard res args
+                            pure res
 
             let deployEnvironment envInfo = do
-                    gated <- gatedItemsForNode envInfo.node
-                    withTransientDeployFlake plan gated $ \flakeRoot -> do
-                        let envName = envInfo.userName
-                        let target = envInfo.node <> "." <> envInfo.userName
-                        let targetInstallable = deployProfilePathInstallableAt flakeRoot envInfo.node envInfo.userName
-                        let args = deployArgs flakeRoot True False (Just target)
-                        printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
-                        signRes <-
-                            if S.member envInfo.node localPushSet
-                                then case signingKeyInfo of
-                                    Just keyInfo -> signInstallable keyInfo targetInstallable target
-                                    Nothing -> do
-                                        printProviderLine ("hostenv-provider: signing configuration missing for node " <> envInfo.node)
-                                        pure (ExitFailure 1)
-                                else pure ExitSuccess
-                        if signRes /= ExitSuccess
-                            then do
-                                printProviderLine ("hostenv-provider: failed to sign deployment target " <> target)
-                                pure (envName, signRes)
-                            else do
-                                res <- Sh.proc "nix" args Sh.empty
-                                deployGuard res args
-                                pure (envName, res)
-
-            let reconcileDnsAfterDeployment envInfo = do
                     let envName = envInfo.userName
-                    gatedBefore <- gatedItemsForEnvironment envName
-                    if null gatedBefore
+                    let target = envInfo.node <> "." <> envInfo.userName
+                    let targetInstallable = deployProfilePathInstallableAt generatedFlake envInfo.node envInfo.userName
+                    let args = deployArgs generatedFlake True False (Just target)
+                    printProviderLine ("hostenv-provider: running nix " <> T.unwords args)
+                    signRes <-
+                        if S.member envInfo.node localPushSet
+                            then case signingKeyInfo of
+                                Just keyInfo -> signInstallable keyInfo targetInstallable target
+                                Nothing -> do
+                                    printProviderLine ("hostenv-provider: signing configuration missing for node " <> envInfo.node)
+                                    pure (ExitFailure 1)
+                            else pure ExitSuccess
+                    if signRes /= ExitSuccess
+                        then do
+                            printProviderLine ("hostenv-provider: failed to sign deployment target " <> target)
+                            pure (envName, signRes)
+                        else do
+                            res <- Sh.proc "nix" args Sh.empty
+                            deployGuard res args
+                            pure (envName, res)
+
+            let reconcileDnsAfterDeployment envInfo =
+                    ensureEnvironmentDns
+                        deployDnsCache
+                        mCfTokenOverride
+                        mCfZoneOverride
+                        plan
+                        envInfo
+                        (M.findWithDefault [] envInfo.userName dnsItemsByUser)
+
+            let waitForTrustedHttps envInfo = do
+                    let tlsHosts =
+                            S.toList . S.fromList $
+                                [ item.diDiscoveryHost
+                                | item <- M.findWithDefault [] envInfo.userName dnsItemsByUser
+                                , item.diTlsEnabled
+                                ]
+                    if null tlsHosts
                         then pure (Right ())
                         else do
-                            let allItems = M.findWithDefault [] envName dnsItemsByUser
-                            result <-
-                                ensureEnvironmentDns
-                                    deployDnsCache
-                                    mCfTokenOverride
-                                    mCfZoneOverride
-                                    plan
-                                    envInfo
-                                    allItems
-                            case result of
-                                Left err -> pure (Left err)
-                                Right () -> do
-                                    removeGatedEnvironment envName
-                                    finalSystemResult <- deploySystemNode envInfo.node
-                                    pure $
-                                        case finalSystemResult of
-                                            ExitSuccess -> Right ()
-                                            ExitFailure code ->
-                                                Left
-                                                    ( "failed to activate destination system after DNS became ready (exit "
-                                                        <> T.pack (show code)
-                                                        <> ")"
-                                                    )
+                            printProviderLine
+                                ( "hostenv-provider: waiting for trusted HTTPS for "
+                                    <> envInfo.userName
+                                    <> " after DNS cutover"
+                                )
+                            unresolved <-
+                                TlsReadiness.waitForTrustedHttpsWith
+                                    (\delaySeconds -> do
+                                        printProviderLine
+                                            ( "hostenv-provider: waiting "
+                                                <> T.pack (show delaySeconds)
+                                                <> "s before rechecking trusted HTTPS for "
+                                                <> envInfo.userName
+                                            )
+                                        threadDelay (delaySeconds * 1000000)
+                                    )
+                                    (backoffDelays 1 30 1200)
+                                    TlsReadiness.trustedHttpsReady
+                                    tlsHosts
+                            pure $
+                                if null unresolved
+                                    then Right ()
+                                    else
+                                        Left
+                                            ( "trusted HTTPS did not become ready for "
+                                                <> T.intercalate ", " unresolved
+                                                <> " within 20 minutes"
+                                            )
 
             when skipVerification $
                 printProviderLine "hostenv-provider: --skip-verification enabled; skipping post-deploy verification checks"
@@ -3344,9 +3273,9 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                             printProviderErrLine
                                                                 ( "hostenv-provider: error: DNS reconciliation failed for "
                                                                     <> envName
-                                                                    <> " after staging deployment: "
+                                                                    <> " after deployment: "
                                                                     <> err
-                                                                    <> ". The environment remains in HTTP-only staging; update DNS and rerun deploy."
+                                                                    <> ". Update DNS if necessary and rerun deploy."
                                                                 )
                                                             pure ((envName, ExitFailure 1), False, verificationFailure)
 
@@ -3454,23 +3383,16 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                             case result of
                                                                                 Left err -> pure (Just (userName <> ": " <> err))
                                                                                 Right () -> do
-                                                                                    removeGatedEnvironment userName
-                                                                                    destinationResult <- deploySystemNode envInfo.node
+                                                                                    httpsResult <- waitForTrustedHttps envInfo
                                                                                     pure $
-                                                                                        case destinationResult of
-                                                                                            ExitSuccess -> Nothing
-                                                                                            ExitFailure code ->
-                                                                                                Just
-                                                                                                    ( userName
-                                                                                                        <> ": destination system failed after DNS became ready (exit "
-                                                                                                        <> T.pack (show code)
-                                                                                                        <> ")"
-                                                                                                    )
+                                                                                        case httpsResult of
+                                                                                            Right () -> Nothing
+                                                                                            Left err -> Just (userName <> ": " <> err)
                                                         if not (null dnsFailures)
                                                             then do
                                                                 forM_ dnsFailures $ \err ->
                                                                     printProviderErrLine
-                                                                        ( "hostenv-provider: error: migration DNS/TLS transition failed after source quiescence: "
+                                                                        ( "hostenv-provider: error: migration DNS/HTTPS readiness failed after source quiescence: "
                                                                             <> err
                                                                             <> ". The source remains quiesced; update DNS if necessary and rerun deploy."
                                                                         )
