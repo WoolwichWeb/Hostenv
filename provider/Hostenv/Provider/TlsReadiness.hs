@@ -13,8 +13,8 @@ import Data.Text qualified as T
 import System.Exit (ExitCode (..))
 import System.Process (readProcessWithExitCode)
 
-trustedHttpsCurlArgs :: Text -> [String]
-trustedHttpsCurlArgs hostname =
+trustedHttpsCurlArgs :: Text -> Text -> [String]
+trustedHttpsCurlArgs publicHost destinationHost =
     map T.unpack
         [ "--silent"
         , "--show-error"
@@ -27,45 +27,48 @@ trustedHttpsCurlArgs hostname =
         , "/dev/null"
         , "--proto"
         , "=https"
-        , "https://" <> hostname <> "/"
+        , "--connect-to"
+        , publicHost <> ":443:" <> destinationHost <> ":443"
+        , "https://" <> publicHost <> "/"
         ]
 
-trustedHttpsReadyWith :: ([String] -> IO ExitCode) -> Text -> IO Bool
-trustedHttpsReadyWith runCurl hostname =
-    (== ExitSuccess) <$> runCurl (trustedHttpsCurlArgs hostname)
+trustedHttpsReadyWith :: ([String] -> IO ExitCode) -> Text -> Text -> IO Bool
+trustedHttpsReadyWith runCurl publicHost destinationHost =
+    (== ExitSuccess) <$> runCurl (trustedHttpsCurlArgs publicHost destinationHost)
 
-trustedHttpsReady :: Text -> IO Bool
-trustedHttpsReady hostname =
+trustedHttpsReady :: Text -> Text -> IO Bool
+trustedHttpsReady publicHost destinationHost =
     trustedHttpsReadyWith
         (\args -> do
             (code, _out, _err) <- readProcessWithExitCode "curl" args ""
             pure code
         )
-        hostname
+        publicHost
+        destinationHost
 
 waitForTrustedHttpsWith ::
     (Int -> IO ()) ->
     [Int] ->
-    (Text -> IO Bool) ->
-    [Text] ->
-    IO [Text]
-waitForTrustedHttpsWith wait delays isReady hosts = do
-    unresolved <- unresolvedHosts hosts
+    (Text -> Text -> IO Bool) ->
+    [(Text, Text)] ->
+    IO [(Text, Text)]
+waitForTrustedHttpsWith wait delays isReady targets = do
+    unresolved <- unresolvedTargets targets
     go unresolved delays
   where
-    unresolvedHosts candidates = do
+    unresolvedTargets candidates = do
         checks <-
             mapM
-                (\host -> do
-                    ready <- isReady host
-                    pure (host, ready)
+                (\target@(publicHost, destinationHost) -> do
+                    ready <- isReady publicHost destinationHost
+                    pure (target, ready)
                 )
                 candidates
-        pure [host | (host, False) <- checks]
+        pure [target | (target, False) <- checks]
 
     go [] _ = pure []
     go unresolved [] = pure unresolved
     go unresolved (delaySeconds : remainingDelays) = do
         wait delaySeconds
-        unresolved' <- unresolvedHosts unresolved
+        unresolved' <- unresolvedTargets unresolved
         go unresolved' remainingDelays

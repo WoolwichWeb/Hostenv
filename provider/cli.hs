@@ -3146,19 +3146,19 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                         (M.findWithDefault [] envInfo.userName dnsItemsByUser)
 
             let waitForTrustedHttps envInfo = do
-                    let tlsHosts =
+                    let tlsTargets =
                             S.toList . S.fromList $
-                                [ item.diDiscoveryHost
+                                [ (item.diDiscoveryHost, item.diExpectedHost)
                                 | item <- M.findWithDefault [] envInfo.userName dnsItemsByUser
                                 , item.diTlsEnabled
                                 ]
-                    if null tlsHosts
+                    if null tlsTargets
                         then pure (Right ())
                         else do
                             printProviderLine
                                 ( "hostenv-provider: waiting for trusted HTTPS for "
                                     <> envInfo.userName
-                                    <> " after DNS cutover"
+                                    <> " on the destination after DNS cutover"
                                 )
                             unresolved <-
                                 TlsReadiness.waitForTrustedHttpsWith
@@ -3173,14 +3173,18 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                     )
                                     (backoffDelays 1 30 1200)
                                     TlsReadiness.trustedHttpsReady
-                                    tlsHosts
+                                    tlsTargets
                             pure $
                                 if null unresolved
                                     then Right ()
                                     else
                                         Left
-                                            ( "trusted HTTPS did not become ready for "
-                                                <> T.intercalate ", " unresolved
+                                            ( "trusted HTTPS did not become ready on the destination for "
+                                                <> T.intercalate
+                                                    ", "
+                                                    [ publicHost <> " -> " <> destinationHost
+                                                    | (publicHost, destinationHost) <- unresolved
+                                                    ]
                                                 <> " within 20 minutes"
                                             )
 
