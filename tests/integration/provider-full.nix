@@ -176,7 +176,7 @@ in
         && (drupalMainFrontdoorVHost.globalRedirect or null) == drupalMainCanonicalHost
         && (request.path or null) == "/user/login"
         && (request.followRedirects or false)
-        && (request.tlsMode or null) == "strict"
+        && (request.tlsMode or null) == "insecure"
         && hasConstraintRule "allowNonZeroExitStatus" false
         && hasConstraintRule "minHttpStatus" 200
         && hasConstraintRule "maxHttpStatus" 299
