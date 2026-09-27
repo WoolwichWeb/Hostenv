@@ -208,6 +208,31 @@ testCommandSequence = do
       assert (cmds == expected) "webhook command sequence should match"
 
 
+testMigrationCommandSequence :: IO ()
+testMigrationCommandSequence = do
+  let planJson =
+        BLC.pack
+          "{\"environments\":{\"env-a\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-main\"},\"node\":\"new-node\",\"previousNode\":\"old-node\",\"migrations\":[]}}}"
+  ref <- newIORef ([] :: [CommandSpec])
+  let runner = recordRunner ref
+  let cfg = WebhookConfig "/tmp/provider" "/tmp/provider/generated/plan.json"
+  let proj = ProjectRef "acme" "site"
+  result <- runWebhookWith runner (pure planJson) cfg proj
+  case result of
+    Left err -> assert False ("migration webhook run failed: " <> show err)
+    Right res -> do
+      assert (res.webhookOk) "migration webhook run should succeed"
+      assert (res.webhookNodes == ["new-node", "old-node"]) "migration webhook should report destination then source"
+      cmds <- readIORef ref
+      let expected =
+            [ CommandSpec "nix" ["flake", "update", "acme__site"] "/tmp/provider"
+            , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "plan"] "/tmp/provider"
+            , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy"] "/tmp/provider"
+            ]
+      assert (cmds == expected) "migration webhook must use one unfiltered deploy transaction"
+
+
+
 recordRunner :: IORef [CommandSpec] -> CommandRunner
 recordRunner ref spec = do
   modifyIORef' ref (<> [spec])

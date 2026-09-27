@@ -643,3 +643,16 @@ runWebhookWith runner loadPlan cfg ref = do
           pure (acc ++ [DeployResult node True out.outStdout out.outStderr])
         Left err ->
           pure (acc ++ [DeployResult node False err.errStdout err.errStderr])
+
+    deployMigrationTransaction run config nodes = do
+      res <- run (CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy"] (config.whWorkDir))
+      pure $
+        case res of
+          Right out ->
+            [ DeployResult node True out.outStdout out.outStderr
+            | node <- nodes
+            ]
+          Left err ->
+            [ DeployResult node False err.errStdout err.errStderr
+            | node <- nodes
+            ]
