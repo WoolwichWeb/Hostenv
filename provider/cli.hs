@@ -1,8 +1,7 @@
 {-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- hostenv-provider CLI: plan | dns-gate | deploy
--- dns-gate ports the legacy scripts/postgen.hs DNS/ACME gate and Cloudflare upsert logic.
+-- hostenv-provider CLI: plan | deploy
 
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
@@ -36,15 +35,10 @@ import Hostenv.Provider.DeployVerification qualified as Verify
 import Hostenv.Provider.EnvironmentState qualified as EnvironmentState
 import Hostenv.Provider.MigrationHandoff qualified as MigrationHandoff
 import Hostenv.Provider.DnsBackoff (backoffDelays)
-import Hostenv.Provider.DnsGateFilter (
-    DnsGateItem (..),
-    collectDnsGateItems,
-    disableAcmeOnNode,
-    disableLetsEncryptPaths,
-    clearDnsGateOriginalForEnvironment,
-    filterEnvironmentsByNode,
-    rememberDnsGateOriginal,
-    restoreDnsGateOriginalForEnvironment,
+import Hostenv.Provider.DnsTransition (
+    DnsItem (..),
+    collectDnsItems,
+    gateTlsForItems,
  )
 import Hostenv.Provider.SigningTarget (deployProfilePathInstallable)
 import Options.Applicative qualified as OA
@@ -61,9 +55,10 @@ import Prelude hiding (FilePath)
 -- -------- CLI --------
 data Command
     = CmdPlan {dryRun :: Bool}
-    | CmdDnsGate {node :: Maybe Text, token :: Maybe Text, zone :: Maybe Text, withDnsUpdate :: Bool, dryRun :: Bool}
     | CmdDeploy
         { node :: Maybe Text
+        , token :: Maybe Text
+        , zone :: Maybe Text
         , signingKeyFile :: Maybe Text
         , remoteBuild :: Bool
         , skipVerification :: Bool
@@ -90,13 +85,6 @@ tokenOpt = OA.optional . fmap T.pack $ OA.strOption (OA.long "cf-token" <> OA.me
 
 zoneOpt :: OA.Parser (Maybe Text)
 zoneOpt = OA.optional . fmap T.pack $ OA.strOption (OA.long "cf-zone" <> OA.metavar "ZONE" <> OA.help "Cloudflare zone id (overrides CF_ZONE_ID env)")
-
-withDnsUpdateOpt :: OA.Parser Bool
-withDnsUpdateOpt =
-    OA.switch
-        ( OA.long "with-dns-update"
-            <> OA.help "Allow Cloudflare upserts (otherwise only checks and disables ACME/forceSSL)"
-        )
 
 dryRunOpt :: OA.Parser Bool
 dryRunOpt =
@@ -158,8 +146,7 @@ cliParser =
     CLI
         <$> OA.hsubparser
             ( OA.command "plan" (OA.info (CmdPlan <$> dryRunOpt) (OA.progDesc "Generate plan.json, state.json, and flake.nix"))
-                <> OA.command "dns-gate" (OA.info (CmdDnsGate <$> nodeOpt <*> tokenOpt <*> zoneOpt <*> withDnsUpdateOpt <*> dryRunOpt) (OA.progDesc "Disable ACME/forceSSL for vhosts not pointing at node; add --with-dns-update to upsert Cloudflare records"))
-                <> OA.command "deploy" (OA.info (CmdDeploy <$> nodeOpt <*> signingKeyFileOpt <*> remoteBuildOpt <*> skipVerificationOpt <*> skipMigrationsOpt <*> migrationSourceOpt <*> ignoreMigrationErrorsOpt <*> dryRunOpt) (OA.progDesc "Deploy via deploy-rs"))
+                <> OA.command "deploy" (OA.info (CmdDeploy <$> nodeOpt <*> tokenOpt <*> zoneOpt <*> signingKeyFileOpt <*> remoteBuildOpt <*> skipVerificationOpt <*> skipMigrationsOpt <*> migrationSourceOpt <*> ignoreMigrationErrorsOpt <*> dryRunOpt) (OA.progDesc "Deploy via deploy-rs, including DNS/TLS transitions"))
             )
 
 cliOpts :: OA.ParserInfo CLI
@@ -775,37 +762,25 @@ isSubdomainOf host zone =
         zone' = T.toLower (stripDot zone)
      in host' == zone' || T.isSuffixOf ("." <> zone') host'
 
-type DnsGateKey = (Text, Text)
+type DnsKey = (Text, Text)
 
 data DnsUpsertEligibility = UpsertEligible | UpsertIneligible Text
 
-data DnsUpsertOutcome
-    = UpsertPlanned
-    | UpsertSucceeded
-    | UpsertFailed Text
-    | UpsertUnavailable Text
+dnsKey :: DnsItem -> DnsKey
+dnsKey item = (item.diDiscoveryHost, item.diExpectedHost)
 
-data DnsGateMismatch = DnsGateMismatch
-    { dgmItem :: DnsGateItem
-    , dgmOutcome :: DnsUpsertOutcome
-    }
-
-dnsGateKey :: DnsGateItem -> DnsGateKey
-dnsGateKey item = (item.dgiDiscoveryHost, item.dgiExpectedHost)
-
-uniqueDnsGateItems :: [DnsGateItem] -> [DnsGateItem]
-uniqueDnsGateItems =
+uniqueDnsItems :: [DnsItem] -> [DnsItem]
+uniqueDnsItems =
     reverse . fst . foldl step ([], S.empty)
   where
     step (acc, seen) item =
-        let key = dnsGateKey item
+        let key = dnsKey item
          in if S.member key seen
                 then (acc, seen)
                 else (item : acc, S.insert key seen)
 
-classifyUpsertEligibility :: Bool -> Maybe Text -> Maybe Text -> Maybe Text -> Text -> DnsUpsertEligibility
-classifyUpsertEligibility withDnsUpdate mToken mZoneId mZoneName vhName
-    | not withDnsUpdate = UpsertIneligible "dns updates are disabled (use --with-dns-update)"
+classifyUpsertEligibility :: Maybe Text -> Maybe Text -> Maybe Text -> Text -> DnsUpsertEligibility
+classifyUpsertEligibility mToken mZoneId mZoneName vhName
     | isNothing mToken = UpsertIneligible "Cloudflare token was not provided"
     | isNothing mZoneId = UpsertIneligible "Cloudflare zone was not provided"
     | isNothing mZoneName = UpsertIneligible "could not resolve Cloudflare zone name"
@@ -817,7 +792,7 @@ classifyUpsertEligibility withDnsUpdate mToken mZoneId mZoneName vhName
                     else UpsertIneligible ("host is outside Cloudflare zone " <> zoneName)
             Nothing -> UpsertIneligible "could not resolve Cloudflare zone name"
 
-waitForDnsPropagationBy :: (DnsGateItem -> IO Bool) -> [DnsGateItem] -> IO (S.Set DnsGateKey, [DnsGateItem])
+waitForDnsPropagationBy :: (DnsItem -> IO Bool) -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
 waitForDnsPropagationBy pointsToExpected items = do
     (resolved0, unresolved0) <- partitionByDns items
     go resolved0 unresolved0 (backoffDelays 1 30 600)
@@ -834,8 +809,8 @@ waitForDnsPropagationBy pointsToExpected items = do
               | (item, False) <- checks
               ]
             )
-    go resolved unresolved _ | null unresolved = pure (S.fromList (map dnsGateKey resolved), [])
-    go resolved unresolved [] = pure (S.fromList (map dnsGateKey resolved), unresolved)
+    go resolved unresolved _ | null unresolved = pure (S.fromList (map dnsKey resolved), [])
+    go resolved unresolved [] = pure (S.fromList (map dnsKey resolved), unresolved)
     go resolved unresolved (delaySec : restDelays) = do
         printProviderLine
             ( "hostenv-provider: waiting "
@@ -848,35 +823,19 @@ waitForDnsPropagationBy pointsToExpected items = do
         (resolvedNow, unresolvedNow) <- partitionByDns unresolved
         go (resolved <> resolvedNow) unresolvedNow restDelays
 
-waitForDnsPropagation :: DnsLookupCache -> [DnsGateItem] -> IO (S.Set DnsGateKey, [DnsGateItem])
+waitForDnsPropagation :: DnsLookupCache -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
 waitForDnsPropagation dnsCache =
     waitForDnsPropagationBy
-        (\item -> dnsPointsToWith dnsCache item.dgiDiscoveryHost item.dgiExpectedHost)
+        (\item -> dnsPointsToWith dnsCache item.diDiscoveryHost item.diExpectedHost)
 
-dnsCnamePointsToWith :: DnsLookupCache -> DnsGateItem -> IO Bool
+dnsCnamePointsToWith :: DnsLookupCache -> DnsItem -> IO Bool
 dnsCnamePointsToWith dnsCache item = do
-    cnames <- digRRWith dnsCache item.dgiDiscoveryHost "CNAME"
-    pure (normalizeDnsName item.dgiExpectedHost `elem` cnames)
+    cnames <- digRRWith dnsCache item.diDiscoveryHost "CNAME"
+    pure (normalizeDnsName item.diExpectedHost `elem` cnames)
 
-waitForCnamePropagation :: DnsLookupCache -> [DnsGateItem] -> IO (S.Set DnsGateKey, [DnsGateItem])
+waitForCnamePropagation :: DnsLookupCache -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
 waitForCnamePropagation dnsCache =
     waitForDnsPropagationBy (dnsCnamePointsToWith dnsCache)
-
-dnsPointsToDifferentProviderNode :: DnsLookupCache -> Text -> DnsGateItem -> IO Bool
-dnsPointsToDifferentProviderNode dnsCache hostenvHostname item = do
-    cnames <- digRRWith dnsCache item.dgiDiscoveryHost "CNAME"
-    let suffix = "." <> normalizeDnsName hostenvHostname
-    let expected = normalizeDnsName item.dgiExpectedHost
-    pure $
-        any
-            (\cname ->
-                cname /= expected
-                    && case T.stripSuffix suffix cname of
-                        Just nodeName -> not (T.null nodeName)
-                        Nothing -> False
-            )
-            cnames
-
 
 loadPlanCloudflareContext :: KM.KeyMap A.Value -> IO (Maybe Text, Maybe Text, Maybe Text)
 loadPlanCloudflareContext plan = do
@@ -895,13 +854,13 @@ loadPlanCloudflareContext plan = do
             _ -> pure Nothing
     pure (mToken, mZone, mZoneName)
 
-migrationDnsItems :: Text -> KM.KeyMap A.Value -> EnvInfo -> [DnsGateItem]
+migrationDnsItems :: Text -> KM.KeyMap A.Value -> EnvInfo -> [DnsItem]
 migrationDnsItems hostenvHostname envs envInfo =
     case KM.lookup (K.fromText envInfo.userName) envs of
         Nothing -> []
         Just envValue ->
-            uniqueDnsGateItems $
-                collectDnsGateItems
+            uniqueDnsItems $
+                collectDnsItems
                     hostenvHostname
                     (KM.singleton (K.fromText envInfo.userName) envValue)
 
@@ -945,13 +904,13 @@ cutoverMigrationDns dnsCache plan hostenvHostname envs envInfo = do
                 Right (mToken, mZone, mZoneName) -> do
                     upsertResults <-
                         forM mismatched $ \item ->
-                            case classifyUpsertEligibility True mToken mZone mZoneName item.dgiDiscoveryHost of
+                            case classifyUpsertEligibility mToken mZone mZoneName item.diDiscoveryHost of
                                 UpsertIneligible reason ->
                                     pure
                                         ( Left
-                                            ( item.dgiDiscoveryHost
+                                            ( item.diDiscoveryHost
                                                 <> " must point to "
-                                                <> item.dgiExpectedHost
+                                                <> item.diExpectedHost
                                                 <> " (automatic DNS update unavailable: "
                                                 <> reason
                                                 <> ")"
@@ -962,27 +921,27 @@ cutoverMigrationDns dnsCache plan hostenvHostname envs envInfo = do
                                         (Just token, Just zoneId) -> do
                                             printProviderLine
                                                 ( "hostenv-provider: cutting over migration DNS "
-                                                    <> item.dgiDiscoveryHost
+                                                    <> item.diDiscoveryHost
                                                     <> " -> "
-                                                    <> item.dgiExpectedHost
+                                                    <> item.diExpectedHost
                                                 )
-                                            result <- cfUpsertCname token zoneId item.dgiDiscoveryHost item.dgiExpectedHost
+                                            result <- cfUpsertCname token zoneId item.diDiscoveryHost item.diExpectedHost
                                             pure $
                                                 case result of
                                                     Right () -> Right item
                                                     Left err ->
                                                         Left
                                                             ( "Cloudflare update failed for "
-                                                                <> item.dgiDiscoveryHost
+                                                                <> item.diDiscoveryHost
                                                                 <> ": "
                                                                 <> err
                                                             )
                                         _ ->
                                             pure
                                                 ( Left
-                                                    ( item.dgiDiscoveryHost
+                                                    ( item.diDiscoveryHost
                                                         <> " must point to "
-                                                        <> item.dgiExpectedHost
+                                                        <> item.diExpectedHost
                                                         <> " (Cloudflare credentials are missing)"
                                                     )
                                                 )
@@ -1004,253 +963,13 @@ cutoverMigrationDns dnsCache plan hostenvHostname envs envInfo = do
                                             ( "DNS did not propagate to the destination for: "
                                                 <> T.intercalate
                                                     ", "
-                                                    [ item.dgiDiscoveryHost <> " -> " <> item.dgiExpectedHost
+                                                    [ item.diDiscoveryHost <> " -> " <> item.diExpectedHost
                                                     | item <- timedOutItems
                                                     ]
                                             )
                                         )
 
--- -------- DNS gate --------
-runDnsGate :: Maybe Text -> Maybe Text -> Maybe Text -> Bool -> Bool -> IO ()
-runDnsGate mNode mTok mZone withDnsUpdate dryRun = do
-    dnsCache <- newDnsLookupCache
-    let dest = "generated"
-    let planPath = dest <> "/plan.json"
-    planExists <- Sh.testfile (fromString (T.unpack planPath))
-    when (not planExists) $ do
-        BLC.putStrLn "plan.json not found; dns-gate noop"
-        Sh.exitSuccess
-    raw <- BL.readFile (T.unpack planPath)
-    case A.eitherDecode' raw of
-        Left err -> error err
-        Right (plan :: KM.KeyMap A.Value) -> do
-            let hostenvHostname = fromMaybe "" (lookupText (K.fromString "hostenvHostname") plan)
-            let cfPlan = lookupObj (K.fromString "cloudflare") plan
-            let envsAll = fromMaybe KM.empty (lookupObj (K.fromString "environments") plan)
-            let envs = filterEnvironmentsByNode mNode envsAll
-            mCfToken <- case mTok of
-                Just t -> pure (Just t)
-                Nothing -> case cfPlan >>= lookupText (K.fromString "apiTokenFile") of
-                    Just path -> Just . T.pack <$> readFileTrim (T.unpack path)
-                    Nothing -> fmap T.pack <$> Env.lookupEnv "CF_API_TOKEN"
-            mCfZone <- case mZone of
-                Just z -> pure (Just z)
-                Nothing -> case cfPlan >>= lookupText (K.fromString "zoneId") of
-                    Just z -> pure (Just z)
-                    Nothing -> fmap T.pack <$> Env.lookupEnv "CF_ZONE_ID"
-            mCfZoneName <- case (mCfToken, mCfZone) of
-                (Just t, Just z) -> cfZoneName t z
-                _ -> pure Nothing
-            let hasCF = isJustPair mCfToken mCfZone
-            when (withDnsUpdate && not hasCF) $
-                printProviderErrLine $
-                    "hostenv-provider: warning: --with-dns-update requested but Cloudflare credentials are missing (set both --cf-token/CF_API_TOKEN and --cf-zone/CF_ZONE_ID). "
-                        <> "Continuing in check-only mode without DNS updates."
-
-            let items = collectDnsGateItems hostenvHostname envs
-            checked <- forM items $ \item -> do
-                ok <- dnsPointsToWith dnsCache item.dgiDiscoveryHost item.dgiExpectedHost
-                pure (item, ok)
-
-            let mismatched =
-                    [ item
-                    | (item, False) <- checked
-                    ]
-
-            (mismatchOutcomesRev, cfDryRunCallsRev, _seenUpserts) <- foldlM (processMismatch dnsCache hostenvHostname mCfToken mCfZone mCfZoneName withDnsUpdate dryRun) ([], [], M.empty) mismatched
-            let mismatchOutcomes = reverse mismatchOutcomesRev
-            let cfDryRunCalls = reverse cfDryRunCallsRev
-
-            let upsertedItems =
-                    uniqueDnsGateItems
-                        [ mismatch.dgmItem
-                        | mismatch <- mismatchOutcomes
-                        , case mismatch.dgmOutcome of
-                            UpsertSucceeded -> True
-                            _ -> False
-                        ]
-
-            when (not dryRun && not (null upsertedItems)) $
-                printProviderLine
-                    ( "hostenv-provider: waiting for DNS propagation for "
-                        <> T.pack (show (length upsertedItems))
-                        <> " vhost(s) with exponential backoff (max 30s, total 10m)"
-                    )
-
-            (propagatedKeys, timedOutItems) <-
-                if dryRun
-                    then pure (S.empty, [])
-                    else waitForDnsPropagation dnsCache upsertedItems
-
-            when dryRun $
-                when withDnsUpdate $
-                    printProviderLine
-                        "hostenv-provider: dry-run: propagation waiting is skipped; real runs wait up to 10 minutes before deciding ACME/SSL changes"
-
-            forM_ timedOutItems $ \item ->
-                printProviderErrLine
-                    ( "hostenv-provider: warning: DNS did not propagate within 10 minutes for "
-                        <> item.dgiDiscoveryHost
-                        <> " -> "
-                        <> item.dgiExpectedHost
-                        <> " (while gating "
-                        <> item.dgiVhostName
-                        <> ")"
-                    )
-
-            let shouldDisable mismatch =
-                    case mismatch.dgmOutcome of
-                        UpsertPlanned -> False
-                        UpsertSucceeded -> S.notMember (dnsGateKey mismatch.dgmItem) propagatedKeys
-                        UpsertFailed _ -> True
-                        UpsertUnavailable _ -> True
-
-            let disableTargets =
-                    [ mismatch
-                    | mismatch <- mismatchOutcomes
-                    , shouldDisable mismatch
-                    ]
-
-            forM_ disableTargets $ \mismatch ->
-                case mismatch.dgmOutcome of
-                    UpsertUnavailable reason ->
-                        printProviderErrLine
-                            ( "hostenv-provider: warning: disabling ACME/forceSSL for "
-                                <> mismatch.dgmItem.dgiVhostName
-                                <> " because DNS host "
-                                <> mismatch.dgmItem.dgiDiscoveryHost
-                                <> " does not point to "
-                                <> mismatch.dgmItem.dgiExpectedHost
-                                <> " and remediation is unavailable ("
-                                <> reason
-                                <> ")"
-                            )
-                    UpsertFailed reason ->
-                        printProviderErrLine
-                            ( "hostenv-provider: warning: disabling ACME/forceSSL for "
-                                <> mismatch.dgmItem.dgiVhostName
-                                <> " because Cloudflare upsert failed ("
-                                <> reason
-                                <> ")"
-                            )
-                    UpsertSucceeded ->
-                        printProviderErrLine
-                            ( "hostenv-provider: warning: disabling ACME/forceSSL for "
-                                <> mismatch.dgmItem.dgiVhostName
-                                <> " because DNS propagation for host "
-                                <> mismatch.dgmItem.dgiDiscoveryHost
-                                <> " did not complete in time"
-                            )
-                    UpsertPlanned -> pure ()
-
-            let applyDisable planAcc mismatch =
-                    let item = mismatch.dgmItem
-                        remembered = rememberDnsGateOriginal plan item planAcc
-                        plan1 = disableLetsEncryptPaths item.dgiEnvName item.dgiVhostName remembered
-                     in disableAcmeOnNode item.dgiNodeName item.dgiVhostName plan1
-
-            let plan' = foldl applyDisable plan disableTargets
-            planPretty <- prettyJson (A.encode plan')
-            if dryRun
-                then do
-                    _ <- printDiffAgainstFile planPath planPretty
-                    when withDnsUpdate $
-                        if null cfDryRunCalls
-                            then printProviderLine "hostenv-provider: dry-run: no Cloudflare DNS API calls would be made"
-                            else do
-                                printProviderLine "hostenv-provider: dry-run: Cloudflare DNS API calls that would be made:"
-                                mapM_ (printProviderLine . ("hostenv-provider:   " <>)) cfDryRunCalls
-                    printProviderLine "hostenv-provider: dry-run: generated/plan.json was not modified"
-                else do
-                    existingPretty <- prettyJson raw
-                    if existingPretty == planPretty
-                        then printProviderLine "hostenv-provider: dns-gate made no plan changes"
-                        else do
-                            let tmpPath = dest <> "/plan.json.tmp"
-                            BL.writeFile (T.unpack tmpPath) planPretty
-                            Sh.mv (fromString (T.unpack tmpPath)) (fromString (T.unpack planPath))
-                            BLC.putStrLn "✅ dns-gate updated plan.json"
-  where
-    isJustPair (Just _) (Just _) = True
-    isJustPair _ _ = False
-    readFileTrim p = T.unpack . T.strip . T.pack <$> readFile p
-    foldlM f z [] = pure z
-    foldlM f z (x : xs) = f z x >>= \z' -> foldlM f z' xs
-    processMismatch dnsCache hostenvHostname mCfToken mCfZone mCfZoneName withDnsUpdate dryRun (outcomes, cfOps, seenUpserts) item =
-        let key = dnsGateKey item
-         in case M.lookup key seenUpserts of
-                Just cachedOutcome ->
-                    pure
-                        ( DnsGateMismatch item cachedOutcome : outcomes
-                        , cfOps
-                        , seenUpserts
-                        )
-                Nothing -> do
-                    pointsToOtherProviderNode <-
-                        if withDnsUpdate
-                            then dnsPointsToDifferentProviderNode dnsCache hostenvHostname item
-                            else pure False
-                    if pointsToOtherProviderNode
-                        then
-                            let outcome =
-                                    UpsertUnavailable
-                                        "DNS points at another Hostenv node; migration cutover is performed by deploy after the source is quiesced"
-                             in pure
-                                    ( DnsGateMismatch item outcome : outcomes
-                                    , cfOps
-                                    , M.insert key outcome seenUpserts
-                                    )
-                        else
-                            case classifyUpsertEligibility withDnsUpdate mCfToken mCfZone mCfZoneName item.dgiDiscoveryHost of
-                                UpsertIneligible reason ->
-                                    let outcome = UpsertUnavailable reason
-                                     in pure
-                                            ( DnsGateMismatch item outcome : outcomes
-                                            , cfOps
-                                            , M.insert key outcome seenUpserts
-                                            )
-                                UpsertEligible ->
-                                    case (mCfToken, mCfZone) of
-                                        (Just token, Just zoneId) ->
-                                            if dryRun
-                                                then
-                                                    let outcome = UpsertPlanned
-                                                     in pure
-                                                            ( DnsGateMismatch item outcome : outcomes
-                                                            , ("upsert CNAME " <> item.dgiDiscoveryHost <> " -> " <> item.dgiExpectedHost <> " in zone " <> zoneId) : cfOps
-                                                            , M.insert key outcome seenUpserts
-                                                            )
-                                                else do
-                                                    printProviderLine
-                                                        ( "hostenv-provider: upserting Cloudflare CNAME "
-                                                            <> item.dgiDiscoveryHost
-                                                            <> " -> "
-                                                            <> item.dgiExpectedHost
-                                                        )
-                                                    upsertResult <- cfUpsertCname token zoneId item.dgiDiscoveryHost item.dgiExpectedHost
-                                                    case upsertResult of
-                                                        Right () ->
-                                                            let outcome = UpsertSucceeded
-                                                             in pure
-                                                                    ( DnsGateMismatch item outcome : outcomes
-                                                                    , cfOps
-                                                                    , M.insert key outcome seenUpserts
-                                                                    )
-                                                        Left err ->
-                                                            let outcome = UpsertFailed err
-                                                             in pure
-                                                                    ( DnsGateMismatch item outcome : outcomes
-                                                                    , cfOps
-                                                                    , M.insert key outcome seenUpserts
-                                                                    )
-                                        _ ->
-                                            let outcome = UpsertUnavailable "Cloudflare credentials are missing"
-                                             in pure
-                                                    ( DnsGateMismatch item outcome : outcomes
-                                                    , cfOps
-                                                    , M.insert key outcome seenUpserts
-                                                    )
-
+-- -------- Plan --------
 runPlan :: Bool -> IO ()
 runPlan dryRun = do
     let dest = "generated" :: Text
@@ -1319,48 +1038,6 @@ runPlan dryRun = do
     nixBuildPath attr =
         T.strip <$> Sh.strict (Sh.inproc "nix" (nixCommonArgs ++ ["build", "--no-link", "--print-out-paths", attr]) Sh.empty)
 
-
-restoreMigrationTlsSettings :: Text -> [EnvInfo] -> IO [Text]
-restoreMigrationTlsSettings planPath envInfos = do
-    raw <- BL.readFile (T.unpack planPath)
-    plan <-
-        case A.eitherDecode' raw of
-            Left err ->
-                error ("hostenv-provider: cannot restore migration TLS settings because " <> T.unpack planPath <> " is invalid JSON: " <> err)
-            Right value -> pure (value :: KM.KeyMap A.Value)
-    let restoreOne (current, restoredUsers) envInfo =
-            let (restored, changed) =
-                    restoreDnsGateOriginalForEnvironment envInfo.userName current
-             in (restored, if changed then envInfo.userName : restoredUsers else restoredUsers)
-    let (restoredPlan, restoredUsersRev) = foldl restoreOne (plan, []) envInfos
-    let restoredUsers = reverse restoredUsersRev
-    unless (null restoredUsers) $ do
-        pretty <- prettyJson (A.encode restoredPlan)
-        withSameDirectoryTempFile planPath pretty $ \candidatePath ->
-            Dir.renameFile candidatePath (T.unpack planPath)
-        printProviderLine
-            ( "hostenv-provider: restored desired TLS configuration after migration DNS cutover for "
-                <> T.intercalate ", " restoredUsers
-            )
-    pure restoredUsers
-
-clearMigrationTlsRestoreState :: Text -> [Text] -> IO ()
-clearMigrationTlsRestoreState planPath envNames =
-    unless (null envNames) $ do
-        raw <- BL.readFile (T.unpack planPath)
-        plan <-
-            case A.eitherDecode' raw of
-                Left err ->
-                    error ("hostenv-provider: cannot clear migration TLS restore state because " <> T.unpack planPath <> " is invalid JSON: " <> err)
-                Right value -> pure (value :: KM.KeyMap A.Value)
-        let cleaned =
-                foldl
-                    (flip clearDnsGateOriginalForEnvironment)
-                    plan
-                    envNames
-        pretty <- prettyJson (A.encode cleaned)
-        withSameDirectoryTempFile planPath pretty $ \candidatePath ->
-            Dir.renameFile candidatePath (T.unpack planPath)
 
 -- -------- Deploy wrapper --------
 shellEscape :: Text -> Text
@@ -2634,8 +2311,8 @@ writeRestorePlan deployUser nodeConnection envInfo prevNode snapshots = do
         ExitSuccess -> pure ()
         ExitFailure code -> error ("failed to write restore plan for " <> T.unpack envInfo.userName <> " (exit " <> show code <> ")")
 
-runDeploy :: Maybe Text -> Maybe Text -> Bool -> Bool -> [Text] -> [Text] -> Bool -> Bool -> IO ()
-runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations migrationSourceSpecs ignoreMigrationErrors dryRun = do
+runDeploy :: Maybe Text -> Maybe Text -> Maybe Text -> Maybe Text -> Bool -> Bool -> [Text] -> [Text] -> Bool -> Bool -> IO ()
+runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuild skipVerification skipMigrations migrationSourceSpecs ignoreMigrationErrors dryRun = do
     let planPath = "generated/plan.json"
     let statePath = "generated/state.json"
     planExists <- Sh.testfile (fromString (T.unpack planPath))
@@ -3667,6 +3344,5 @@ main = do
     CLI cmd <- OA.execParser cliOpts
     case cmd of
         CmdPlan dryRun -> runPlan dryRun
-        CmdDnsGate mNode mTok mZone withDnsUpdate dryRun -> runDnsGate mNode mTok mZone withDnsUpdate dryRun
-        CmdDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations migrationSources ignoreMigrationErrors dryRun ->
-            runDeploy mNode mSigningKeyPath forceRemoteBuild skipVerification skipMigrations migrationSources ignoreMigrationErrors dryRun
+        CmdDeploy mNode mTok mZone mSigningKeyPath forceRemoteBuild skipVerification skipMigrations migrationSources ignoreMigrationErrors dryRun ->
+            runDeploy mNode mTok mZone mSigningKeyPath forceRemoteBuild skipVerification skipMigrations migrationSources ignoreMigrationErrors dryRun
