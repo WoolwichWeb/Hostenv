@@ -202,18 +202,18 @@ still working on improvements to Provider support.
 
 6. **Deploy**
 
-   `generated/plan.json` always describes the desired end state. During deploy,
-   Hostenv checks DNS and, where necessary, derives a temporary HTTP-only flake
-   with ACME/forceSSL disabled. The canonical plan is never rewritten for this
-   staging state. After the staged environment is deployed and verified, deploy
-   updates or waits for DNS and then attempts the desired TLS configuration.
+   `generated/plan.json` always describes the desired end state, and deploy
+   applies that configuration directly. Current nixpkgs generates baseline
+   self-signed certificates before nginx starts and performs the real ACME order
+   separately, so a Let's Encrypt validation failure does not need a weaker
+   Hostenv staging configuration.
 
-   If ACME/TLS activation fails but the HTTP-only staging configuration deploys
-   successfully, Hostenv leaves the environment available over HTTP, reports a
-   warning, and retries the desired TLS state on a later deploy rather than
-   failing the entire application deployment.
-
-
+   Hostenv therefore treats any failed system deployment as a real deployment
+   failure. For fresh and same-node environments, DNS is reconciled after the
+   destination has deployed. During a migration, Hostenv deploys and verifies
+   the destination, quiesces the source, changes DNS, waits for a publicly
+   trusted HTTPS certificate on TLS-enabled vhosts, and only then removes the
+   source account.
 
    Run the provider deployment transaction:
 

@@ -23,10 +23,11 @@ handoffs remain the node-removal safety tripwires.
 When draining a provider node, keep it in `provider.nodeSystems`, remove it
 from `provider.nodeFor`, and set
 `provider.nodeStatus.<node> = "retiring"`. Hostenv keeps the node available
-for migration/cleanup. During a move, `deploy` stages and verifies the destination, quiesces the
-source, cuts DNS over, and only then removes the source account. Temporary
-HTTP-only staging is derived in a transient flake; `generated/plan.json`
-always remains the desired end state.
+for migration/cleanup. During a move, `deploy` applies the canonical desired
+configuration, verifies the destination, quiesces the source, cuts DNS over,
+waits for trusted HTTPS on Let's-Encrypt-enabled vhosts, and only then removes
+the source account. `generated/plan.json` always remains the desired end
+state; Hostenv does not derive a weaker ACME-disabled staging configuration.
 
 ## Runtime secrets
 

@@ -98,22 +98,25 @@ Use `-n node-a` to deploy only that node when no cross-node migration is
 required. Migrations must run unfiltered so destination deployment, source
 quiescence, DNS cutover, and source cleanup stay in one resumable operation.
 
-Before changing any public DNS, `deploy` checks every environment's vhosts. A
-fresh environment or an existing same-node environment whose DNS is not ready is
-first deployed with a transient HTTP-only configuration. For a migration, the
-destination is staged and verified before the source is quiesced. Only then does
-Hostenv move DNS to the destination.
+Before changing public DNS, `deploy` checks every environment's vhosts and
+deploys the canonical desired configuration. Current nixpkgs always creates
+baseline self-signed certificates before nginx starts, while the real ACME order
+runs separately. Hostenv therefore does not weaken the configuration or retry a
+failed deployment under the assumption that ACME caused it.
+
+For fresh and same-node environments, DNS is reconciled after deployment. For a
+migration, the destination is deployed and verified before the source is
+quiesced. Only then does Hostenv move DNS to the destination.
 
 When Cloudflare credentials are configured, deploy creates or repairs the
 required CNAMEs and waits for propagation. Without automatic DNS credentials,
-deploy stops at the safe staging/quiesced point; update DNS manually and rerun.
+deploy stops at the safe quiesced point; update DNS manually and rerun.
 
-`generated/plan.json` is never changed to represent staging. It always
-describes the desired end state. Once DNS is ready, Hostenv attempts that desired
-TLS/ACME configuration. If certificate activation fails but the HTTP-only
-configuration succeeds, the environment remains available over HTTP and deploy
-reports a warning instead of failing the whole application deployment. A later
-deploy retries TLS.
+After migration DNS reaches the destination, Hostenv waits for every
+Let's-Encrypt-enabled vhost to present a publicly trusted HTTPS certificate
+before removing the source account. nixpkgs retries failed ACME orders
+independently; Hostenv waits up to 20 minutes for that trusted certificate and
+leaves the source quiesced for a safe retry if it does not arrive.
 
 When draining a node, remove it from any `provider.nodeFor` mapping but keep
 it in `provider.nodeSystems` and set:

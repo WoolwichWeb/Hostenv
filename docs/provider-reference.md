@@ -97,15 +97,21 @@ the destination. If Cloudflare credentials are configured, `deploy` performs
 the update and waits for propagation. Otherwise it stops with the source safely
 quiesced; update DNS manually and rerun `deploy`.
 
-`generated/plan.json` always describes the desired end state. When current DNS
-cannot support the desired ACME configuration, deploy derives a temporary
-sibling flake with ACME/forceSSL disabled for the affected vhosts and uses that
-only for staging. It never writes this temporary state back to `plan.json`.
-After DNS is ready, deploy attempts the desired TLS configuration and only then
-removes the source account. If desired TLS activation fails but the HTTP-only
-staging configuration succeeds, Hostenv keeps the environment available over
-HTTP, warns, and leaves the canonical plan unchanged so a later deploy retries
-TLS.
+`generated/plan.json` always describes the desired end state and deploy applies
+that configuration directly. Current nixpkgs separates baseline certificate
+creation from the real ACME order: a self-signed certificate is generated before
+nginx starts, while `acme-order-renew-<cert>.service` obtains the publicly
+trusted certificate separately. Hostenv therefore does not infer that a failed
+system deployment was caused by ACME and does not retry it with ACME or
+`forceSSL` disabled.
+
+After migration DNS reaches the destination, Hostenv requires strict public
+HTTPS on every vhost whose desired environment configuration enables Let's
+Encrypt. The check uses normal certificate verification (no insecure curl
+mode), accepts any HTTP status once the TLS handshake succeeds, and waits up to
+20 minutes so nixpkgs' failed-ACME retry can run. The source account is removed
+only after these checks pass. If the certificate does not become trusted, the
+source remains quiesced and the handoff remains available for a later retry.
 
 Handoff state is provider-owned root state under
 `/var/lib/hostenv/provider/migration-handoffs/`, keyed by the environment's
@@ -129,9 +135,10 @@ quiescence, DNS cutover, and source finalization participate in the same
 operation.
 
 DNS reconciliation is part of `deploy`, not a separate provider command.
-Fresh and same-node environments are staged before any required DNS update.
-Migrations defer DNS changes until the destination has been verified and the
-source has been quiesced.
+Fresh and same-node environments are deployed with their canonical desired
+configuration before any required DNS update. Migrations defer DNS changes
+until the destination has been verified and the source has been quiesced, then
+wait for trusted HTTPS before source removal.
 
 `--skip-migrations` and ignored migration failures protect their source
 accounts for that run. Hostenv may defer the corresponding source-node system
