@@ -123,15 +123,31 @@ nodesForProject org project raw = do
           else Nothing
       _ -> Nothing
 
+data ProjectDeployScope = ProjectDeployScope
+  { scopeNodes :: [Text]
+  , scopeHasMigration :: Bool
+  }
+
 nodesForProjectWithDns :: Text -> Text -> BL.ByteString -> IO (Either Text [Text])
 nodesForProjectWithDns org project raw = do
   dnsCache <- newDnsLookupCache
-  nodesForProjectWithDnsWith (dnsPointsToWith dnsCache) org project raw
+  fmap (fmap (\scope -> scope.scopeNodes)) $
+    projectDeployScopeWithDnsWith (dnsPointsToWith dnsCache) org project raw
 
 -- | Like 'nodesForProject', but for migrating environments where it can infer
 --   a missing previous node from DNS before calculating deploy order.
 nodesForProjectWithDnsWith :: (Text -> Text -> IO Bool) -> Text -> Text -> BL.ByteString -> IO (Either Text [Text])
-nodesForProjectWithDnsWith pointsTo org project raw = do
+nodesForProjectWithDnsWith pointsTo org project raw =
+  fmap (fmap (\scope -> scope.scopeNodes)) $
+    projectDeployScopeWithDnsWith pointsTo org project raw
+
+projectDeployScopeWithDns :: Text -> Text -> BL.ByteString -> IO (Either Text ProjectDeployScope)
+projectDeployScopeWithDns org project raw = do
+  dnsCache <- newDnsLookupCache
+  projectDeployScopeWithDnsWith (dnsPointsToWith dnsCache) org project raw
+
+projectDeployScopeWithDnsWith :: (Text -> Text -> IO Bool) -> Text -> Text -> BL.ByteString -> IO (Either Text ProjectDeployScope)
+projectDeployScopeWithDnsWith pointsTo org project raw = do
   dnsPointsToCache <- newDnsPointsToCache
   let cachedPointsTo = cacheDnsPointsTo dnsPointsToCache pointsTo
   case decodePlanRoot raw of
@@ -168,12 +184,11 @@ nodesForProjectWithDnsWith pointsTo org project raw = do
               _ -> pure Nothing
           let discoveryNodes = PrevNode.discoveryNodeNames root (map (\(_, node, _, _, _) -> node) matches)
 
-          resolvedMatches <- forM matches $ \(envUserName, node, prevNode, migrateBackups, vhosts) -> do
+          resolvedMatches <- forM matches $ \(envUserName, node, prevNode, _migrateBackups, vhosts) -> do
+            -- Moving an environment is a lifecycle transaction even when it
+            -- has no backup hooks, so source discovery cannot depend on them.
             resolvedPrev <-
-              -- Only migrating environments need previous-node discovery.
-              if null migrateBackups
-                then pure (Right prevNode)
-                else resolvePrevNodeFromDns cachedPointsTo hostenvHostname discoveryNodes envUserName vhosts node prevNode
+              resolvePrevNodeFromDns cachedPointsTo hostenvHostname discoveryNodes envUserName vhosts node prevNode
             pure ((\prev -> EnvNodeInfo node prev) <$> resolvedPrev)
 
           case sequence resolvedMatches of
@@ -188,7 +203,13 @@ nodesForProjectWithDnsWith pointsTo org project raw = do
                     , Just prev <- [info.envPrevNode]
                     , prev /= info.envNode
                     ]
-              pure (Right (orderNodes nodes deps))
+              pure
+                ( Right
+                    ProjectDeployScope
+                      { scopeNodes = orderNodes nodes deps
+                      , scopeHasMigration = not (null deps)
+                      }
+                )
   where
     -- Resolve the previous node for one environment. If the plan already set
     -- previousNode, keep it. Otherwise, probe the canonical hostenv hostname
@@ -623,12 +644,15 @@ runWebhookWith runner loadPlan cfg ref = do
         Left err -> pure (Left err)
         Right _ -> do
           planRaw <- loadPlan
-          nodesForProjectWithDns ref.prOrg ref.prProject planRaw >>= \case
+          projectDeployScopeWithDns ref.prOrg ref.prProject planRaw >>= \case
             Left err -> pure (Left (WebhookPlanError err))
-            Right nodes -> do
-              deploys <- foldM (deployNode runner cfg) [] nodes
+            Right scope -> do
+              deploys <-
+                if scope.scopeHasMigration
+                  then deployMigrationTransaction runner cfg scope.scopeNodes
+                  else foldM (deployNode runner cfg) [] scope.scopeNodes
               let ok = all (\d -> d.deploySuccess) deploys
-              pure (Right (WebhookResult nodes deploys ok))
+              pure (Right (WebhookResult scope.scopeNodes deploys ok))
   where
     step run spec = do
       res <- run spec

@@ -38,6 +38,7 @@ main = do
   testProjectHashSelection
   testPrevNodeDiscoveryResolution
   testCommandSequence
+  testMigrationCommandSequence
   testTemplateRender
   testGitCredentials
   testReadGitlabSecrets
