@@ -939,6 +939,7 @@ in
     work="$TMPDIR/provider"
     fakeBin="$TMPDIR/bin"
     log="$TMPDIR/nix.log"
+    digLog="$TMPDIR/dig.log"
     mkdir -p "$work/generated" "$fakeBin"
 
     cat > "$work/generated/plan.json" <<'EOF'
@@ -950,6 +951,10 @@ in
             "nginx": {
               "virtualHosts": {
                 "fresh-prod.hosting.test": {
+                  "enableACME": true,
+                  "forceSSL": true
+                },
+                "www-fresh-prod.hosting.test": {
                   "enableACME": true,
                   "forceSSL": true
                 }
@@ -970,6 +975,10 @@ in
           "migrations": [ "demo-migrate" ],
           "virtualHosts": {
             "fresh-prod.hosting.test": {
+              "enableLetsEncrypt": true,
+              "forceSSL": true
+            },
+            "www-fresh-prod.hosting.test": {
               "enableLetsEncrypt": true,
               "forceSSL": true
             }
@@ -1023,6 +1032,7 @@ in
     #!${pkgs.runtimeShell}
     set -euo pipefail
     args=" $* "
+    printf '%s\n' "$*" >> "$DIG_LOG"
     if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME'; then
       if [ "''${DNS_STRANDED:-0}" = 1 ]; then
         printf 'old-node.hosting.test.\n'
@@ -1038,7 +1048,7 @@ in
     set -euo pipefail
     args=" $* "
     case "$args" in
-      *"/zones/zone/dns_records?per_page=1000&name=fresh-prod.hosting.test"*)
+      *"/zones/zone/dns_records?per_page=1000&name="*)
         printf '{"success":true,"result":[]}\n'
         ;;
       *"-X POST "*"zones/zone/dns_records"*)
@@ -1065,10 +1075,13 @@ in
       # transient HTTP-only flake, create DNS, then apply the canonical TLS end
       # state without rewriting generated/plan.json.
       : > "$log"
+      : > "$digLog"
       rm -f "$TMPDIR/dns-state/fresh-prod-new"
-      PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DIG_LOG="$digLog" DNS_STATE_DIR="$TMPDIR/dns-state" CF_API_TOKEN=test-token CF_ZONE_ID=zone \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/fresh.out" 2>&1
       ${pkgs.gnugrep}/bin/grep -Fq 'fresh environment on new-node' "$TMPDIR/fresh.out"
+      test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test A$' "$digLog")" -eq 2
+      test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test AAAA$' "$digLog")" -eq 2
       ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
@@ -1077,10 +1090,13 @@ in
       # Existing environment on the same node follows the same staging/DNS/final
       # TLS flow, but is classified from the live username+UID observation.
       : > "$log"
+      : > "$digLog"
       rm -f "$TMPDIR/dns-state/fresh-prod-new"
-      PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" EXISTING_DEST=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DIG_LOG="$digLog" DNS_STATE_DIR="$TMPDIR/dns-state" EXISTING_DEST=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/existing.out" 2>&1
       ${pkgs.gnugrep}/bin/grep -Fq 'existing environment on new-node' "$TMPDIR/existing.out"
+      test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test A$' "$digLog")" -eq 2
+      test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test AAAA$' "$digLog")" -eq 2
       ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
@@ -1088,7 +1104,8 @@ in
       # If DNS explicitly identifies a provider node that has been removed from
       # inventory, do not silently reinterpret the deployment as fresh.
       : > "$log"
-      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_STRANDED=1 \
+      : > "$digLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DIG_LOG="$digLog" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_STRANDED=1 \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
         echo "environment pointing at a removed provider node was treated as fresh"
         exit 1
