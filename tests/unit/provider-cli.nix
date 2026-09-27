@@ -96,7 +96,7 @@ in
     #!${pkgs.runtimeShell}
     printf '%s\n' "$*" >> "$NIX_LOG"
     if [ "''${FAIL_RETIRED_SYSTEM:-0}" = 1 ] \
-      && printf '%s\n' "$*" | grep -Fq 'generated/.#"retired-node"."system"'; then
+      && printf '%s\n' "$*" | grep -Fq '.#"retired-node"."system"'; then
       exit 42
     fi
     exit 0
@@ -160,25 +160,25 @@ in
       PATH="$fakeBin:$PATH" NIX_LOG="$log" \
         ${cliPkg}/bin/hostenv-provider deploy --dry-run
 
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$log"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."acme-prod"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"retired-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."acme-prod"' "$log"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."acme-prod"' "$log"
       test "$(wc -l < "$log")" -eq 4
 
       : > "$log"
       PATH="$fakeBin:$PATH" NIX_LOG="$log" \
         ${cliPkg}/bin/hostenv-provider deploy --dry-run --node old-node
 
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$log"
       test "$(wc -l < "$log")" -eq 1
 
       : > "$log"
       PATH="$fakeBin:$PATH" NIX_LOG="$log" \
         ${cliPkg}/bin/hostenv-provider deploy --dry-run --node retired-node
 
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"retired-node"."system"' "$log"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'new-node' "$log"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod' "$log"
       test "$(wc -l < "$log")" -eq 1
@@ -190,7 +190,7 @@ in
         exit 1
       fi
 
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"retired-node"."system"' "$log"
       test "$(wc -l < "$log")" -eq 1
 
       # A Hostenv runtime can outlive its passwd entry. The reserved identity
@@ -216,10 +216,10 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq "user@2000.service" "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq "loginctl disable-linger 'retired-prod'" "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq "user@2001.service" "$sshLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$log"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"retired-node"."system"' "$log"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"retired-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."acme-prod"' "$log"
 
       # Stable Hostenv UIDs are global identity. Drift must abort before any
       # system or environment deployment can make the situation worse.
@@ -301,8 +301,8 @@ in
             "nginx": {
               "virtualHosts": {
                 "acme-prod.hosting.test": {
-                  "enableACME": false,
-                  "forceSSL": false
+                  "enableACME": true,
+                  "forceSSL": true
                 }
               }
             }
@@ -340,21 +340,7 @@ in
           },
           "virtualHosts": {
             "acme-prod.hosting.test": {
-              "enableLetsEncrypt": false,
-              "forceSSL": false
-            }
-          }
-        }
-      },
-      "_dnsGateOriginalVhosts": {
-        "acme-prod": {
-          "acme-prod.hosting.test": {
-            "environment": {
               "enableLetsEncrypt": true,
-              "forceSSL": true
-            },
-            "node": {
-              "enableACME": true,
               "forceSSL": true
             }
           }
@@ -380,18 +366,18 @@ in
     printf 'NIX %s\n' "$*" >> "$EVENT_LOG"
 
     if [ "''${FAIL_DEST_ENV:-0}" = 1 ] \
-      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"'; then
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."acme-prod"'; then
       exit 41
     fi
 
     if [ "''${FAIL_SOURCE_SYSTEM:-0}" = 1 ] \
-      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"'; then
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"'; then
       exit 42
     fi
 
     if [ "''${FAIL_TLS_SYSTEM:-0}" = 1 ] \
-      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' \
-      && [ "$(${pkgs.gnugrep}/bin/grep -Fc 'generated/.#"new-node"."system"' "$NIX_LOG")" -ge 2 ]; then
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."system"' \
+      && [ "$(${pkgs.gnugrep}/bin/grep -Fc '.#"new-node"."system"' "$NIX_LOG")" -ge 2 ]; then
       exit 48
     fi
 
@@ -591,7 +577,7 @@ in
       export DNS_STATE_DIR="$TMPDIR/dns-state"
       mkdir -p "$HANDOFF_DIR" "$SOURCE_STATE_DIR" "$DNS_STATE_DIR"
       cp generated/state.json "$TMPDIR/state-before.json"
-      cp generated/plan.json "$TMPDIR/gated-plan.json"
+      cp generated/plan.json "$TMPDIR/canonical-plan.json"
 
       # Pointing --migration-source at the destination must not suppress a
       # real observed source. --skip-migrations is the explicit no-migrate path.
@@ -633,7 +619,7 @@ in
       fi
       test ! -s "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
-      cp "$TMPDIR/gated-plan.json" generated/plan.json
+      cp "$TMPDIR/canonical-plan.json" generated/plan.json
 
       : > "$nixLog"
       : > "$sshLog"
@@ -644,9 +630,9 @@ in
         exit 1
       fi
 
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$nixLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$nixLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."acme-prod"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
 
@@ -661,8 +647,8 @@ in
         echo "enforced destination verification failure was reported as success"
         exit 1
       fi
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$nixLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."acme-prod"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
 
@@ -672,9 +658,9 @@ in
       PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification --skip-migrations acme-prod
 
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$nixLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$nixLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."acme-prod"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
 
       # A completed marker from an older lifecycle cannot suppress a real live
@@ -707,7 +693,7 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP_QUERY_FAIL acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'failed to inspect user@2000.service' "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'failed to verify user@2000.service after cleanup' "$sshLog"
 
@@ -725,7 +711,7 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED_WRITE_FAIL acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -qx 'accepted old-node' "$HANDOFF_DIR/new-node-acme-prod"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
 
       : > "$nixLog"
       : > "$sshLog"
@@ -753,7 +739,7 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'DNS_OLD acme-prod' "$eventLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
 
       : > "$nixLog"
       : > "$sshLog"
@@ -765,26 +751,20 @@ in
       fi
       ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'DNS_NEW acme-prod' "$eventLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
 
-      # If the destination TLS redeploy fails after DNS cutover, keep the
-      # restore metadata so retry must apply TLS before source removal.
-      cp "$TMPDIR/gated-plan.json" generated/plan.json
+      # If desired TLS activation fails after DNS cutover, deploy must fall
+      # back to the transient HTTP-only configuration without changing plan.json.
+      cp "$TMPDIR/canonical-plan.json" generated/plan.json
       rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/* "$DNS_STATE_DIR"/*
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
-      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_TLS_SYSTEM=1 DNS_AUTOMATIC=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
-        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
-        echo "destination TLS redeploy failure was reported as success"
-        exit 1
-      fi
+      PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_TLS_SYSTEM=1 DNS_AUTOMATIC=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
       ${pkgs.gnugrep}/bin/grep -Fq 'DNS_UPSERT acme-prod' "$eventLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
-      ${pkgs.jq}/bin/jq -e '
-        .environments["acme-prod"].virtualHosts["acme-prod.hosting.test"].enableLetsEncrypt == true
-        and ._dnsGateOriginalVhosts["acme-prod"]["acme-prod.hosting.test"].environment.enableLetsEncrypt == true
-      ' generated/plan.json >/dev/null
+      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/canonical-plan.json" generated/plan.json
 
       : > "$nixLog"
       : > "$sshLog"
@@ -795,9 +775,9 @@ in
         exit 1
       fi
       ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$nixLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
-      ${pkgs.jq}/bin/jq -e '(._dnsGateOriginalVhosts["acme-prod"] == null)' generated/plan.json >/dev/null
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/canonical-plan.json" generated/plan.json
 
       # If cleanup mutates the source and then reports failure, the accepted
       # marker plus a live source probe makes the interruption recoverable.
@@ -813,7 +793,7 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP_QUIESCED_FAIL acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
 
       : > "$nixLog"
       : > "$sshLog"
@@ -838,11 +818,11 @@ in
         exit 1
       fi
 
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."acme-prod"' "$nixLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP_FAIL acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
 
       # On retry the accepted marker does not suppress a fresh backup while the
       # source is still live. Successful cleanup promotes it to quiesced before
@@ -850,7 +830,7 @@ in
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
-      cp "$TMPDIR/gated-plan.json" generated/plan.json
+      cp "$TMPDIR/canonical-plan.json" generated/plan.json
       rm -f "$DNS_STATE_DIR"/*
       if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_SOURCE_SYSTEM=1 DNS_AUTOMATIC=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
@@ -863,14 +843,14 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'ROLLBACK acme-prod' "$eventLog"
-      dest_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
-      dest_env_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."acme-prod"' "$eventLog" | head -n1 | cut -d: -f1)"
+      dest_system_line="$(${pkgs.gnugrep}/bin/grep -n -F '.#"new-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
+      dest_env_line="$(${pkgs.gnugrep}/bin/grep -n -F '.#"new-node"."acme-prod"' "$eventLog" | head -n1 | cut -d: -f1)"
       accepted_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_ACCEPTED acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       cleanup_line="$(${pkgs.gnugrep}/bin/grep -n -F 'CLEANUP acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       quiesced_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_QUIESCED acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       dns_line="$(${pkgs.gnugrep}/bin/grep -n -F 'DNS_UPSERT acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
-      tls_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"new-node"."system"' "$eventLog" | tail -n1 | cut -d: -f1)"
-      source_system_line="$(${pkgs.gnugrep}/bin/grep -n -F 'generated/.#"old-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
+      tls_system_line="$(${pkgs.gnugrep}/bin/grep -n -F '.#"new-node"."system"' "$eventLog" | tail -n1 | cut -d: -f1)"
+      source_system_line="$(${pkgs.gnugrep}/bin/grep -n -F '.#"old-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
       test "$dest_system_line" -lt "$dest_env_line"
       test "$dest_env_line" -lt "$accepted_line"
       test "$accepted_line" -lt "$cleanup_line"
@@ -883,8 +863,8 @@ in
         and .environments["acme-prod"].virtualHosts["acme-prod.hosting.test"].forceSSL == true
         and .nodes["new-node"].services.nginx.virtualHosts["acme-prod.hosting.test"].enableACME == true
         and .nodes["new-node"].services.nginx.virtualHosts["acme-prod.hosting.test"].forceSSL == true
-        and (._dnsGateOriginalVhosts["acme-prod"] == null)
       ' generated/plan.json >/dev/null
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/canonical-plan.json" generated/plan.json
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
 
       # A matching accepted handoff is also sufficient to resume finalization
@@ -906,7 +886,7 @@ in
       : > "$eventLog"
       PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" ORPHAN_SOURCE=1 \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'ROLLBACK acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq '/var/lib/systemd/linger/acme-prod' "$sshLog"
@@ -950,15 +930,15 @@ in
         exit 1
       fi
 
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-prod"' "$nixLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."acme-stage"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."acme-prod"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."acme-stage"' "$nixLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP_FAIL acme-stage' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_ACCEPTED acme-stage' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-stage' "$eventLog"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"old-node"."system"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '.#"old-node"."system"' "$nixLog"
     )
 
     echo ok > "$out"
@@ -1045,8 +1025,8 @@ in
       PATH="$fakeBin:$PATH" NIX_LOG="$log" \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
 
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."fresh-prod"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."fresh-prod"' "$log"
       test "$(wc -l < "$log")" -eq 2
 
       # A reservation in state.json must not make a fresh environment look
@@ -1054,7 +1034,7 @@ in
       : > "$log"
       PATH="$fakeBin:$PATH" NIX_LOG="$log" \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
-      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."fresh-prod"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '.#"new-node"."fresh-prod"' "$log"
 
       # If DNS explicitly identifies a provider node that has been removed from
       # inventory, do not silently reinterpret the deployment as fresh.
