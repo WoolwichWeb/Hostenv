@@ -14,9 +14,9 @@ deployProfilePathInstallable =
     deployProfilePathInstallableAt "generated"
 
 deployProfilePathInstallableAt :: Text -> Text -> Text -> Text
-deployProfilePathInstallableAt flakeRoot nodeName profileName =
-    flakeRoot
-        <> "/.#deploy.nodes."
+deployProfilePathInstallableAt flakeRef nodeName profileName =
+    flakeRef
+        <> "#deploy.nodes."
         <> nixAttrToken nodeName
         <> ".profiles."
         <> nixAttrToken profileName

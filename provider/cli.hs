@@ -1059,14 +1059,15 @@ withTransientDeployFlake ::
     (Text -> IO a) ->
     IO a
 withTransientDeployFlake plan gatedItems action
-    | null gatedItems = action "generated"
+    | null gatedItems = action "generated/."
     | otherwise = do
         (tempPath, handle) <- openTempFile "." ".hostenv-deploy-stage-"
         hClose handle
         Dir.removeFile tempPath
         Dir.createDirectory tempPath
         let cleanup = Dir.removePathForcibly tempPath
-        let tempRoot = T.pack tempPath
+        absoluteTempPath <- Dir.makeAbsolute tempPath
+        let tempRoot = "path:" <> T.pack absoluteTempPath
         flip finally cleanup $ do
             Dir.copyFile "generated/flake.nix" (tempPath FP.</> "flake.nix")
             lockExists <- Dir.doesFileExist "generated/flake.lock"
@@ -2538,12 +2539,12 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                 Left err -> error ("failed to parse " <> T.unpack statePath <> ": " <> err)
                 Right value -> pure (value :: KM.KeyMap A.Value)
 
-            let deployArgs flakeRoot useCheckSigs useDryActivate deployArgM =
+            let deployArgs flakeRef useCheckSigs useDryActivate deployArgM =
                     let remoteBuildArgs =
                             if forceRemoteBuild then ["--remote-build"] else []
                         targetArgs = case deployArgM of
-                            Just dArg -> [flakeRoot <> "/.#" <> quoteDeployTarget dArg]
-                            Nothing -> [flakeRoot <> "/"]
+                            Just dArg -> [flakeRef <> "#" <> quoteDeployTarget dArg]
+                            Nothing -> [flakeRef]
                         sigArgs = if useCheckSigs then ["--checksigs"] else []
                         dryActivateArgs = if useDryActivate then ["--dry-activate"] else []
                      in [ "run"
@@ -2559,7 +2560,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
 
             when dryRun $ do
                 printProviderLine "hostenv-provider: --dry-run enabled; skipping migrations, signing, and deploy preflight checks"
-                let dryArgs = deployArgs "generated" False True
+                let dryArgs = deployArgs "generated/." False True
                 systemDeployRes <-
                     forM targetNodes $ \nodeName -> do
                         let target = nodeName <> ".system"
