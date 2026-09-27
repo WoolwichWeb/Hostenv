@@ -389,7 +389,7 @@ in
       exit 42
     fi
 
-    if [ "''${FAIL_TLS_SYSTEM:-0}" = 1 ] \
+    if [ "''${FAIL_DEST_SYSTEM:-0}" = 1 ] \
       && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"'; then
       exit 48
     fi
@@ -571,6 +571,12 @@ in
           exit 46
           ;;
       esac
+      exit 0
+    fi
+
+    if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq -- '--head' \
+      && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'https://acme-prod.hosting.test/'; then
+      printf 'HTTPS_READY acme-prod\n' >> "$EVENT_LOG"
       exit 0
     fi
 
@@ -766,18 +772,22 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'DNS_NEW acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
 
-      # If desired TLS activation fails after DNS cutover, deploy must fall
-      # back to the transient HTTP-only configuration without changing plan.json.
+      # A destination system failure is a real deployment failure. Hostenv
+      # must not guess that ACME caused it or retry with a weaker configuration.
       cp "$TMPDIR/canonical-plan.json" generated/plan.json
       rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/* "$DNS_STATE_DIR"/*
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
-      PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_TLS_SYSTEM=1 DNS_AUTOMATIC=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
-        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
-      ${pkgs.gnugrep}/bin/grep -Fq 'DNS_UPSERT acme-prod' "$eventLog"
-      ${pkgs.gnugrep}/bin/grep -Fq '.hostenv-deploy-stage-' "$nixLog"
-      ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_DEST_SYSTEM=1 DNS_AUTOMATIC=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "destination system failure was reported as success"
+        exit 1
+      fi
+      test "$(${pkgs.gnugrep}/bin/grep -Fc '#"new-node"."system"' "$nixLog")" -eq 1
+      ! ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."acme-prod"' "$nixLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'DNS_UPSERT acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/canonical-plan.json" generated/plan.json
 
       # If cleanup mutates the source and then reports failure, the accepted
@@ -850,15 +860,16 @@ in
       cleanup_line="$(${pkgs.gnugrep}/bin/grep -n -F 'CLEANUP acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       quiesced_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_QUIESCED acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       dns_line="$(${pkgs.gnugrep}/bin/grep -n -F 'DNS_UPSERT acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
-      tls_system_line="$(${pkgs.gnugrep}/bin/grep -n -F '#"new-node"."system"' "$eventLog" | tail -n1 | cut -d: -f1)"
+      https_ready_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HTTPS_READY acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
       source_system_line="$(${pkgs.gnugrep}/bin/grep -n -F '#"old-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
       test "$dest_system_line" -lt "$dest_env_line"
       test "$dest_env_line" -lt "$accepted_line"
       test "$accepted_line" -lt "$cleanup_line"
       test "$cleanup_line" -lt "$quiesced_line"
       test "$quiesced_line" -lt "$dns_line"
-      test "$dns_line" -lt "$tls_system_line"
-      test "$tls_system_line" -lt "$source_system_line"
+      test "$dns_line" -lt "$https_ready_line"
+      test "$https_ready_line" -lt "$source_system_line"
+      test "$(${pkgs.gnugrep}/bin/grep -Fc '#"new-node"."system"' "$eventLog")" -eq 1
       ${pkgs.jq}/bin/jq -e '
         .environments["acme-prod"].virtualHosts["acme-prod.hosting.test"].enableLetsEncrypt == true
         and .environments["acme-prod"].virtualHosts["acme-prod.hosting.test"].forceSSL == true
@@ -1077,9 +1088,9 @@ in
 
       mkdir -p "$TMPDIR/dns-state"
 
-      # Fresh environment: DNS is initially absent, so deploy must stage with a
-      # transient HTTP-only flake, create DNS, then apply the canonical TLS end
-      # state without rewriting generated/plan.json.
+      # Fresh environment: deploy the canonical end state first. Current
+      # nixpkgs supplies a baseline self-signed certificate while ACME catches
+      # up; Hostenv then reconciles DNS without a staging flake.
       : > "$log"
       : > "$digLog"
       rm -f "$TMPDIR/dns-state/fresh-prod-new"
@@ -1088,13 +1099,13 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'fresh environment on new-node' "$TMPDIR/fresh.out"
       test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test A$' "$digLog")" -eq 2
       test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test AAAA$' "$digLog")" -eq 2
-      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
 
-      # Existing environment on the same node follows the same staging/DNS/final
-      # TLS flow, but is classified from the live username+UID observation.
+      # Existing environment on the same node follows the same canonical
+      # deploy/DNS-reconciliation flow and is classified from live username+UID observation.
       : > "$log"
       : > "$digLog"
       rm -f "$TMPDIR/dns-state/fresh-prod-new"
@@ -1103,7 +1114,7 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'existing environment on new-node' "$TMPDIR/existing.out"
       test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test A$' "$digLog")" -eq 2
       test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test AAAA$' "$digLog")" -eq 2
-      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
 
