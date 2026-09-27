@@ -11,7 +11,7 @@ import Data.Text qualified as T
 
 deployProfilePathInstallable :: Text -> Text -> Text
 deployProfilePathInstallable =
-    deployProfilePathInstallableAt "generated"
+    deployProfilePathInstallableAt "generated/."
 
 deployProfilePathInstallableAt :: Text -> Text -> Text -> Text
 deployProfilePathInstallableAt flakeRef nodeName profileName =

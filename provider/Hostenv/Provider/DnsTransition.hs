@@ -54,8 +54,8 @@ collectDnsItems hostenvHostname envs =
             _ -> []
 
 gateTlsForItems :: [DnsItem] -> KM.KeyMap A.Value -> KM.KeyMap A.Value
-gateTlsForItems items =
-    foldl (flip gateOne)
+gateTlsForItems items root =
+    foldl (flip gateOne) root items
   where
     gateOne item root =
         let envPath suffix =
