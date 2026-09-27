@@ -837,25 +837,35 @@ waitForCnamePropagation :: DnsLookupCache -> [DnsItem] -> IO (S.Set DnsKey, [Dns
 waitForCnamePropagation dnsCache =
     waitForDnsPropagationBy (dnsCnamePointsToWith dnsCache)
 
-loadPlanCloudflareContext :: KM.KeyMap A.Value -> IO (Maybe Text, Maybe Text, Maybe Text)
-loadPlanCloudflareContext plan = do
+loadPlanCloudflareContext ::
+    Maybe Text ->
+    Maybe Text ->
+    KM.KeyMap A.Value ->
+    IO (Maybe Text, Maybe Text, Maybe Text)
+loadPlanCloudflareContext mTokenOverride mZoneOverride plan = do
     let cfPlan = lookupObj (K.fromString "cloudflare") plan
     mToken <-
-        case cfPlan >>= lookupText (K.fromString "apiTokenFile") of
-            Just path -> Just . T.strip . T.pack <$> readFile (T.unpack path)
-            Nothing -> fmap T.pack <$> Env.lookupEnv "CF_API_TOKEN"
+        case mTokenOverride of
+            Just token -> pure (Just token)
+            Nothing ->
+                case cfPlan >>= lookupText (K.fromString "apiTokenFile") of
+                    Just path -> Just . T.strip . T.pack <$> readFile (T.unpack path)
+                    Nothing -> fmap T.pack <$> Env.lookupEnv "CF_API_TOKEN"
     mZone <-
-        case cfPlan >>= lookupText (K.fromString "zoneId") of
+        case mZoneOverride of
             Just zoneId -> pure (Just zoneId)
-            Nothing -> fmap T.pack <$> Env.lookupEnv "CF_ZONE_ID"
+            Nothing ->
+                case cfPlan >>= lookupText (K.fromString "zoneId") of
+                    Just zoneId -> pure (Just zoneId)
+                    Nothing -> fmap T.pack <$> Env.lookupEnv "CF_ZONE_ID"
     mZoneName <-
         case (mToken, mZone) of
             (Just token, Just zoneId) -> cfZoneName token zoneId
             _ -> pure Nothing
     pure (mToken, mZone, mZoneName)
 
-migrationDnsItems :: Text -> KM.KeyMap A.Value -> EnvInfo -> [DnsItem]
-migrationDnsItems hostenvHostname envs envInfo =
+environmentDnsItems :: Text -> KM.KeyMap A.Value -> EnvInfo -> [DnsItem]
+environmentDnsItems hostenvHostname envs envInfo =
     case KM.lookup (K.fromText envInfo.userName) envs of
         Nothing -> []
         Just envValue ->
@@ -864,35 +874,39 @@ migrationDnsItems hostenvHostname envs envInfo =
                     hostenvHostname
                     (KM.singleton (K.fromText envInfo.userName) envValue)
 
-cutoverMigrationDns ::
-    DnsLookupCache ->
-    KM.KeyMap A.Value ->
-    Text ->
-    KM.KeyMap A.Value ->
-    EnvInfo ->
-    IO (Either Text ())
-cutoverMigrationDns dnsCache plan hostenvHostname envs envInfo = do
-    let items = migrationDnsItems hostenvHostname envs envInfo
+checkDnsItems :: DnsLookupCache -> [DnsItem] -> IO [DnsItem]
+checkDnsItems dnsCache items = do
     checks <-
         forM items $ \item -> do
-            pointsToDestination <- dnsCnamePointsToWith dnsCache item
+            pointsToDestination <- dnsPointsToWith dnsCache item.diDiscoveryHost item.diExpectedHost
             pure (item, pointsToDestination)
-    let mismatched =
-            [ item
-            | (item, False) <- checks
-            ]
+    pure
+        [ item
+        | (item, False) <- checks
+        ]
+
+ensureEnvironmentDns ::
+    DnsLookupCache ->
+    Maybe Text ->
+    Maybe Text ->
+    KM.KeyMap A.Value ->
+    EnvInfo ->
+    [DnsItem] ->
+    IO (Either Text ())
+ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = do
+    mismatched <- checkDnsItems dnsCache items
     if null mismatched
         then do
             when (not (null items)) $
                 printProviderLine
-                    ( "hostenv-provider: migration DNS already points to "
+                    ( "hostenv-provider: DNS already points to "
                         <> envInfo.node
                         <> " for "
                         <> envInfo.userName
                     )
             pure (Right ())
         else do
-            cloudflareContext <- tryAny (loadPlanCloudflareContext plan)
+            cloudflareContext <- tryAny (loadPlanCloudflareContext mTokenOverride mZoneOverride plan)
             case cloudflareContext of
                 Left err ->
                     pure
@@ -920,7 +934,7 @@ cutoverMigrationDns dnsCache plan hostenvHostname envs envInfo = do
                                     case (mToken, mZone) of
                                         (Just token, Just zoneId) -> do
                                             printProviderLine
-                                                ( "hostenv-provider: cutting over migration DNS "
+                                                ( "hostenv-provider: updating DNS "
                                                     <> item.diDiscoveryHost
                                                     <> " -> "
                                                     <> item.diExpectedHost
@@ -951,7 +965,7 @@ cutoverMigrationDns dnsCache plan hostenvHostname envs envInfo = do
                         else do
                             let updatedItems = [item | Right item <- upsertResults]
                             printProviderLine
-                                ( "hostenv-provider: waiting for migration DNS propagation for "
+                                ( "hostenv-provider: waiting for DNS propagation for "
                                     <> envInfo.userName
                                 )
                             (_, timedOutItems) <- waitForCnamePropagation dnsCache updatedItems
