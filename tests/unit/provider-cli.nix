@@ -926,7 +926,8 @@ in
       : > "$nixLog"
       : > "$sshLog"
       : > "$eventLog"
-      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" MULTI_MOVE=1 FAIL_CLEANUP_STAGE=1         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" MULTI_MOVE=1 FAIL_CLEANUP_STAGE=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
         echo "partial multi-user source cleanup failure was reported as success"
         exit 1
       fi
