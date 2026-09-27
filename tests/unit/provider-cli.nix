@@ -939,6 +939,7 @@ in
     work="$TMPDIR/provider"
     fakeBin="$TMPDIR/bin"
     log="$TMPDIR/nix.log"
+    digLog="$TMPDIR/dig.log"
     mkdir -p "$work/generated" "$fakeBin"
 
     cat > "$work/generated/plan.json" <<'EOF'
@@ -950,6 +951,10 @@ in
             "nginx": {
               "virtualHosts": {
                 "fresh-prod.hosting.test": {
+                  "enableACME": true,
+                  "forceSSL": true
+                },
+                "www-fresh-prod.hosting.test": {
                   "enableACME": true,
                   "forceSSL": true
                 }
@@ -970,6 +975,10 @@ in
           "migrations": [ "demo-migrate" ],
           "virtualHosts": {
             "fresh-prod.hosting.test": {
+              "enableLetsEncrypt": true,
+              "forceSSL": true
+            },
+            "www-fresh-prod.hosting.test": {
               "enableLetsEncrypt": true,
               "forceSSL": true
             }
@@ -1023,6 +1032,7 @@ in
     #!${pkgs.runtimeShell}
     set -euo pipefail
     args=" $* "
+    printf '%s\n' "$*" >> "$DIG_LOG"
     if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME'; then
       if [ "''${DNS_STRANDED:-0}" = 1 ]; then
         printf 'old-node.hosting.test.\n'
@@ -1038,7 +1048,7 @@ in
     set -euo pipefail
     args=" $* "
     case "$args" in
-      *"/zones/zone/dns_records?per_page=1000&name=fresh-prod.hosting.test"*)
+      *"/zones/zone/dns_records?per_page=1000&name="*)
         printf '{"success":true,"result":[]}\n'
         ;;
       *"-X POST "*"zones/zone/dns_records"*)
@@ -1065,10 +1075,2779 @@ in
       # transient HTTP-only flake, create DNS, then apply the canonical TLS end
       # state without rewriting generated/plan.json.
       : > "$log"
+      : > "$digLog"
       rm -f "$TMPDIR/dns-state/fresh-prod-new"
-      PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DIG_LOG="$digLog" DNS_STATE_DIR="$TMPDIR/dns-state" CF_API_TOKEN=test-token CF_ZONE_ID=zone \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/fresh.out" 2>&1
       ${pkgs.gnugrep}/bin/grep -Fq 'fresh environment on new-node' "$TMPDIR/fresh.out"
+      test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test A
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # Existing environment on the same node follows the same staging/DNS/final
+      # TLS flow, but is classified from the live username+UID observation.
+      : > "$log"
+      : > "$digLog"
+      rm -f "$TMPDIR/dns-state/fresh-prod-new"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DIG_LOG="$digLog" DNS_STATE_DIR="$TMPDIR/dns-state" EXISTING_DEST=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/existing.out" 2>&1
+      ${pkgs.gnugrep}/bin/grep -Fq 'existing environment on new-node' "$TMPDIR/existing.out"
+      test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test A
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # If DNS explicitly identifies a provider node that has been removed from
+      # inventory, do not silently reinterpret the deployment as fresh.
+      : > "$log"
+      : > "$digLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DIG_LOG="$digLog" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_STRANDED=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "environment pointing at a removed provider node was treated as fresh"
+        exit 1
+      fi
+      test ! -s "$log"
+    )
+
+    echo ok > "$out"
+  '';
+
+
+  provider-cli-node-retirement-plan = pkgs.runCommand "provider-cli-node-retirement-plan" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+    set -euo pipefail
+
+    work="$TMPDIR/provider"
+    fakeBin="$TMPDIR/bin"
+    newPlan="$TMPDIR/new-plan.json"
+    newState="$TMPDIR/new-state.json"
+    newFlake="$TMPDIR/new-flake.nix"
+    mkdir -p "$work/generated" "$fakeBin"
+
+    cat > "$work/generated/plan.json" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "old-node": "active",
+        "new-node": "active"
+      },
+      "nodes": {
+        "old-node": {},
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "old-node": {
+          "hostname": "old-node.hosting.test",
+          "sshOpts": []
+        },
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "old-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$work/generated/state.json" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newPlan" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "new-node": "active"
+      },
+      "nodes": {
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "new-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$newState" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newFlake" <<'EOF'
+    { }
+    EOF
+
+    cat > "$fakeBin/nix" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    args=" $* "
+    case "$args" in
+      *" eval "*)
+        printf 'x86_64-linux\n'
+        ;;
+      *" build "*"planPaths.x86_64-linux.plan"*)
+        printf '%s\n' "$NEW_PLAN"
+        ;;
+      *" build "*"planPaths.x86_64-linux.state"*)
+        printf '%s\n' "$NEW_STATE"
+        ;;
+      *" build "*"planPaths.x86_64-linux.flake"*)
+        printf '%s\n' "$NEW_FLAKE"
+        ;;
+      *" flake update "*)
+        exit 0
+        ;;
+      *)
+        echo "unexpected nix invocation: $*" >&2
+        exit 2
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/nix"
+
+    cat > "$fakeBin/git" <<'EOF'
+    #!${pkgs.runtimeShell}
+    exit 0
+    EOF
+    chmod +x "$fakeBin/git"
+
+    cat > "$fakeBin/ssh" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    script="$(cat)"
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      if [ "''${ORPHAN_RUNTIME:-0}" = 1 ]; then
+        printf 'acme-prod\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
+      if [ "''${NODE_EMPTY:-0}" != 1 ]; then
+        printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/hostenv/provider/migration-handoffs"; then
+      if [ "''${HANDOFF_PENDING:-0}" = 1 ]; then
+        printf '2000\tquiesced old-node\n'
+      fi
+      exit 0
+    fi
+
+    exit 0
+    EOF
+    chmod +x "$fakeBin/ssh"
+
+    cat > "$fakeBin/dig" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    if [ "''${DNS_FAIL:-0}" = 1 ]; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
+    if [ "''${DNS_RETIRED:-0}" = 1 ] \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME' \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'retired.hosting.test'; then
+      printf 'retired.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    elif [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME'; then
+      printf 'acme-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    fi
+    EOF
+    chmod +x "$fakeBin/dig"
+
+    (
+      cd "$work"
+
+      # The previous plan is useful evidence when it exists: an environment
+      # cannot jump away from a node that disappears in the same plan.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "node disappeared while its previous environment assignment still referenced it"
+        exit 1
+      fi
+
+      # A proper drain first moves the environment while keeping the source
+      # node in inventory as retiring.
+      ${pkgs.jq}/bin/jq \
+        '.nodeStatus["old-node"] = "retiring" | .environments["acme-prod"].node = "new-node"' \
+        generated/plan.json > "$TMPDIR/retiring-plan.json"
+      mv "$TMPDIR/retiring-plan.json" generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with a live Hostenv account was removed"
+        exit 1
+      fi
+
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 ORPHAN_RUNTIME=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with orphan Hostenv runtime was removed"
+        exit 1
+      fi
+
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # Reservations for environments already absent from the previous plan
+      # still participate in DNS safety.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_RETIRED=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "reserved retired environment DNS did not block node removal"
+        exit 1
+      fi
+
+      # plan.json is disposable. Without historical plan data, live DNS is
+      # the safety tripwire: a CNAME to the removed node blocks publication.
+      rm generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "missing previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS may already have moved before source-system finalization. In that
+      # window the provider-owned handoff is the durable tripwire preventing
+      # the source node from disappearing from inventory.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PENDING=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "pending migration handoff did not block source-node removal"
+        exit 1
+      fi
+
+      # A malformed generated plan has the same semantics: skip historical
+      # comparison, but still fail closed while DNS identifies the old node.
+      printf 'deliberately not JSON\n' > generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "malformed previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS is checked before the candidate plan is published. If live Hostenv
+      # DNS still identifies a node outside proposed inventory, the old file
+      # remains untouched so the failure is repeatable.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite Hostenv DNS pointing at a removed node"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # A DNS transport/server failure is not equivalent to "no removed-node
+      # CNAME". The safety check must fail closed and leave the old plan intact.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite an indeterminate DNS lookup"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # Once the safety checks pass, a non-dry plan atomically replaces the
+      # generated plan. No same-directory candidate should remain.
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan
+
+      ${pkgs.jq}/bin/jq -S . generated/plan.json > "$TMPDIR/published.json"
+      ${pkgs.jq}/bin/jq -S . "$newPlan" > "$TMPDIR/expected.json"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/expected.json" "$TMPDIR/published.json"
+      test -z "$(find generated -maxdepth 1 -name '.plan.json.tmp-*' -print -quit)"
+    )
+
+    echo ok > "$out"
+  '';
+
+  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
+    echo ok > "$out"
+  '';
+  provider-cli-migration-handoff = pkgs.runCommand "provider-cli-migration-handoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestMigrationHandoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDeployVerification.hs
+    echo ok > "$out"
+  '';
+}
+ "$digLog")" -eq 2
+      test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test AAAA
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # Existing environment on the same node follows the same staging/DNS/final
+      # TLS flow, but is classified from the live username+UID observation.
+      : > "$log"
+      rm -f "$TMPDIR/dns-state/fresh-prod-new"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" EXISTING_DEST=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/existing.out" 2>&1
+      ${pkgs.gnugrep}/bin/grep -Fq 'existing environment on new-node' "$TMPDIR/existing.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # If DNS explicitly identifies a provider node that has been removed from
+      # inventory, do not silently reinterpret the deployment as fresh.
+      : > "$log"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_STRANDED=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "environment pointing at a removed provider node was treated as fresh"
+        exit 1
+      fi
+      test ! -s "$log"
+    )
+
+    echo ok > "$out"
+  '';
+
+
+  provider-cli-node-retirement-plan = pkgs.runCommand "provider-cli-node-retirement-plan" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+    set -euo pipefail
+
+    work="$TMPDIR/provider"
+    fakeBin="$TMPDIR/bin"
+    newPlan="$TMPDIR/new-plan.json"
+    newState="$TMPDIR/new-state.json"
+    newFlake="$TMPDIR/new-flake.nix"
+    mkdir -p "$work/generated" "$fakeBin"
+
+    cat > "$work/generated/plan.json" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "old-node": "active",
+        "new-node": "active"
+      },
+      "nodes": {
+        "old-node": {},
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "old-node": {
+          "hostname": "old-node.hosting.test",
+          "sshOpts": []
+        },
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "old-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$work/generated/state.json" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newPlan" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "new-node": "active"
+      },
+      "nodes": {
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "new-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$newState" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newFlake" <<'EOF'
+    { }
+    EOF
+
+    cat > "$fakeBin/nix" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    args=" $* "
+    case "$args" in
+      *" eval "*)
+        printf 'x86_64-linux\n'
+        ;;
+      *" build "*"planPaths.x86_64-linux.plan"*)
+        printf '%s\n' "$NEW_PLAN"
+        ;;
+      *" build "*"planPaths.x86_64-linux.state"*)
+        printf '%s\n' "$NEW_STATE"
+        ;;
+      *" build "*"planPaths.x86_64-linux.flake"*)
+        printf '%s\n' "$NEW_FLAKE"
+        ;;
+      *" flake update "*)
+        exit 0
+        ;;
+      *)
+        echo "unexpected nix invocation: $*" >&2
+        exit 2
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/nix"
+
+    cat > "$fakeBin/git" <<'EOF'
+    #!${pkgs.runtimeShell}
+    exit 0
+    EOF
+    chmod +x "$fakeBin/git"
+
+    cat > "$fakeBin/ssh" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    script="$(cat)"
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      if [ "''${ORPHAN_RUNTIME:-0}" = 1 ]; then
+        printf 'acme-prod\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
+      if [ "''${NODE_EMPTY:-0}" != 1 ]; then
+        printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/hostenv/provider/migration-handoffs"; then
+      if [ "''${HANDOFF_PENDING:-0}" = 1 ]; then
+        printf '2000\tquiesced old-node\n'
+      fi
+      exit 0
+    fi
+
+    exit 0
+    EOF
+    chmod +x "$fakeBin/ssh"
+
+    cat > "$fakeBin/dig" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    if [ "''${DNS_FAIL:-0}" = 1 ]; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
+    if [ "''${DNS_RETIRED:-0}" = 1 ] \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME' \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'retired.hosting.test'; then
+      printf 'retired.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    elif [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME'; then
+      printf 'acme-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    fi
+    EOF
+    chmod +x "$fakeBin/dig"
+
+    (
+      cd "$work"
+
+      # The previous plan is useful evidence when it exists: an environment
+      # cannot jump away from a node that disappears in the same plan.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "node disappeared while its previous environment assignment still referenced it"
+        exit 1
+      fi
+
+      # A proper drain first moves the environment while keeping the source
+      # node in inventory as retiring.
+      ${pkgs.jq}/bin/jq \
+        '.nodeStatus["old-node"] = "retiring" | .environments["acme-prod"].node = "new-node"' \
+        generated/plan.json > "$TMPDIR/retiring-plan.json"
+      mv "$TMPDIR/retiring-plan.json" generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with a live Hostenv account was removed"
+        exit 1
+      fi
+
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 ORPHAN_RUNTIME=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with orphan Hostenv runtime was removed"
+        exit 1
+      fi
+
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # Reservations for environments already absent from the previous plan
+      # still participate in DNS safety.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_RETIRED=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "reserved retired environment DNS did not block node removal"
+        exit 1
+      fi
+
+      # plan.json is disposable. Without historical plan data, live DNS is
+      # the safety tripwire: a CNAME to the removed node blocks publication.
+      rm generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "missing previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS may already have moved before source-system finalization. In that
+      # window the provider-owned handoff is the durable tripwire preventing
+      # the source node from disappearing from inventory.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PENDING=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "pending migration handoff did not block source-node removal"
+        exit 1
+      fi
+
+      # A malformed generated plan has the same semantics: skip historical
+      # comparison, but still fail closed while DNS identifies the old node.
+      printf 'deliberately not JSON\n' > generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "malformed previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS is checked before the candidate plan is published. If live Hostenv
+      # DNS still identifies a node outside proposed inventory, the old file
+      # remains untouched so the failure is repeatable.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite Hostenv DNS pointing at a removed node"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # A DNS transport/server failure is not equivalent to "no removed-node
+      # CNAME". The safety check must fail closed and leave the old plan intact.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite an indeterminate DNS lookup"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # Once the safety checks pass, a non-dry plan atomically replaces the
+      # generated plan. No same-directory candidate should remain.
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan
+
+      ${pkgs.jq}/bin/jq -S . generated/plan.json > "$TMPDIR/published.json"
+      ${pkgs.jq}/bin/jq -S . "$newPlan" > "$TMPDIR/expected.json"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/expected.json" "$TMPDIR/published.json"
+      test -z "$(find generated -maxdepth 1 -name '.plan.json.tmp-*' -print -quit)"
+    )
+
+    echo ok > "$out"
+  '';
+
+  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
+    echo ok > "$out"
+  '';
+  provider-cli-migration-handoff = pkgs.runCommand "provider-cli-migration-handoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestMigrationHandoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDeployVerification.hs
+    echo ok > "$out"
+  '';
+}
+ "$digLog")" -eq 2
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # Existing environment on the same node follows the same staging/DNS/final
+      # TLS flow, but is classified from the live username+UID observation.
+      : > "$log"
+      rm -f "$TMPDIR/dns-state/fresh-prod-new"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" EXISTING_DEST=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/existing.out" 2>&1
+      ${pkgs.gnugrep}/bin/grep -Fq 'existing environment on new-node' "$TMPDIR/existing.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # If DNS explicitly identifies a provider node that has been removed from
+      # inventory, do not silently reinterpret the deployment as fresh.
+      : > "$log"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_STRANDED=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "environment pointing at a removed provider node was treated as fresh"
+        exit 1
+      fi
+      test ! -s "$log"
+    )
+
+    echo ok > "$out"
+  '';
+
+
+  provider-cli-node-retirement-plan = pkgs.runCommand "provider-cli-node-retirement-plan" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+    set -euo pipefail
+
+    work="$TMPDIR/provider"
+    fakeBin="$TMPDIR/bin"
+    newPlan="$TMPDIR/new-plan.json"
+    newState="$TMPDIR/new-state.json"
+    newFlake="$TMPDIR/new-flake.nix"
+    mkdir -p "$work/generated" "$fakeBin"
+
+    cat > "$work/generated/plan.json" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "old-node": "active",
+        "new-node": "active"
+      },
+      "nodes": {
+        "old-node": {},
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "old-node": {
+          "hostname": "old-node.hosting.test",
+          "sshOpts": []
+        },
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "old-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$work/generated/state.json" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newPlan" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "new-node": "active"
+      },
+      "nodes": {
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "new-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$newState" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newFlake" <<'EOF'
+    { }
+    EOF
+
+    cat > "$fakeBin/nix" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    args=" $* "
+    case "$args" in
+      *" eval "*)
+        printf 'x86_64-linux\n'
+        ;;
+      *" build "*"planPaths.x86_64-linux.plan"*)
+        printf '%s\n' "$NEW_PLAN"
+        ;;
+      *" build "*"planPaths.x86_64-linux.state"*)
+        printf '%s\n' "$NEW_STATE"
+        ;;
+      *" build "*"planPaths.x86_64-linux.flake"*)
+        printf '%s\n' "$NEW_FLAKE"
+        ;;
+      *" flake update "*)
+        exit 0
+        ;;
+      *)
+        echo "unexpected nix invocation: $*" >&2
+        exit 2
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/nix"
+
+    cat > "$fakeBin/git" <<'EOF'
+    #!${pkgs.runtimeShell}
+    exit 0
+    EOF
+    chmod +x "$fakeBin/git"
+
+    cat > "$fakeBin/ssh" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    script="$(cat)"
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      if [ "''${ORPHAN_RUNTIME:-0}" = 1 ]; then
+        printf 'acme-prod\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
+      if [ "''${NODE_EMPTY:-0}" != 1 ]; then
+        printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/hostenv/provider/migration-handoffs"; then
+      if [ "''${HANDOFF_PENDING:-0}" = 1 ]; then
+        printf '2000\tquiesced old-node\n'
+      fi
+      exit 0
+    fi
+
+    exit 0
+    EOF
+    chmod +x "$fakeBin/ssh"
+
+    cat > "$fakeBin/dig" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    if [ "''${DNS_FAIL:-0}" = 1 ]; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
+    if [ "''${DNS_RETIRED:-0}" = 1 ] \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME' \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'retired.hosting.test'; then
+      printf 'retired.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    elif [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME'; then
+      printf 'acme-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    fi
+    EOF
+    chmod +x "$fakeBin/dig"
+
+    (
+      cd "$work"
+
+      # The previous plan is useful evidence when it exists: an environment
+      # cannot jump away from a node that disappears in the same plan.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "node disappeared while its previous environment assignment still referenced it"
+        exit 1
+      fi
+
+      # A proper drain first moves the environment while keeping the source
+      # node in inventory as retiring.
+      ${pkgs.jq}/bin/jq \
+        '.nodeStatus["old-node"] = "retiring" | .environments["acme-prod"].node = "new-node"' \
+        generated/plan.json > "$TMPDIR/retiring-plan.json"
+      mv "$TMPDIR/retiring-plan.json" generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with a live Hostenv account was removed"
+        exit 1
+      fi
+
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 ORPHAN_RUNTIME=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with orphan Hostenv runtime was removed"
+        exit 1
+      fi
+
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # Reservations for environments already absent from the previous plan
+      # still participate in DNS safety.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_RETIRED=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "reserved retired environment DNS did not block node removal"
+        exit 1
+      fi
+
+      # plan.json is disposable. Without historical plan data, live DNS is
+      # the safety tripwire: a CNAME to the removed node blocks publication.
+      rm generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "missing previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS may already have moved before source-system finalization. In that
+      # window the provider-owned handoff is the durable tripwire preventing
+      # the source node from disappearing from inventory.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PENDING=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "pending migration handoff did not block source-node removal"
+        exit 1
+      fi
+
+      # A malformed generated plan has the same semantics: skip historical
+      # comparison, but still fail closed while DNS identifies the old node.
+      printf 'deliberately not JSON\n' > generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "malformed previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS is checked before the candidate plan is published. If live Hostenv
+      # DNS still identifies a node outside proposed inventory, the old file
+      # remains untouched so the failure is repeatable.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite Hostenv DNS pointing at a removed node"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # A DNS transport/server failure is not equivalent to "no removed-node
+      # CNAME". The safety check must fail closed and leave the old plan intact.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite an indeterminate DNS lookup"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # Once the safety checks pass, a non-dry plan atomically replaces the
+      # generated plan. No same-directory candidate should remain.
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan
+
+      ${pkgs.jq}/bin/jq -S . generated/plan.json > "$TMPDIR/published.json"
+      ${pkgs.jq}/bin/jq -S . "$newPlan" > "$TMPDIR/expected.json"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/expected.json" "$TMPDIR/published.json"
+      test -z "$(find generated -maxdepth 1 -name '.plan.json.tmp-*' -print -quit)"
+    )
+
+    echo ok > "$out"
+  '';
+
+  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
+    echo ok > "$out"
+  '';
+  provider-cli-migration-handoff = pkgs.runCommand "provider-cli-migration-handoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestMigrationHandoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDeployVerification.hs
+    echo ok > "$out"
+  '';
+}
+ "$digLog")" -eq 2
+      test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test AAAA
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # If DNS explicitly identifies a provider node that has been removed from
+      # inventory, do not silently reinterpret the deployment as fresh.
+      : > "$log"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_STRANDED=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "environment pointing at a removed provider node was treated as fresh"
+        exit 1
+      fi
+      test ! -s "$log"
+    )
+
+    echo ok > "$out"
+  '';
+
+
+  provider-cli-node-retirement-plan = pkgs.runCommand "provider-cli-node-retirement-plan" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+    set -euo pipefail
+
+    work="$TMPDIR/provider"
+    fakeBin="$TMPDIR/bin"
+    newPlan="$TMPDIR/new-plan.json"
+    newState="$TMPDIR/new-state.json"
+    newFlake="$TMPDIR/new-flake.nix"
+    mkdir -p "$work/generated" "$fakeBin"
+
+    cat > "$work/generated/plan.json" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "old-node": "active",
+        "new-node": "active"
+      },
+      "nodes": {
+        "old-node": {},
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "old-node": {
+          "hostname": "old-node.hosting.test",
+          "sshOpts": []
+        },
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "old-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$work/generated/state.json" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newPlan" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "new-node": "active"
+      },
+      "nodes": {
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "new-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$newState" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newFlake" <<'EOF'
+    { }
+    EOF
+
+    cat > "$fakeBin/nix" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    args=" $* "
+    case "$args" in
+      *" eval "*)
+        printf 'x86_64-linux\n'
+        ;;
+      *" build "*"planPaths.x86_64-linux.plan"*)
+        printf '%s\n' "$NEW_PLAN"
+        ;;
+      *" build "*"planPaths.x86_64-linux.state"*)
+        printf '%s\n' "$NEW_STATE"
+        ;;
+      *" build "*"planPaths.x86_64-linux.flake"*)
+        printf '%s\n' "$NEW_FLAKE"
+        ;;
+      *" flake update "*)
+        exit 0
+        ;;
+      *)
+        echo "unexpected nix invocation: $*" >&2
+        exit 2
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/nix"
+
+    cat > "$fakeBin/git" <<'EOF'
+    #!${pkgs.runtimeShell}
+    exit 0
+    EOF
+    chmod +x "$fakeBin/git"
+
+    cat > "$fakeBin/ssh" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    script="$(cat)"
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      if [ "''${ORPHAN_RUNTIME:-0}" = 1 ]; then
+        printf 'acme-prod\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
+      if [ "''${NODE_EMPTY:-0}" != 1 ]; then
+        printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/hostenv/provider/migration-handoffs"; then
+      if [ "''${HANDOFF_PENDING:-0}" = 1 ]; then
+        printf '2000\tquiesced old-node\n'
+      fi
+      exit 0
+    fi
+
+    exit 0
+    EOF
+    chmod +x "$fakeBin/ssh"
+
+    cat > "$fakeBin/dig" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    if [ "''${DNS_FAIL:-0}" = 1 ]; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
+    if [ "''${DNS_RETIRED:-0}" = 1 ] \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME' \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'retired.hosting.test'; then
+      printf 'retired.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    elif [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME'; then
+      printf 'acme-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    fi
+    EOF
+    chmod +x "$fakeBin/dig"
+
+    (
+      cd "$work"
+
+      # The previous plan is useful evidence when it exists: an environment
+      # cannot jump away from a node that disappears in the same plan.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "node disappeared while its previous environment assignment still referenced it"
+        exit 1
+      fi
+
+      # A proper drain first moves the environment while keeping the source
+      # node in inventory as retiring.
+      ${pkgs.jq}/bin/jq \
+        '.nodeStatus["old-node"] = "retiring" | .environments["acme-prod"].node = "new-node"' \
+        generated/plan.json > "$TMPDIR/retiring-plan.json"
+      mv "$TMPDIR/retiring-plan.json" generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with a live Hostenv account was removed"
+        exit 1
+      fi
+
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 ORPHAN_RUNTIME=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with orphan Hostenv runtime was removed"
+        exit 1
+      fi
+
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # Reservations for environments already absent from the previous plan
+      # still participate in DNS safety.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_RETIRED=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "reserved retired environment DNS did not block node removal"
+        exit 1
+      fi
+
+      # plan.json is disposable. Without historical plan data, live DNS is
+      # the safety tripwire: a CNAME to the removed node blocks publication.
+      rm generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "missing previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS may already have moved before source-system finalization. In that
+      # window the provider-owned handoff is the durable tripwire preventing
+      # the source node from disappearing from inventory.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PENDING=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "pending migration handoff did not block source-node removal"
+        exit 1
+      fi
+
+      # A malformed generated plan has the same semantics: skip historical
+      # comparison, but still fail closed while DNS identifies the old node.
+      printf 'deliberately not JSON\n' > generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "malformed previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS is checked before the candidate plan is published. If live Hostenv
+      # DNS still identifies a node outside proposed inventory, the old file
+      # remains untouched so the failure is repeatable.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite Hostenv DNS pointing at a removed node"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # A DNS transport/server failure is not equivalent to "no removed-node
+      # CNAME". The safety check must fail closed and leave the old plan intact.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite an indeterminate DNS lookup"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # Once the safety checks pass, a non-dry plan atomically replaces the
+      # generated plan. No same-directory candidate should remain.
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan
+
+      ${pkgs.jq}/bin/jq -S . generated/plan.json > "$TMPDIR/published.json"
+      ${pkgs.jq}/bin/jq -S . "$newPlan" > "$TMPDIR/expected.json"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/expected.json" "$TMPDIR/published.json"
+      test -z "$(find generated -maxdepth 1 -name '.plan.json.tmp-*' -print -quit)"
+    )
+
+    echo ok > "$out"
+  '';
+
+  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
+    echo ok > "$out"
+  '';
+  provider-cli-migration-handoff = pkgs.runCommand "provider-cli-migration-handoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestMigrationHandoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDeployVerification.hs
+    echo ok > "$out"
+  '';
+}
+ "$digLog")" -eq 2
+      test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test AAAA
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # Existing environment on the same node follows the same staging/DNS/final
+      # TLS flow, but is classified from the live username+UID observation.
+      : > "$log"
+      rm -f "$TMPDIR/dns-state/fresh-prod-new"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" EXISTING_DEST=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/existing.out" 2>&1
+      ${pkgs.gnugrep}/bin/grep -Fq 'existing environment on new-node' "$TMPDIR/existing.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # If DNS explicitly identifies a provider node that has been removed from
+      # inventory, do not silently reinterpret the deployment as fresh.
+      : > "$log"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_STRANDED=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "environment pointing at a removed provider node was treated as fresh"
+        exit 1
+      fi
+      test ! -s "$log"
+    )
+
+    echo ok > "$out"
+  '';
+
+
+  provider-cli-node-retirement-plan = pkgs.runCommand "provider-cli-node-retirement-plan" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+    set -euo pipefail
+
+    work="$TMPDIR/provider"
+    fakeBin="$TMPDIR/bin"
+    newPlan="$TMPDIR/new-plan.json"
+    newState="$TMPDIR/new-state.json"
+    newFlake="$TMPDIR/new-flake.nix"
+    mkdir -p "$work/generated" "$fakeBin"
+
+    cat > "$work/generated/plan.json" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "old-node": "active",
+        "new-node": "active"
+      },
+      "nodes": {
+        "old-node": {},
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "old-node": {
+          "hostname": "old-node.hosting.test",
+          "sshOpts": []
+        },
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "old-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$work/generated/state.json" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newPlan" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "new-node": "active"
+      },
+      "nodes": {
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "new-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$newState" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newFlake" <<'EOF'
+    { }
+    EOF
+
+    cat > "$fakeBin/nix" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    args=" $* "
+    case "$args" in
+      *" eval "*)
+        printf 'x86_64-linux\n'
+        ;;
+      *" build "*"planPaths.x86_64-linux.plan"*)
+        printf '%s\n' "$NEW_PLAN"
+        ;;
+      *" build "*"planPaths.x86_64-linux.state"*)
+        printf '%s\n' "$NEW_STATE"
+        ;;
+      *" build "*"planPaths.x86_64-linux.flake"*)
+        printf '%s\n' "$NEW_FLAKE"
+        ;;
+      *" flake update "*)
+        exit 0
+        ;;
+      *)
+        echo "unexpected nix invocation: $*" >&2
+        exit 2
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/nix"
+
+    cat > "$fakeBin/git" <<'EOF'
+    #!${pkgs.runtimeShell}
+    exit 0
+    EOF
+    chmod +x "$fakeBin/git"
+
+    cat > "$fakeBin/ssh" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    script="$(cat)"
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      if [ "''${ORPHAN_RUNTIME:-0}" = 1 ]; then
+        printf 'acme-prod\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
+      if [ "''${NODE_EMPTY:-0}" != 1 ]; then
+        printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/hostenv/provider/migration-handoffs"; then
+      if [ "''${HANDOFF_PENDING:-0}" = 1 ]; then
+        printf '2000\tquiesced old-node\n'
+      fi
+      exit 0
+    fi
+
+    exit 0
+    EOF
+    chmod +x "$fakeBin/ssh"
+
+    cat > "$fakeBin/dig" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    if [ "''${DNS_FAIL:-0}" = 1 ]; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
+    if [ "''${DNS_RETIRED:-0}" = 1 ] \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME' \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'retired.hosting.test'; then
+      printf 'retired.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    elif [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME'; then
+      printf 'acme-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    fi
+    EOF
+    chmod +x "$fakeBin/dig"
+
+    (
+      cd "$work"
+
+      # The previous plan is useful evidence when it exists: an environment
+      # cannot jump away from a node that disappears in the same plan.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "node disappeared while its previous environment assignment still referenced it"
+        exit 1
+      fi
+
+      # A proper drain first moves the environment while keeping the source
+      # node in inventory as retiring.
+      ${pkgs.jq}/bin/jq \
+        '.nodeStatus["old-node"] = "retiring" | .environments["acme-prod"].node = "new-node"' \
+        generated/plan.json > "$TMPDIR/retiring-plan.json"
+      mv "$TMPDIR/retiring-plan.json" generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with a live Hostenv account was removed"
+        exit 1
+      fi
+
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 ORPHAN_RUNTIME=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with orphan Hostenv runtime was removed"
+        exit 1
+      fi
+
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # Reservations for environments already absent from the previous plan
+      # still participate in DNS safety.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_RETIRED=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "reserved retired environment DNS did not block node removal"
+        exit 1
+      fi
+
+      # plan.json is disposable. Without historical plan data, live DNS is
+      # the safety tripwire: a CNAME to the removed node blocks publication.
+      rm generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "missing previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS may already have moved before source-system finalization. In that
+      # window the provider-owned handoff is the durable tripwire preventing
+      # the source node from disappearing from inventory.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PENDING=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "pending migration handoff did not block source-node removal"
+        exit 1
+      fi
+
+      # A malformed generated plan has the same semantics: skip historical
+      # comparison, but still fail closed while DNS identifies the old node.
+      printf 'deliberately not JSON\n' > generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "malformed previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS is checked before the candidate plan is published. If live Hostenv
+      # DNS still identifies a node outside proposed inventory, the old file
+      # remains untouched so the failure is repeatable.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite Hostenv DNS pointing at a removed node"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # A DNS transport/server failure is not equivalent to "no removed-node
+      # CNAME". The safety check must fail closed and leave the old plan intact.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite an indeterminate DNS lookup"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # Once the safety checks pass, a non-dry plan atomically replaces the
+      # generated plan. No same-directory candidate should remain.
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan
+
+      ${pkgs.jq}/bin/jq -S . generated/plan.json > "$TMPDIR/published.json"
+      ${pkgs.jq}/bin/jq -S . "$newPlan" > "$TMPDIR/expected.json"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/expected.json" "$TMPDIR/published.json"
+      test -z "$(find generated -maxdepth 1 -name '.plan.json.tmp-*' -print -quit)"
+    )
+
+    echo ok > "$out"
+  '';
+
+  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
+    echo ok > "$out"
+  '';
+  provider-cli-migration-handoff = pkgs.runCommand "provider-cli-migration-handoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestMigrationHandoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDeployVerification.hs
+    echo ok > "$out"
+  '';
+}
+ "$digLog")" -eq 2
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # Existing environment on the same node follows the same staging/DNS/final
+      # TLS flow, but is classified from the live username+UID observation.
+      : > "$log"
+      rm -f "$TMPDIR/dns-state/fresh-prod-new"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" EXISTING_DEST=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/existing.out" 2>&1
+      ${pkgs.gnugrep}/bin/grep -Fq 'existing environment on new-node' "$TMPDIR/existing.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # If DNS explicitly identifies a provider node that has been removed from
+      # inventory, do not silently reinterpret the deployment as fresh.
+      : > "$log"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_STRANDED=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "environment pointing at a removed provider node was treated as fresh"
+        exit 1
+      fi
+      test ! -s "$log"
+    )
+
+    echo ok > "$out"
+  '';
+
+
+  provider-cli-node-retirement-plan = pkgs.runCommand "provider-cli-node-retirement-plan" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+    set -euo pipefail
+
+    work="$TMPDIR/provider"
+    fakeBin="$TMPDIR/bin"
+    newPlan="$TMPDIR/new-plan.json"
+    newState="$TMPDIR/new-state.json"
+    newFlake="$TMPDIR/new-flake.nix"
+    mkdir -p "$work/generated" "$fakeBin"
+
+    cat > "$work/generated/plan.json" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "old-node": "active",
+        "new-node": "active"
+      },
+      "nodes": {
+        "old-node": {},
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "old-node": {
+          "hostname": "old-node.hosting.test",
+          "sshOpts": []
+        },
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "old-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$work/generated/state.json" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newPlan" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "new-node": "active"
+      },
+      "nodes": {
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "new-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$newState" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newFlake" <<'EOF'
+    { }
+    EOF
+
+    cat > "$fakeBin/nix" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    args=" $* "
+    case "$args" in
+      *" eval "*)
+        printf 'x86_64-linux\n'
+        ;;
+      *" build "*"planPaths.x86_64-linux.plan"*)
+        printf '%s\n' "$NEW_PLAN"
+        ;;
+      *" build "*"planPaths.x86_64-linux.state"*)
+        printf '%s\n' "$NEW_STATE"
+        ;;
+      *" build "*"planPaths.x86_64-linux.flake"*)
+        printf '%s\n' "$NEW_FLAKE"
+        ;;
+      *" flake update "*)
+        exit 0
+        ;;
+      *)
+        echo "unexpected nix invocation: $*" >&2
+        exit 2
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/nix"
+
+    cat > "$fakeBin/git" <<'EOF'
+    #!${pkgs.runtimeShell}
+    exit 0
+    EOF
+    chmod +x "$fakeBin/git"
+
+    cat > "$fakeBin/ssh" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    script="$(cat)"
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      if [ "''${ORPHAN_RUNTIME:-0}" = 1 ]; then
+        printf 'acme-prod\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
+      if [ "''${NODE_EMPTY:-0}" != 1 ]; then
+        printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/hostenv/provider/migration-handoffs"; then
+      if [ "''${HANDOFF_PENDING:-0}" = 1 ]; then
+        printf '2000\tquiesced old-node\n'
+      fi
+      exit 0
+    fi
+
+    exit 0
+    EOF
+    chmod +x "$fakeBin/ssh"
+
+    cat > "$fakeBin/dig" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    if [ "''${DNS_FAIL:-0}" = 1 ]; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
+    if [ "''${DNS_RETIRED:-0}" = 1 ] \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME' \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'retired.hosting.test'; then
+      printf 'retired.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    elif [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME'; then
+      printf 'acme-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    fi
+    EOF
+    chmod +x "$fakeBin/dig"
+
+    (
+      cd "$work"
+
+      # The previous plan is useful evidence when it exists: an environment
+      # cannot jump away from a node that disappears in the same plan.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "node disappeared while its previous environment assignment still referenced it"
+        exit 1
+      fi
+
+      # A proper drain first moves the environment while keeping the source
+      # node in inventory as retiring.
+      ${pkgs.jq}/bin/jq \
+        '.nodeStatus["old-node"] = "retiring" | .environments["acme-prod"].node = "new-node"' \
+        generated/plan.json > "$TMPDIR/retiring-plan.json"
+      mv "$TMPDIR/retiring-plan.json" generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with a live Hostenv account was removed"
+        exit 1
+      fi
+
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 ORPHAN_RUNTIME=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with orphan Hostenv runtime was removed"
+        exit 1
+      fi
+
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # Reservations for environments already absent from the previous plan
+      # still participate in DNS safety.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_RETIRED=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "reserved retired environment DNS did not block node removal"
+        exit 1
+      fi
+
+      # plan.json is disposable. Without historical plan data, live DNS is
+      # the safety tripwire: a CNAME to the removed node blocks publication.
+      rm generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "missing previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS may already have moved before source-system finalization. In that
+      # window the provider-owned handoff is the durable tripwire preventing
+      # the source node from disappearing from inventory.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PENDING=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "pending migration handoff did not block source-node removal"
+        exit 1
+      fi
+
+      # A malformed generated plan has the same semantics: skip historical
+      # comparison, but still fail closed while DNS identifies the old node.
+      printf 'deliberately not JSON\n' > generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "malformed previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS is checked before the candidate plan is published. If live Hostenv
+      # DNS still identifies a node outside proposed inventory, the old file
+      # remains untouched so the failure is repeatable.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite Hostenv DNS pointing at a removed node"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # A DNS transport/server failure is not equivalent to "no removed-node
+      # CNAME". The safety check must fail closed and leave the old plan intact.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite an indeterminate DNS lookup"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # Once the safety checks pass, a non-dry plan atomically replaces the
+      # generated plan. No same-directory candidate should remain.
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan
+
+      ${pkgs.jq}/bin/jq -S . generated/plan.json > "$TMPDIR/published.json"
+      ${pkgs.jq}/bin/jq -S . "$newPlan" > "$TMPDIR/expected.json"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/expected.json" "$TMPDIR/published.json"
+      test -z "$(find generated -maxdepth 1 -name '.plan.json.tmp-*' -print -quit)"
+    )
+
+    echo ok > "$out"
+  '';
+
+  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
+    echo ok > "$out"
+  '';
+  provider-cli-migration-handoff = pkgs.runCommand "provider-cli-migration-handoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestMigrationHandoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDeployVerification.hs
+    echo ok > "$out"
+  '';
+}
+ "$digLog")" -eq 2
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # If DNS explicitly identifies a provider node that has been removed from
+      # inventory, do not silently reinterpret the deployment as fresh.
+      : > "$log"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_STRANDED=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "environment pointing at a removed provider node was treated as fresh"
+        exit 1
+      fi
+      test ! -s "$log"
+    )
+
+    echo ok > "$out"
+  '';
+
+
+  provider-cli-node-retirement-plan = pkgs.runCommand "provider-cli-node-retirement-plan" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+    set -euo pipefail
+
+    work="$TMPDIR/provider"
+    fakeBin="$TMPDIR/bin"
+    newPlan="$TMPDIR/new-plan.json"
+    newState="$TMPDIR/new-state.json"
+    newFlake="$TMPDIR/new-flake.nix"
+    mkdir -p "$work/generated" "$fakeBin"
+
+    cat > "$work/generated/plan.json" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "old-node": "active",
+        "new-node": "active"
+      },
+      "nodes": {
+        "old-node": {},
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "old-node": {
+          "hostname": "old-node.hosting.test",
+          "sshOpts": []
+        },
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "old-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$work/generated/state.json" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newPlan" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "new-node": "active"
+      },
+      "nodes": {
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "new-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$newState" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newFlake" <<'EOF'
+    { }
+    EOF
+
+    cat > "$fakeBin/nix" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    args=" $* "
+    case "$args" in
+      *" eval "*)
+        printf 'x86_64-linux\n'
+        ;;
+      *" build "*"planPaths.x86_64-linux.plan"*)
+        printf '%s\n' "$NEW_PLAN"
+        ;;
+      *" build "*"planPaths.x86_64-linux.state"*)
+        printf '%s\n' "$NEW_STATE"
+        ;;
+      *" build "*"planPaths.x86_64-linux.flake"*)
+        printf '%s\n' "$NEW_FLAKE"
+        ;;
+      *" flake update "*)
+        exit 0
+        ;;
+      *)
+        echo "unexpected nix invocation: $*" >&2
+        exit 2
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/nix"
+
+    cat > "$fakeBin/git" <<'EOF'
+    #!${pkgs.runtimeShell}
+    exit 0
+    EOF
+    chmod +x "$fakeBin/git"
+
+    cat > "$fakeBin/ssh" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    script="$(cat)"
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      if [ "''${ORPHAN_RUNTIME:-0}" = 1 ]; then
+        printf 'acme-prod\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
+      if [ "''${NODE_EMPTY:-0}" != 1 ]; then
+        printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/hostenv/provider/migration-handoffs"; then
+      if [ "''${HANDOFF_PENDING:-0}" = 1 ]; then
+        printf '2000\tquiesced old-node\n'
+      fi
+      exit 0
+    fi
+
+    exit 0
+    EOF
+    chmod +x "$fakeBin/ssh"
+
+    cat > "$fakeBin/dig" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    if [ "''${DNS_FAIL:-0}" = 1 ]; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
+    if [ "''${DNS_RETIRED:-0}" = 1 ] \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME' \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'retired.hosting.test'; then
+      printf 'retired.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    elif [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME'; then
+      printf 'acme-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    fi
+    EOF
+    chmod +x "$fakeBin/dig"
+
+    (
+      cd "$work"
+
+      # The previous plan is useful evidence when it exists: an environment
+      # cannot jump away from a node that disappears in the same plan.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "node disappeared while its previous environment assignment still referenced it"
+        exit 1
+      fi
+
+      # A proper drain first moves the environment while keeping the source
+      # node in inventory as retiring.
+      ${pkgs.jq}/bin/jq \
+        '.nodeStatus["old-node"] = "retiring" | .environments["acme-prod"].node = "new-node"' \
+        generated/plan.json > "$TMPDIR/retiring-plan.json"
+      mv "$TMPDIR/retiring-plan.json" generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with a live Hostenv account was removed"
+        exit 1
+      fi
+
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 ORPHAN_RUNTIME=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with orphan Hostenv runtime was removed"
+        exit 1
+      fi
+
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # Reservations for environments already absent from the previous plan
+      # still participate in DNS safety.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_RETIRED=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "reserved retired environment DNS did not block node removal"
+        exit 1
+      fi
+
+      # plan.json is disposable. Without historical plan data, live DNS is
+      # the safety tripwire: a CNAME to the removed node blocks publication.
+      rm generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "missing previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS may already have moved before source-system finalization. In that
+      # window the provider-owned handoff is the durable tripwire preventing
+      # the source node from disappearing from inventory.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PENDING=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "pending migration handoff did not block source-node removal"
+        exit 1
+      fi
+
+      # A malformed generated plan has the same semantics: skip historical
+      # comparison, but still fail closed while DNS identifies the old node.
+      printf 'deliberately not JSON\n' > generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "malformed previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS is checked before the candidate plan is published. If live Hostenv
+      # DNS still identifies a node outside proposed inventory, the old file
+      # remains untouched so the failure is repeatable.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite Hostenv DNS pointing at a removed node"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # A DNS transport/server failure is not equivalent to "no removed-node
+      # CNAME". The safety check must fail closed and leave the old plan intact.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite an indeterminate DNS lookup"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # Once the safety checks pass, a non-dry plan atomically replaces the
+      # generated plan. No same-directory candidate should remain.
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan
+
+      ${pkgs.jq}/bin/jq -S . generated/plan.json > "$TMPDIR/published.json"
+      ${pkgs.jq}/bin/jq -S . "$newPlan" > "$TMPDIR/expected.json"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/expected.json" "$TMPDIR/published.json"
+      test -z "$(find generated -maxdepth 1 -name '.plan.json.tmp-*' -print -quit)"
+    )
+
+    echo ok > "$out"
+  '';
+
+  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
+    echo ok > "$out"
+  '';
+  provider-cli-migration-handoff = pkgs.runCommand "provider-cli-migration-handoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestMigrationHandoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDeployVerification.hs
+    echo ok > "$out"
+  '';
+}
+ "$digLog")" -eq 2
+      test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test AAAA
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # Existing environment on the same node follows the same staging/DNS/final
+      # TLS flow, but is classified from the live username+UID observation.
+      : > "$log"
+      rm -f "$TMPDIR/dns-state/fresh-prod-new"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" EXISTING_DEST=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/existing.out" 2>&1
+      ${pkgs.gnugrep}/bin/grep -Fq 'existing environment on new-node' "$TMPDIR/existing.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
+      # If DNS explicitly identifies a provider node that has been removed from
+      # inventory, do not silently reinterpret the deployment as fresh.
+      : > "$log"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_STRANDED=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "environment pointing at a removed provider node was treated as fresh"
+        exit 1
+      fi
+      test ! -s "$log"
+    )
+
+    echo ok > "$out"
+  '';
+
+
+  provider-cli-node-retirement-plan = pkgs.runCommand "provider-cli-node-retirement-plan" { nativeBuildInputs = providerCliPackage.runtimeInputs; } ''
+    set -euo pipefail
+
+    work="$TMPDIR/provider"
+    fakeBin="$TMPDIR/bin"
+    newPlan="$TMPDIR/new-plan.json"
+    newState="$TMPDIR/new-state.json"
+    newFlake="$TMPDIR/new-flake.nix"
+    mkdir -p "$work/generated" "$fakeBin"
+
+    cat > "$work/generated/plan.json" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "old-node": "active",
+        "new-node": "active"
+      },
+      "nodes": {
+        "old-node": {},
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "old-node": {
+          "hostname": "old-node.hosting.test",
+          "sshOpts": []
+        },
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "old-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$work/generated/state.json" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newPlan" <<'EOF'
+    {
+      "hostenvHostname": "hosting.test",
+      "deployUser": "deploy",
+      "nodeStatus": {
+        "new-node": "active"
+      },
+      "nodes": {
+        "new-node": {}
+      },
+      "nodeConnections": {
+        "new-node": {
+          "hostname": "new-node.hosting.test",
+          "sshOpts": []
+        }
+      },
+      "environments": {
+        "acme-prod": {
+          "uid": 2000,
+          "node": "new-node",
+          "hostenv": {
+            "userName": "acme-prod",
+            "hostname": "acme-prod.hosting.test"
+          }
+        }
+      }
+    }
+    EOF
+
+    cat > "$newState" <<'EOF'
+    {
+      "acme-prod": {
+        "userName": "acme-prod",
+        "uid": 2000,
+        "virtualHosts": []
+      },
+      "retired": {
+        "userName": "retired",
+        "uid": 2002,
+        "virtualHosts": []
+      }
+    }
+    EOF
+
+    cat > "$newFlake" <<'EOF'
+    { }
+    EOF
+
+    cat > "$fakeBin/nix" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    args=" $* "
+    case "$args" in
+      *" eval "*)
+        printf 'x86_64-linux\n'
+        ;;
+      *" build "*"planPaths.x86_64-linux.plan"*)
+        printf '%s\n' "$NEW_PLAN"
+        ;;
+      *" build "*"planPaths.x86_64-linux.state"*)
+        printf '%s\n' "$NEW_STATE"
+        ;;
+      *" build "*"planPaths.x86_64-linux.flake"*)
+        printf '%s\n' "$NEW_FLAKE"
+        ;;
+      *" flake update "*)
+        exit 0
+        ;;
+      *)
+        echo "unexpected nix invocation: $*" >&2
+        exit 2
+        ;;
+    esac
+    EOF
+    chmod +x "$fakeBin/nix"
+
+    cat > "$fakeBin/git" <<'EOF'
+    #!${pkgs.runtimeShell}
+    exit 0
+    EOF
+    chmod +x "$fakeBin/git"
+
+    cat > "$fakeBin/ssh" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    script="$(cat)"
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "# HOSTENV_RUNTIME_PROBE"; then
+      if [ "''${ORPHAN_RUNTIME:-0}" = 1 ]; then
+        printf 'acme-prod\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
+      if [ "''${NODE_EMPTY:-0}" != 1 ]; then
+        printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
+      fi
+      exit 0
+    fi
+
+    if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/hostenv/provider/migration-handoffs"; then
+      if [ "''${HANDOFF_PENDING:-0}" = 1 ]; then
+        printf '2000\tquiesced old-node\n'
+      fi
+      exit 0
+    fi
+
+    exit 0
+    EOF
+    chmod +x "$fakeBin/ssh"
+
+    cat > "$fakeBin/dig" <<'EOF'
+    #!${pkgs.runtimeShell}
+    set -euo pipefail
+    if [ "''${DNS_FAIL:-0}" = 1 ]; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
+    if [ "''${DNS_RETIRED:-0}" = 1 ] \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME' \
+      && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'retired.hosting.test'; then
+      printf 'retired.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    elif [ "''${DNS_OLD:-0}" = 1 ] && printf '%s\n' "$*" | ${pkgs.gnugrep}/bin/grep -Fq 'CNAME'; then
+      printf 'acme-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
+    fi
+    EOF
+    chmod +x "$fakeBin/dig"
+
+    (
+      cd "$work"
+
+      # The previous plan is useful evidence when it exists: an environment
+      # cannot jump away from a node that disappears in the same plan.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "node disappeared while its previous environment assignment still referenced it"
+        exit 1
+      fi
+
+      # A proper drain first moves the environment while keeping the source
+      # node in inventory as retiring.
+      ${pkgs.jq}/bin/jq \
+        '.nodeStatus["old-node"] = "retiring" | .environments["acme-prod"].node = "new-node"' \
+        generated/plan.json > "$TMPDIR/retiring-plan.json"
+      mv "$TMPDIR/retiring-plan.json" generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with a live Hostenv account was removed"
+        exit 1
+      fi
+
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 ORPHAN_RUNTIME=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "retiring node with orphan Hostenv runtime was removed"
+        exit 1
+      fi
+
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # Reservations for environments already absent from the previous plan
+      # still participate in DNS safety.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_RETIRED=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "reserved retired environment DNS did not block node removal"
+        exit 1
+      fi
+
+      # plan.json is disposable. Without historical plan data, live DNS is
+      # the safety tripwire: a CNAME to the removed node blocks publication.
+      rm generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "missing previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS may already have moved before source-system finalization. In that
+      # window the provider-owned handoff is the durable tripwire preventing
+      # the source node from disappearing from inventory.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PENDING=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "pending migration handoff did not block source-node removal"
+        exit 1
+      fi
+
+      # A malformed generated plan has the same semantics: skip historical
+      # comparison, but still fail closed while DNS identifies the old node.
+      printf 'deliberately not JSON\n' > generated/plan.json
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "malformed previous plan ignored DNS pointing at the removed node"
+        exit 1
+      fi
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
+      # DNS is checked before the candidate plan is published. If live Hostenv
+      # DNS still identifies a node outside proposed inventory, the old file
+      # remains untouched so the failure is repeatable.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_OLD=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite Hostenv DNS pointing at a removed node"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # A DNS transport/server failure is not equivalent to "no removed-node
+      # CNAME". The safety check must fail closed and leave the old plan intact.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider plan; then
+        echo "plan published despite an indeterminate DNS lookup"
+        exit 1
+      fi
+      grep -Fxq 'deliberately not JSON' generated/plan.json
+
+      # Once the safety checks pass, a non-dry plan atomically replaces the
+      # generated plan. No same-directory candidate should remain.
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
+        ${cliPkg}/bin/hostenv-provider plan
+
+      ${pkgs.jq}/bin/jq -S . generated/plan.json > "$TMPDIR/published.json"
+      ${pkgs.jq}/bin/jq -S . "$newPlan" > "$TMPDIR/expected.json"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/expected.json" "$TMPDIR/published.json"
+      test -z "$(find generated -maxdepth 1 -name '.plan.json.tmp-*' -print -quit)"
+    )
+
+    echo ok > "$out"
+  '';
+
+  provider-cli-dns-backoff = pkgs.runCommand "provider-cli-dns-backoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDnsBackoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-environment-state = pkgs.runCommand "provider-cli-environment-state" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestEnvironmentState.hs
+    echo ok > "$out"
+  '';
+  provider-cli-migration-handoff = pkgs.runCommand "provider-cli-migration-handoff" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestMigrationHandoff.hs
+    echo ok > "$out"
+  '';
+  provider-cli-deploy-verification = pkgs.runCommand "provider-cli-deploy-verification" { } ''
+    set -euo pipefail
+    ${ghc}/bin/runghc -i${src} ${src}/TestDeployVerification.hs
+    echo ok > "$out"
+  '';
+}
+ "$digLog")" -eq 2
       ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq 'generated/.#"new-node"."system"' "$log"
       ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
