@@ -83,7 +83,7 @@ reservations between deployments.
 which may be committed to git or deleted, depending on your auditing needs.
 
 `generated/flake.nix` tracks every project environment as a separate input,
-as opposed to `flake.nix` with one input per-project. 
+as opposed to `flake.nix` with one input per-project.
 
 ## 6. Deploy
 
