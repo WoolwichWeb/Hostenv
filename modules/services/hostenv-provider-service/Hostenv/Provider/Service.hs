@@ -657,7 +657,7 @@ runWebhookWith runner loadPlan cfg ref = do
                   pure
                     ( Left
                         ( WebhookPlanError
-                            "automatic webhook deployment cannot safely run a cross-node migration yet; run \`nix run .#hostenv-provider -- deploy\` from the provider repository to complete the migration"
+                            "automatic webhook deployment cannot safely run a cross-node migration yet; run `nix run .#hostenv-provider -- deploy` from the provider repository to complete the migration"
                         )
                     )
                 else do
