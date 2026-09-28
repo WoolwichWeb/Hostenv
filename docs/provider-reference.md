@@ -65,12 +65,15 @@ also causes Hostenv to contact it using the previous connection details and
 verify that no reserved Hostenv account or runtime state remains.
 
 The previous plan is not persistent state. If it is missing or malformed,
-Hostenv skips the historical comparison and uses live Hostenv-controlled DNS as
-the durable node-removal tripwire. Before publishing the proposed plan, a CNAME
-that identifies a node outside `provider.nodeSystems` aborts planning. If DNS
-cannot be queried reliably (for example SERVFAIL, resolver failure, or `dig`
-execution failure), planning also stops rather than treating the lookup as
-evidence that no old node exists.
+Hostenv cannot tell whether the provider inventory shrank, so it performs
+best-effort safety checks using the Hostenv hostnames still present in the
+proposed plan and any pending migration handoffs. A CNAME that identifies a
+node outside `provider.nodeSystems` aborts planning. If DNS cannot be queried
+reliably (for example SERVFAIL, resolver failure, or `dig` execution failure),
+planning also stops rather than treating the lookup as evidence that no old
+node exists. Old reservations that exist only in `state.json` are not queried;
+they reserve identities and hostnames but do not prove that an environment was
+ever deployed.
 
 A UID reservation in `state.json` does **not** mean an environment has
 already been deployed; planning a brand-new environment creates its reservation
@@ -212,30 +215,32 @@ in each node's own `nodes/<node>/configuration.nix`.
 
 ## State
 
-Keep `generated/state.json` in version control. Hostenv deliberately keeps
-this state small: stable environment UIDs and hostname reservations. Environment
-placement and provider-node history are not stored there; deployment observes
-Hostenv users on the provider nodes when deciding migrations and cleanup, and
-does not modify `state.json`.
+Keep `generated/state.json` in version control. Hostenv limits this state to
+durable environment identity and hostname reservations. Retired environments
+remain there so their UIDs, GIDs, and hostnames are not reused automatically.
+Environment placement and provider-node history are not stored there;
+deployment observes Hostenv users on the provider nodes when deciding migrations
+and cleanup, and does not modify `state.json`.
 
 `generated/plan.json` is disposable generated output. If an existing copy is
-valid, `hostenv-provider plan` additionally compares its node/environment
-assignments with the proposed plan. If it is absent or malformed, Hostenv skips
-that historical comparison and still performs the live DNS safety check before
-publishing the replacement plan.
+valid, `hostenv-provider plan` compares its node/environment assignments with
+the proposed plan. Ordinary replanning with unchanged provider-node inventory
+does not require DNS or migration-handoff safety probes.
 
-Before publishing a proposed plan, Hostenv also checks Hostenv-controlled DNS.
-If an environment hostname still CNAMEs to a provider-looking node that is
-missing from the proposed `provider.nodeSystems`, planning stops before
-deployment can update that DNS record. DNS lookup failure is also fatal for
-this safety check; it is not treated as an empty answer.
+When a valid previous plan shows that a provider node is being removed, Hostenv
+checks the old node directly, checks pending migration handoffs on the remaining
+nodes, and checks the current/previous plan hostnames for CNAMEs that still
+identify nodes outside the proposed inventory. If the previous plan is missing
+or malformed, Hostenv cannot know whether inventory shrank, so it runs the
+handoff and DNS checks as a conservative fallback using only hostnames in the
+proposed plan. A DNS lookup failure is fatal when one of these safety checks is
+required; it is not treated as an empty answer.
 
 DNS can legitimately move before old-account removal finishes during a
-migration. If generated plan history is unavailable in that window, pending
-root-owned migration handoffs provide the second live tripwire: planning
-refuses to forget any source node still named by a handoff. The handoff is
-cleared only after the source-system deployment that removes the old account
-succeeds.
+migration. Pending root-owned migration handoffs therefore also prevent a
+source node from being removed even when valid previous-plan history is
+available. The handoff is cleared only after the source-system deployment that
+removes the old account succeeds.
 
 A successful plan is published with a same-directory atomic rename, so
 interruption cannot leave a partially written `generated/plan.json`.
