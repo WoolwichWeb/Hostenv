@@ -2781,39 +2781,37 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                 Sh.exitWith (ExitFailure 1)
 
             -- A handoff can survive a crash after the source system has already
-            -- removed the old account. If the recorded source is still in
-            -- inventory and has no matching account or runtime left, the move
-            -- is complete and the stale marker can be removed.
-            forM_ lifecycleEnvInfos $ \envInfo -> do
-                existingHandoff <-
-                    readMigrationHandoff
-                        deployUser
-                        resolveNodeConnection
-                        envInfo
-                forM_ existingHandoff $ \handoff -> do
-                    let sourceNode = MigrationHandoff.handoffSourceNode handoff
-                    when (sourceNode `elem` observationNodes) $ do
-                        let sourceAccountPresent =
-                                (M.lookup sourceNode observedNodeUsers >>= M.lookup envInfo.userName)
-                                    == Just envInfo.uid
-                        let sourceRuntimePresent =
-                                S.member
-                                    envInfo.userName
-                                    (M.findWithDefault S.empty sourceNode observedNodeRuntimeUsers)
-                        when (not sourceAccountPresent && not sourceRuntimePresent) $ do
-                            printProviderLine
-                                ( "hostenv-provider: clearing completed migration handoff for "
-                                    <> envInfo.userName
-                                    <> " from "
-                                    <> sourceNode
-                                    <> "; the source has no remaining Hostenv account or runtime"
-                                )
-                            clearMigrationHandoffOnNode
+            -- removed the old account. Remember markers whose source is still
+            -- part of this deployment and has no account or runtime left. The
+            -- marker is cleared only after that source system deploy succeeds,
+            -- so a failed reconciliation remains recoverable.
+            completedMigrationHandoffs <-
+                fmap catMaybes $
+                    forM lifecycleEnvInfos $ \envInfo -> do
+                        existingHandoff <-
+                            readMigrationHandoff
                                 deployUser
                                 resolveNodeConnection
-                                envInfo.userName
-                                envInfo.uid
-                                envInfo.node
+                                envInfo
+                        pure $
+                            case existingHandoff of
+                                Nothing -> Nothing
+                                Just handoff ->
+                                    let sourceNode = MigrationHandoff.handoffSourceNode handoff
+                                        sourceAccountPresent =
+                                            (M.lookup sourceNode observedNodeUsers >>= M.lookup envInfo.userName)
+                                                == Just envInfo.uid
+                                        sourceRuntimePresent =
+                                            S.member
+                                                envInfo.userName
+                                                (M.findWithDefault S.empty sourceNode observedNodeRuntimeUsers)
+                                     in if
+                                            sourceNode `elem` inventoryNodes
+                                                && sourceNode `elem` targetNodes
+                                                && not sourceAccountPresent
+                                                && not sourceRuntimePresent
+                                            then Just (sourceNode, envInfo)
+                                            else Nothing
 
             let skippedEnvInfos =
                     filter (\envInfo -> envInfo.userName `elem` skipHits) envInfosFiltered
@@ -3462,11 +3460,22 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                             case result of
                                                                                 Left err -> pure (Just (userName <> ": " <> err))
                                                                                 Right () -> do
-                                                                                    httpsResult <- waitForTrustedHttps envInfo
-                                                                                    pure $
-                                                                                        case httpsResult of
-                                                                                            Right () -> Nothing
-                                                                                            Left err -> Just (userName <> ": " <> err)
+                                                                                    (_, pendingDns) <- waitForCnamePropagation deployDnsCache allItems
+                                                                                    if not (null pendingDns)
+                                                                                        then
+                                                                                            pure
+                                                                                                ( Just
+                                                                                                    ( userName
+                                                                                                        <> ": DNS has not converged on every authoritative nameserver for "
+                                                                                                        <> T.intercalate ", " (map (.diDiscoveryHost) pendingDns)
+                                                                                                    )
+                                                                                                )
+                                                                                        else do
+                                                                                            httpsResult <- waitForTrustedHttps envInfo
+                                                                                            pure $
+                                                                                                case httpsResult of
+                                                                                                    Right () -> Nothing
+                                                                                                    Left err -> Just (userName <> ": " <> err)
                                                         if not (null dnsFailures)
                                                             then do
                                                                 forM_ dnsFailures $ \err ->
@@ -3485,9 +3494,27 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                 systemCode <- deploySystemNode nodeName
                                                                 when (systemCode /= ExitSuccess && not (null cleanedUsers)) $
                                                                     rollbackRetiredCleanedUsers nodeName cleanedUsers
-                                                                when (systemCode == ExitSuccess) $
+                                                                when (systemCode == ExitSuccess) $ do
                                                                     forM_ movedCleanedUsers $ \userName ->
                                                                         forM_ (M.lookup userName envInfoByUser) $ \envInfo ->
+                                                                            clearMigrationHandoffOnNode
+                                                                                deployUser
+                                                                                resolveNodeConnection
+                                                                                envInfo.userName
+                                                                                envInfo.uid
+                                                                                envInfo.node
+                                                                    forM_
+                                                                        [ envInfo
+                                                                        | (sourceNode, envInfo) <- completedMigrationHandoffs
+                                                                        , sourceNode == nodeName
+                                                                        ]
+                                                                        $ \envInfo -> do
+                                                                            printProviderLine
+                                                                                ( "hostenv-provider: clearing completed migration handoff for "
+                                                                                    <> envInfo.userName
+                                                                                    <> " after reconciling source node "
+                                                                                    <> nodeName
+                                                                                )
                                                                             clearMigrationHandoffOnNode
                                                                                 deployUser
                                                                                 resolveNodeConnection
