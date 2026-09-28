@@ -5,7 +5,7 @@
 
 module Hostenv.Provider.DnsTransition
     ( DnsItem (..)
-    , authoritativeCnameConverged
+    , authoritativeDnsTargetConverged
     , collectDnsItems
     ) where
 
@@ -27,14 +27,26 @@ data DnsItem = DnsItem
     }
     deriving (Eq, Show)
 
-authoritativeCnameConverged :: Text -> [Either Text [Text]] -> Bool
-authoritativeCnameConverged expectedHost answersByNameserver =
+authoritativeDnsTargetConverged ::
+    Text ->
+    [Text] ->
+    [Either Text ([Text], [Text])] ->
+    Bool
+authoritativeDnsTargetConverged expectedHost expectedAddresses answersByNameserver =
     not (null answersByNameserver) && all matchesExpected answersByNameserver
   where
-    expected = normalizeDnsName expectedHost
+    expectedHostName = normalizeDnsName expectedHost
+    expectedAddressSet = S.fromList (map normalizeDnsName expectedAddresses)
     matchesExpected (Left _) = False
-    matchesExpected (Right answers) =
-        S.fromList (map normalizeDnsName answers) == S.singleton expected
+    matchesExpected (Right (cnames, addresses))
+        | not (S.null cnameSet) =
+            cnameSet == S.singleton expectedHostName
+        | otherwise =
+            not (S.null addressSet)
+                && addressSet `S.isSubsetOf` expectedAddressSet
+      where
+        cnameSet = S.fromList (map normalizeDnsName cnames)
+        addressSet = S.fromList (map normalizeDnsName addresses)
 
 normalizeDnsName :: Text -> Text
 normalizeDnsName =

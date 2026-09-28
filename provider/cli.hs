@@ -355,18 +355,34 @@ digRRWith cache name rr = do
                 then digRRRaw Nothing name rr
                 else pure (S.toList (S.fromList (concat nonEmptyAnswers)))
 
-cnamePropagatedToAllAuthoritative :: DnsLookupCache -> Text -> Text -> IO Bool
-cnamePropagatedToAllAuthoritative cache name expectedHost = do
+queryDnsTargetAt :: Maybe Text -> Text -> IO (Either Text ([Text], [Text]))
+queryDnsTargetAt mNameserver name = do
+    cnameResult <- digRRRawResult mNameserver name "CNAME"
+    case cnameResult of
+        Left err -> pure (Left err)
+        Right cnames
+            | not (null cnames) -> pure (Right (cnames, []))
+            | otherwise -> do
+                aResult <- digRRRawResult mNameserver name "A"
+                aaaaResult <- digRRRawResult mNameserver name "AAAA"
+                pure $
+                    case (aResult, aaaaResult) of
+                        (Right a4, Right a6) -> Right ([], a4 ++ a6)
+                        (Left err, _) -> Left err
+                        (_, Left err) -> Left err
+
+dnsPropagatedToAllAuthoritative :: DnsLookupCache -> Text -> Text -> IO Bool
+dnsPropagatedToAllAuthoritative cache name expectedHost = do
     authoritativeNameservers <- findAuthoritativeNameserversWith cache name
     answersByNameserver <-
         case authoritativeNameservers of
             [] -> do
-                fallback <- digRRRawResult Nothing name "CNAME"
+                fallback <- queryDnsTargetAt Nothing name
                 pure [fallback]
             nameservers -> do
                 queryResults <-
                     mapConcurrentlyIO
-                        (\nameserver -> digRRRawResult (Just nameserver) name "CNAME")
+                        (\nameserver -> queryDnsTargetAt (Just nameserver) name)
                         nameservers
                 pure $
                     map
@@ -376,7 +392,34 @@ cnamePropagatedToAllAuthoritative cache name expectedHost = do
                                 Right answers -> answers
                         )
                         queryResults
-    pure (DnsTransition.authoritativeCnameConverged expectedHost answersByNameserver)
+
+    let needsExpectedAddresses =
+            any
+                (\case
+                    Right (cnames, _) -> null cnames
+                    Left _ -> False
+                )
+                answersByNameserver
+    expectedAddressesResult <-
+        if needsExpectedAddresses
+            then do
+                aResult <- digRRRawResult Nothing expectedHost "A"
+                aaaaResult <- digRRRawResult Nothing expectedHost "AAAA"
+                pure $
+                    case (aResult, aaaaResult) of
+                        (Right a4, Right a6) -> Right (a4 ++ a6)
+                        (Left err, _) -> Left err
+                        (_, Left err) -> Left err
+            else pure (Right [])
+
+    pure $
+        case expectedAddressesResult of
+            Left _ -> False
+            Right expectedAddresses ->
+                DnsTransition.authoritativeDnsTargetConverged
+                    expectedHost
+                    expectedAddresses
+                    answersByNameserver
 
 digRRObserved ::
     DnsLookupCache ->
@@ -891,15 +934,15 @@ waitForDnsPropagationBy newPhaseCheck items = do
         (resolvedNow, unresolvedNow) <- partitionByDns unresolved
         go (resolved <> resolvedNow) unresolvedNow restDelays
 
-waitForCnamePropagation :: DnsLookupCache -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
-waitForCnamePropagation dnsCache =
+waitForAuthoritativeDnsPropagation :: DnsLookupCache -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
+waitForAuthoritativeDnsPropagation dnsCache =
     waitForDnsPropagationBy $ do
         phaseCache <- newIORef M.empty
         pure $ \item ->
             cachedLookup
                 phaseCache
                 (dnsKey item)
-                (cnamePropagatedToAllAuthoritative dnsCache item.diDiscoveryHost item.diExpectedHost)
+                (dnsPropagatedToAllAuthoritative dnsCache item.diDiscoveryHost item.diExpectedHost)
 
 loadPlanCloudflareContext ::
     Maybe Text ->
@@ -1038,7 +1081,7 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                                 ( "hostenv-provider: waiting for DNS propagation for "
                                     <> envInfo.userName
                                 )
-                            (_, timedOutItems) <- waitForCnamePropagation dnsCache updatedItems
+                            (_, timedOutItems) <- waitForAuthoritativeDnsPropagation dnsCache updatedItems
                             if null timedOutItems
                                 then pure (Right ())
                                 else
@@ -1631,11 +1674,10 @@ loadProviderState statePath = do
                 Right value -> pure value
 
 validatePlanDnsSafety ::
-    KM.KeyMap A.Value ->
     Maybe (KM.KeyMap A.Value) ->
     KM.KeyMap A.Value ->
     IO ()
-validatePlanDnsSafety state previousPlan newPlan = do
+validatePlanDnsSafety previousPlan newPlan = do
     let hostenvHostname =
             fromMaybe
                 (error "hostenv-provider: generated plan is missing hostenvHostname")
@@ -1686,6 +1728,53 @@ validatePlanDnsSafety state previousPlan newPlan = do
                 <> ". Restore the node to inventory, migrate/retire the environment, and run plan again before changing DNS."
             )
 
+validatePendingMigrationHandoffs ::
+    KM.KeyMap A.Value ->
+    [Text] ->
+    IO ()
+validatePendingMigrationHandoffs plan inventoryNodes = do
+    let hostenvHostname =
+            fromMaybe
+                (error "hostenv-provider: generated plan is missing hostenvHostname")
+                (lookupText (K.fromString "hostenvHostname") plan)
+    let deployUser = planDeployUser plan
+    let resolveConnection = nodeConnectionFor plan hostenvHostname
+    handoffResults <-
+        forM inventoryNodes $ \nodeName ->
+            readNodeMigrationHandoffs
+                deployUser
+                resolveConnection
+                nodeName
+    let handoffErrors = [err | Left err <- handoffResults]
+    unless (null handoffErrors) $
+        error
+            ( "hostenv-provider: refusing provider plan because pending migration handoffs could not be verified: "
+                <> T.unpack (T.intercalate "; " handoffErrors)
+            )
+    let pendingRemovedSources =
+            [ (destinationNode, uid, MigrationHandoff.handoffSourceNode handoff)
+            | (destinationNode, Right handoffs) <- zip inventoryNodes handoffResults
+            , (uid, handoff) <- handoffs
+            , MigrationHandoff.handoffSourceNode handoff `notElem` inventoryNodes
+            ]
+    unless (null pendingRemovedSources) $
+        error
+            ( "hostenv-provider: refusing provider plan because pending migration finalization still references node(s) missing from provider.nodeSystems: "
+                <> T.unpack
+                    ( T.intercalate
+                        ", "
+                        [ "uid "
+                            <> T.pack (show uid)
+                            <> " on "
+                            <> destinationNode
+                            <> " -> "
+                            <> sourceNode
+                        | (destinationNode, uid, sourceNode) <- pendingRemovedSources
+                        ]
+                    )
+                <> ". Keep each source node in inventory until deploy removes its old account and clears the handoff."
+            )
+
 validatePlanTransition :: Text -> Text -> BL.ByteString -> IO ()
 validatePlanTransition planPath statePath newPlanRaw = do
     newPlan <-
@@ -1715,6 +1804,11 @@ validatePlanTransition planPath statePath newPlanRaw = do
                     Right value -> pure (Just (value :: KM.KeyMap A.Value))
 
     let newNodes = planSystemTargetNodes newPlan Nothing
+    let removedNodes =
+            maybe
+                []
+                (\oldPlan -> planSystemTargetNodes oldPlan Nothing \\ newNodes)
+                previousPlan
     let validateRemovedNode nodeName status deployUser connection managedIdentityState = do
             unless (status == "retiring") $
                 error
@@ -1791,9 +1885,6 @@ validatePlanTransition planPath statePath newPlanRaw = do
 
     case previousPlan of
         Just oldPlan -> do
-            let removedNodes =
-                    planSystemTargetNodes oldPlan Nothing
-                        \\ newNodes
             let removedSet = S.fromList removedNodes
             let removedAssignments =
                     [ (envName, nodeName)
@@ -1831,53 +1922,15 @@ validatePlanTransition planPath statePath newPlanRaw = do
                         deployUser
                         (resolveOldConnection nodeName)
                         managedIdentityState
-        Nothing -> do
-            let hostenvHostname =
-                    fromMaybe
-                        (error "hostenv-provider: generated plan is missing hostenvHostname")
-                        (lookupText (K.fromString "hostenvHostname") newPlan)
-            let deployUser = planDeployUser newPlan
-            let resolveConnection = nodeConnectionFor newPlan hostenvHostname
-            handoffResults <-
-                forM newNodes $ \nodeName ->
-                    readNodeMigrationHandoffs
-                        deployUser
-                        resolveConnection
-                        nodeName
-            let handoffErrors = [err | Left err <- handoffResults]
-            unless (null handoffErrors) $
-                error
-                    ( "hostenv-provider: refusing provider plan because pending migration handoffs could not be verified: "
-                        <> T.unpack (T.intercalate "; " handoffErrors)
-                    )
-            let pendingRemovedSources =
-                    [ (destinationNode, uid, MigrationHandoff.handoffSourceNode handoff)
-                    | (destinationNode, Right handoffs) <- zip newNodes handoffResults
-                    , (uid, handoff) <- handoffs
-                    , MigrationHandoff.handoffSourceNode handoff `notElem` newNodes
-                    ]
-            unless (null pendingRemovedSources) $
-                error
-                    ( "hostenv-provider: refusing provider plan because pending migration finalization still references node(s) missing from provider.nodeSystems: "
-                        <> T.unpack
-                            ( T.intercalate
-                                ", "
-                                [ "uid "
-                                    <> T.pack (show uid)
-                                    <> " on "
-                                    <> destinationNode
-                                    <> " -> "
-                                    <> sourceNode
-                                | (destinationNode, uid, sourceNode) <- pendingRemovedSources
-                                ]
-                            )
-                        <> ". Keep each source node in inventory until deploy removes its old account and clears the handoff."
-                    )
+        Nothing -> pure ()
 
-    -- This check happens before plan.json is published. The previous plan is
-    -- only additional evidence; DNS and pending provider-owned migration
-    -- handoffs are the live safety tripwires when generated history is missing.
-    validatePlanDnsSafety state previousPlan newPlan
+    -- DNS and handoff checks are node-removal safeguards, not prerequisites for
+    -- ordinary replanning. Without usable plan history we cannot tell whether
+    -- inventory shrank, so run the fallback checks. With valid history, run
+    -- them only when a provider node is actually disappearing.
+    when (isNothing previousPlan || not (null removedNodes)) $ do
+        validatePendingMigrationHandoffs newPlan newNodes
+        validatePlanDnsSafety previousPlan newPlan
 prepareManagedUserCleanupOnNode ::
     Text ->
     (Text -> NodeConnection) ->
@@ -3453,18 +3506,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                             case result of
                                                                                 Left err -> pure (Just (userName <> ": " <> err))
                                                                                 Right () -> do
-                                                                                    cnameObservation <- newDnsObservationCache
-                                                                                    cnameItems <-
-                                                                                        fmap catMaybes $
-                                                                                            forM allItems $ \item -> do
-                                                                                                cnames <-
-                                                                                                    digRRObserved
-                                                                                                        deployDnsCache
-                                                                                                        cnameObservation
-                                                                                                        item.diDiscoveryHost
-                                                                                                        "CNAME"
-                                                                                                pure $ if null cnames then Nothing else Just item
-                                                                                    (_, pendingDns) <- waitForCnamePropagation deployDnsCache cnameItems
+                                                                                    (_, pendingDns) <- waitForAuthoritativeDnsPropagation deployDnsCache allItems
                                                                                     if not (null pendingDns)
                                                                                         then
                                                                                             pure
