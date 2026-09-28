@@ -73,20 +73,17 @@ using SOPS and age on NixOS or Ubuntu with Nix installed.
 nix run .#hostenv-provider -- plan
 ```
 
-This writes the deployment files under `generated/`.
+This writes configuration files necessary for deployment under `generated/`.
 
-Commit `generated/state.json` to the provider repository. It contains the
-durable information Hostenv cannot safely reconstruct: stable environment UIDs
-and hostname reservations. It does not store environment placement or
-provider-node history.
+Commit `generated/state.json` to the provider repository. Hostenv uses it to
+keep persistent state between deployments, including UIDs and hostname
+reservations between deployments.
 
-`generated/plan.json` is disposable generated output. When a previous copy is
-present, `hostenv-provider plan` uses its environment assignments as an
-additional transition check. If it is missing or malformed, planning skips that
-historical comparison and relies on live Hostenv DNS plus any pending
-provider-owned migration handoffs as node-removal safety tripwires. A CNAME to
-a node outside the proposed inventory, or a handoff that still names a removed
-source node, blocks the plan.
+`generated/plan.json` is a snapshot of the inventory's Nix configuration,
+which may be committed to git or deleted, depending on your auditing needs.
+
+`generated/flake.nix` tracks every project environment as a separate input,
+as opposed to `flake.nix` with one input per-project. 
 
 ## 6. Deploy
 
@@ -94,40 +91,18 @@ source node, blocks the plan.
 nix run .#hostenv-provider -- deploy
 ```
 
-Use `-n node-a` to deploy only that node when no cross-node migration is
-required. Migrations must run unfiltered so destination deployment, source
-quiescence, DNS cutover, and source cleanup stay in one resumable operation.
+## 7. Deleting a server / Migrating environments to a new server
 
-Before changing public DNS, `deploy` checks every environment's vhosts and
-deploys the canonical desired configuration. Current nixpkgs always creates
-baseline self-signed certificates before nginx starts, while the real ACME order
-runs separately. Hostenv therefore does not weaken the configuration or retry a
-failed deployment under the assumption that ACME caused it.
-
-For fresh and same-node environments, DNS is reconciled after deployment. For a
-migration, the destination is deployed and verified before the source is
-quiesced. Only then does Hostenv move DNS to the destination.
-
-When Cloudflare credentials are configured, deploy creates or repairs the
-required CNAMEs and waits for propagation. Without automatic DNS credentials,
-deploy stops at the safe quiesced point; update DNS manually and rerun.
-
-After migration DNS reaches the destination, Hostenv waits for every
-Let's-Encrypt-enabled vhost to present a publicly trusted HTTPS certificate
-before removing the source account. nixpkgs retries failed ACME orders
-independently; Hostenv waits up to 20 minutes for that trusted certificate and
-leaves the source quiesced for a safe retry if it does not arrive.
-
-When draining a node, remove it from any `provider.nodeFor` mapping but keep
-it in `provider.nodeSystems` and set:
+Before deleting a server from the inventory, or if moving environments to
+a new server, remove the old server from `provider.nodeFor` but keep it in
+`provider.nodeSystems` and set:
 
 ```nix
 provider.nodeStatus.old-node = "retiring";
 ```
 
-Hostenv keeps retiring nodes deployable for migration and cleanup. Source
-accounts are removed only after destination verification, source quiescence and
-DNS cutover have completed.
+Hostenv will manage moving the environments on that server to another one
+with the same role.
 
 ## Next steps
 
