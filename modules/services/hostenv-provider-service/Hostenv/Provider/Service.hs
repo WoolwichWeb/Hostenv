@@ -152,6 +152,7 @@ chooseCandidate candidates =
   let production = filter (\c -> c.candidateEnvType == Just "production") candidates
       mainEnv = filter (\c -> c.candidateEnvName == "main") candidates
       masterEnv = filter (\c -> c.candidateEnvName == "master") candidates
+      pick :: [ProjectCandidate] -> Maybe ProjectCandidate
       pick xs = case sortOn (\c -> c.candidateEnvName) xs of
         [] -> Nothing
         (c:_) -> Just c
@@ -329,12 +330,14 @@ runWebhookWith runner loadPlan cfg ref = do
               let ok = all (\d -> d.deploySuccess) deploys
               pure (Right (WebhookResult nodes deploys ok))
   where
+    step :: CommandRunner -> CommandSpec -> IO (Either WebhookError ())
     step run spec = do
       res <- run spec
       case res of
         Left e -> pure (Left (WebhookCommandError e))
         Right _ -> pure (Right ())
 
+    deployNode :: CommandRunner -> WebhookConfig -> [DeployResult] -> Text -> IO [DeployResult]
     deployNode run config acc node = do
       res <- run (CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy", "--node", node] (config.whWorkDir))
       case res of
