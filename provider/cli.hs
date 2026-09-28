@@ -338,7 +338,9 @@ digRRResult timeoutSeconds mNameserver name rr = do
                         , let stripped = T.strip line
                         , not (T.null stripped)
                         , not (";" `T.isPrefixOf` stripped)
-                        , target : _ <- [reverse (T.words stripped)]
+                        , _owner : _ttl : _class : answerType : rdata <- [T.words stripped]
+                        , T.toUpper answerType == T.toUpper rr
+                        , target : _ <- [reverse rdata]
                         ]
                  in case responseStatus of
                         Just "NOERROR" -> Right answers
@@ -989,6 +991,9 @@ waitForDnsPropagationBy ::
     [DnsItem] ->
     IO (Either DnsLookupFailure (S.Set DnsKey, [DnsItem]))
 waitForDnsPropagationBy newPhaseCheck items =
+    -- Propagation can wait for a known mismatch, but an indeterminate lookup
+    -- is different: return its typed cause immediately. Callers can safely
+    -- abort and retry without pretending the DNS state was observed.
     partitionByDns items >>= \case
         Left err -> pure (Left err)
         Right (resolved0, unresolved0) ->
@@ -1651,6 +1656,10 @@ planConnectionNodes plan =
 
 dnsRemovedInventoryHint :: Text -> [Text] -> EnvInfo -> IO (Either DnsLookupFailure (Maybe Text))
 dnsRemovedInventoryHint hostenvHostname inventoryNodes envInfo = do
+    -- This lookup decides whether an apparently fresh environment may actually
+    -- live on a node that was removed from provider inventory. A lookup failure
+    -- is therefore indeterminate and must propagate to the caller; treating it
+    -- like an empty CNAME answer could skip a required migration.
     cnameResult <- digRRResult 1 Nothing envInfo.hostname "CNAME"
     pure $ do
         cnames <- cnameResult
@@ -3161,6 +3170,11 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
             dnsStateRows <-
                 forM envInfosFiltered $ \envInfo -> do
                     let items = environmentDnsItems hostenvHostname envs envInfo
+                    -- Preflight is informational and happens before deployment.
+                    -- A failed observation is not evidence that DNS is wrong,
+                    -- but it is also not "ready": carry it forward so the
+                    -- reconciliation step can either repair it via Cloudflare or
+                    -- return the typed lookup failure.
                     dnsChecks <- checkDnsItems deployDnsCache preflightDnsObservation items
                     let mismatched =
                             [ item
