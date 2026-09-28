@@ -534,6 +534,22 @@ in
     #!${pkgs.runtimeShell}
     set -euo pipefail
     args=" $* "
+    if [ "''${DNS_SPLIT_AUTH:-0}" = 1 ]; then
+      if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' hosting.test NS '; then
+        printf 'ns1.hosting.test.\nns2.hosting.test.\n'
+        exit 0
+      fi
+      if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME ' \
+        && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod.hosting.test'; then
+        if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq '@ns1.hosting.test'; then
+          printf 'old-node.hosting.test.\n'
+        else
+          printf 'new-node.hosting.test.\n'
+        fi
+        exit 0
+      fi
+    fi
+
     if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME ' \
       && { printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod.hosting.test' \
         || printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-stage.hosting.test'; }; then
@@ -749,6 +765,23 @@ in
       ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
 
+      # Migration finalization waits for every authoritative nameserver. If
+      # one still serves the source while another serves the destination, the
+      # source system must not be removed.
+      rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/* "$DNS_STATE_DIR"/*
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      set +e
+      PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" DNS_SPLIT_AUTH=1 \
+        ${pkgs.coreutils}/bin/timeout 3 ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
+      split_status=$?
+      set -e
+      test "$split_status" -eq 124
+      ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
+
       # DNS is part of migration finalization. If automatic updates are
       # unavailable, a moved source is quiesced but its account is not removed
       # until DNS is changed and deploy is rerun.
@@ -907,6 +940,10 @@ in
       PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" SOURCE_REMOVED=1 \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_CLEARED acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
+      source_system_line="$(${pkgs.gnugrep}/bin/grep -n -F '#"old-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
+      handoff_clear_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_CLEARED acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"
+      test "$source_system_line" -lt "$handoff_clear_line"
       test ! -f "$HANDOFF_DIR/new-node-acme-prod"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
 
