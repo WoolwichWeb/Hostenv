@@ -311,24 +311,30 @@ type PlanLoader = IO BL.ByteString
 
 runWebhookWith :: CommandRunner -> PlanLoader -> WebhookConfig -> ProjectRef -> IO (Either WebhookError WebhookResult)
 runWebhookWith runner loadPlan cfg ref = do
-  let inputName = ref.prOrg <> "__" <> ref.prProject
-  step runner (CommandSpec "nix" ["flake", "update", inputName] (cfg.whWorkDir)) >>= \case
-    Left err -> pure (Left err)
-    Right _ ->
-      step runner (CommandSpec "nix" ["run", ".#hostenv-provider", "--", "plan"] (cfg.whWorkDir)) >>= \case
+  previousPlanRaw <- loadPlan
+  case nodesForProject ref.prOrg ref.prProject previousPlanRaw of
+    Left err -> pure (Left (WebhookPlanError err))
+    Right previousNodes -> do
+      let inputName = ref.prOrg <> "__" <> ref.prProject
+      step runner (CommandSpec "nix" ["flake", "update", inputName] (cfg.whWorkDir)) >>= \case
         Left err -> pure (Left err)
-        Right _ -> do
-          planRaw <- loadPlan
-          case nodesForProject ref.prOrg ref.prProject planRaw of
-            Left err -> pure (Left (WebhookPlanError err))
-            Right nodes -> do
-              -- The service deliberately does not infer migrations from DNS.
-              -- The provider CLI observes live accounts and runtime state and
-              -- refuses a node-scoped deploy before activation when another
-              -- node must participate in migration finalization.
-              deploys <- foldM (deployNode runner cfg) [] nodes
-              let ok = all (\d -> d.deploySuccess) deploys
-              pure (Right (WebhookResult nodes deploys ok))
+        Right _ ->
+          step runner (CommandSpec "nix" ["run", ".#hostenv-provider", "--", "plan"] (cfg.whWorkDir)) >>= \case
+            Left err -> pure (Left err)
+            Right _ -> do
+              currentPlanRaw <- loadPlan
+              case nodesForProject ref.prOrg ref.prProject currentPlanRaw of
+                Left err -> pure (Left (WebhookPlanError err))
+                Right currentNodes -> do
+                  let nodes = sort (nub (previousNodes <> currentNodes))
+                  -- Deploy nodes that hosted the project before or after the
+                  -- update. Old nodes are needed to retire environments that
+                  -- disappeared from the new plan. The service deliberately
+                  -- does not infer migrations from DNS; the provider CLI
+                  -- observes live state and refuses unsafe node-scoped moves.
+                  deploys <- foldM (deployNode runner cfg) [] nodes
+                  let ok = all (\d -> d.deploySuccess) deploys
+                  pure (Right (WebhookResult nodes deploys ok))
   where
     step :: CommandRunner -> CommandSpec -> IO (Either WebhookError ())
     step run spec = do
