@@ -18,7 +18,6 @@ remoteBuildWorkaround =
 commonPlanRefreshLines :: [Text]
 commonPlanRefreshLines =
     [ "run `nix run .#hostenv-provider -- plan`."
-    , "then run `nix run .#hostenv-provider -- dns-gate`."
     ]
 
 keyLine :: Text -> Text

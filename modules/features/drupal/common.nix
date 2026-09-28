@@ -57,6 +57,11 @@ in
                 followRedirects = true;
                 maxRedirects = 5;
                 timeoutSeconds = 15;
+                # Destination health verification may run before public DNS has
+                # moved, while nixpkgs is intentionally serving its baseline
+                # self-signed ACME certificate. Certificate trust is checked
+                # separately after migration DNS cutover.
+                tlsMode = "insecure";
               };
               constraints = drupalVerificationConstraints;
             }
