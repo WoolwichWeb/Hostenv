@@ -58,7 +58,7 @@ in
             installDocumentation = config.documentation.haskell.dependencies.enable;
           })
             providerHsDeps;
-        providerCliPackage = pkgs.callPackage (providerRoot + /package.nix) {
+        providerCliPackage = pkgs.callPackage (providerRoot + "/package.nix") {
           providerSrc = providerRoot;
           documentationEnabled = config.documentation.haskell.haddock.enable;
         };
