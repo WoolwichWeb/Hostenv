@@ -2,6 +2,10 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+-- DNS observation for the provider. This module reports what DNS could be
+-- observed, including typed failure reasons. Deployment policy stays in the
+-- provider CLI: callers decide whether a failed observation is repairable,
+-- retryable, or fatal at the current transaction boundary.
 module Hostenv.Provider.Dns
     ( DnsLookupFailure
     , LookupCache
