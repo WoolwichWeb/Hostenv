@@ -62,11 +62,8 @@ testPlanParsing = do
           "{\"environments\":{\"env-a\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-main\"},\"node\":\"node-a\"},\"env-b\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-dev\"},\"node\":\"node-b\"},\"env-c\":{\"hostenv\":{\"organisation\":\"other\",\"project\":\"x\",\"projectNameHash\":\"hash-x\"},\"node\":\"node-c\"}}}"
   case projectForHash "hash-main" planJson of
     Left err -> assert False ("projectForHash failed: " <> show err)
-    Right ref -> do
+    Right ref ->
       assert (ref.prOrg == "acme" && ref.prProject == "site") "projectForHash should resolve org/project"
-      case nodesForProject ref.prOrg ref.prProject planJson of
-        Left err -> assert False ("nodesForProject failed: " <> show err)
-        Right nodes -> assert (nodes == ["node-a", "node-b"]) "plan parsing should return matching nodes"
 
 testCommandSequence :: IO ()
 testCommandSequence = do

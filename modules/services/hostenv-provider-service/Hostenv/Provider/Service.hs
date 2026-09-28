@@ -6,7 +6,6 @@
 module Hostenv.Provider.Service
   ( verifyGitHubSignature
   , verifyGitLabToken
-  , nodesForProject
   , projectForHash
   , projectHashFor
   , renderProjectInputs
@@ -91,10 +90,6 @@ projectEnvironmentPlacements org project raw = do
             pure (K.toText kEnv, node)
           else Nothing
       _ -> Nothing
-
-nodesForProject :: Text -> Text -> BL.ByteString -> Either Text [Text]
-nodesForProject org project raw =
-  fmap (sort . nub . map snd) (projectEnvironmentPlacements org project raw)
 
 projectForHash :: Text -> BL.ByteString -> Either Text ProjectRef
 projectForHash hash raw = do
