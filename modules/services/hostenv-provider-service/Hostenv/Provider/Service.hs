@@ -328,10 +328,23 @@ runWebhookWith runner loadPlan cfg ref = do
                         ]
                   if not (null removedNames)
                     then
-                      -- Desired plan history cannot tell us where a partially
-                      -- finalized migration still exists. Do not guess a cleanup
-                      -- scope for removals; an unfiltered provider deploy observes
-                      -- every live node and is the safe recovery path.
+                      -- Known provider-service limitation:
+                      --
+                      -- provider-service is still in development. Removing an
+                      -- environment through a webhook is intentionally not fully
+                      -- automated yet. This check only compares the plan from
+                      -- before this webhook with the newly generated plan. The
+                      -- new plan is published before this error is returned, so a
+                      -- later webhook delivery may no longer be able to see that
+                      -- an environment was removed.
+                      --
+                      -- Do not try to infer the missing environment's live node
+                      -- here from DNS or old plan data. A partially completed
+                      -- migration may still exist on a different node. Future
+                      -- provider-service work should make removals durable until
+                      -- an unfiltered provider deploy has reconciled all live
+                      -- nodes. For now, the operator must run the unfiltered
+                      -- deploy requested by the error below.
                       pure
                         ( Left
                             ( WebhookPlanError

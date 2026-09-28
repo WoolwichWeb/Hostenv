@@ -46,6 +46,19 @@ loadPlan cfg =
 
 webhookHandler :: MVar () -> AppConfig -> Text -> Maybe Text -> Maybe Text -> BL.ByteString -> Handler WebhookResult
 webhookHandler webhookLock cfg hash mHubSig mGitlabToken rawBody = do
+  -- Known provider-service limitation:
+  --
+  -- provider-service is still in development. Webhook URLs currently use an
+  -- environment-specific projectNameHash, and this handler resolves that hash
+  -- by looking for the environment in the current generated plan. If the
+  -- environment whose hash was chosen for the webhook is later removed, the
+  -- existing webhook URL can stop resolving even when the project still has
+  -- other environments.
+  --
+  -- Future provider-service work should give projects a stable webhook
+  -- identity, or resolve the stored webhook hash through provider-service's
+  -- project database instead of requiring the environment to remain in
+  -- plan.json. This is accepted follow-up work and is not part of MR 36.
   planRaw <- liftIO (loadPlan cfg)
   projectRef <-
     case projectForHash hash planRaw of
