@@ -3,8 +3,7 @@
 
 -- hostenv-provider CLI: plan | deploy
 
-import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, displayException, finally, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson ((.!=), (.:), (.:?), (.=))
@@ -16,8 +15,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Lazy.Char8 qualified as BLC
 import Data.Char (isAlphaNum, isHexDigit)
 import Data.Foldable (toList)
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
-import Data.List (intersect, (\\))
+import Data.List ((\\))
 import Data.Map.Strict qualified as M
 import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
 import Data.Scientific (floatingOrInteger)
@@ -34,16 +32,11 @@ import Hostenv.Provider.DeployVerification (NodeConnection (..), nodeConnectionF
 import Hostenv.Provider.DeployVerification qualified as Verify
 import Hostenv.Provider.EnvironmentState qualified as EnvironmentState
 import Hostenv.Provider.MigrationHandoff qualified as MigrationHandoff
+import Hostenv.Provider.Dns qualified as Dns
 import Hostenv.Provider.DnsBackoff (backoffDelays)
 import Hostenv.Provider.DnsTransition (
     DnsItem (..),
     collectDnsItems,
- )
-import Hostenv.Provider.DnsTransition qualified as DnsTransition
-import Hostenv.Provider.DnsObservationCache (
-    DnsObservationCache,
-    cacheDnsObservation,
-    newDnsObservationCache,
  )
 import Hostenv.Provider.SigningTarget (deployProfilePathInstallableAt)
 import Hostenv.Provider.TlsReadiness qualified as TlsReadiness
@@ -163,385 +156,17 @@ cliOpts =
             <> OA.header "hostenv-provider"
         )
 
--- -------- DNS helpers (dig) --------
-stripDot :: Text -> Text
-stripDot = T.dropWhileEnd (== '.')
-
-normalizeDnsName :: Text -> Text
-normalizeDnsName = T.toLower . stripDot . T.strip
-
-data DnsQueryFailureReason
-    = DnsQueryExecutionFailure Text
-    | DnsQueryExitFailure Int Text
-    | DnsQueryResponseFailure Text
-    | DnsQueryStatusMissing
-    deriving (Eq, Show)
-
-data DnsLookupFailure
-    = DnsQueryFailed (Maybe Text) Text Text DnsQueryFailureReason
-    | DnsAuthoritativeDiscoveryFailed Text [(Text, DnsLookupFailure)]
-    | DnsAuthoritativeNameserversNotFound Text
-    | DnsAuthoritativeQueriesFailed Text Text [(Text, DnsLookupFailure)]
-    | DnsUnexpectedLookupFailure Text
-    deriving (Eq, Show)
-
-renderDnsLookupFailure :: DnsLookupFailure -> Text
-renderDnsLookupFailure = \case
-    DnsQueryFailed mNameserver name rr reason ->
-        "DNS "
-            <> rr
-            <> " lookup for "
-            <> name
-            <> maybe "" (" via " <>) mNameserver
-            <> " failed: "
-            <> renderDnsQueryFailureReason reason
-    DnsAuthoritativeDiscoveryFailed name failures ->
-        "authoritative nameserver discovery for "
-            <> name
-            <> " failed: "
-            <> T.intercalate
-                "; "
-                [ candidate <> ": " <> renderDnsLookupFailure failure
-                | (candidate, failure) <- failures
-                ]
-    DnsAuthoritativeNameserversNotFound name ->
-        "no authoritative nameservers could be found for " <> name
-    DnsAuthoritativeQueriesFailed name rr failures ->
-        "authoritative "
-            <> rr
-            <> " lookup for "
-            <> name
-            <> " failed: "
-            <> T.intercalate
-                "; "
-                [ nameserver <> ": " <> renderDnsLookupFailure failure
-                | (nameserver, failure) <- failures
-                ]
-    DnsUnexpectedLookupFailure message ->
-        "unexpected DNS lookup failure: " <> message
-
-renderDnsQueryFailureReason :: DnsQueryFailureReason -> Text
-renderDnsQueryFailureReason = \case
-    DnsQueryExecutionFailure message -> "could not execute dig (" <> message <> ")"
-    DnsQueryExitFailure code stderrText ->
-        "dig exited "
-            <> T.pack (show code)
-            <> if T.null stderrText then "" else " (" <> stderrText <> ")"
-    DnsQueryResponseFailure status -> "DNS server returned " <> status
-    DnsQueryStatusMissing -> "dig returned no parseable DNS status"
-
-{- | Cache successful DNS infrastructure discovery for the duration of a
-command. Failed discovery is deliberately not cached so a later observation
-phase can recover from a transient DNS failure.
-
-Record answers (including lookup failures) are cached separately in a
-short-lived 'DnsObservationCache' for one logical observation phase. Starting a
-new phase creates a fresh observation cache, so post-update propagation checks
-never reuse pre-update answers or failures.
--}
-data DnsLookupCache
-    = DnsLookupCache
-        (IORef (M.Map Text [Text]))
-        (IORef (M.Map Text [Text]))
-
-newDnsLookupCache :: IO DnsLookupCache
-newDnsLookupCache =
-    DnsLookupCache
-        <$> newIORef M.empty
-        <*> newIORef M.empty
-
-cachedLookup :: (Ord k) => IORef (M.Map k v) -> k -> IO v -> IO v
-cachedLookup cacheRef key loadValue = do
-    cache <- readIORef cacheRef
-    case M.lookup key cache of
-        Just value -> pure value
-        Nothing -> do
-            value <- loadValue
-            modifyIORef' cacheRef (M.insert key value)
-            pure value
-
-cachedSuccessfulLookup ::
-    (Ord k) =>
-    IORef (M.Map k v) ->
-    k ->
-    IO (Either e v) ->
-    IO (Either e v)
-cachedSuccessfulLookup cacheRef key loadValue = do
-    cache <- readIORef cacheRef
-    case M.lookup key cache of
-        Just value -> pure (Right value)
-        Nothing ->
-            loadValue >>= \case
-                Left err -> pure (Left err)
-                Right value -> do
-                    modifyIORef' cacheRef (M.insert key value)
-                    pure (Right value)
-
+-- -------- Shared helpers --------
 tryAny :: IO a -> IO (Either SomeException a)
 tryAny = try
 
-mapConcurrentlyIO :: (a -> IO b) -> [a] -> IO [Either SomeException b]
-mapConcurrentlyIO action values = do
-    resultVars <- forM values $ \value -> do
-        resultVar <- newEmptyMVar
-        _ <- forkIO $ tryAny (action value) >>= putMVar resultVar
-        pure resultVar
-    forM resultVars takeMVar
-
-digRRResult :: Int -> Maybe Text -> Text -> Text -> IO (Either DnsLookupFailure [Text])
-digRRResult timeoutSeconds mNameserver name rr = do
-    let serverArgs = maybe [] (\nameserver -> ["@" <> T.unpack nameserver]) mNameserver
-    let args =
-            serverArgs
-                <> [ "+time=" <> show timeoutSeconds
-                   , "+tries=1"
-                   , "+noall"
-                   , "+comments"
-                   , "+answer"
-                   , T.unpack name
-                   , T.unpack rr
-                   ]
-    result <- tryAny (readProcessWithExitCode "dig" args "")
+queryPlanSafetyCnames :: Text -> IO (Either Text [Text])
+queryPlanSafetyCnames name = do
+    result <- Dns.queryRecursiveRecord 2 name "CNAME"
     pure $
         case result of
-            Left err ->
-                Left
-                    ( DnsQueryFailed
-                        mNameserver
-                        name
-                        rr
-                        (DnsQueryExecutionFailure (T.pack (displayException err)))
-                    )
-            Right (ExitFailure code, _out, err) ->
-                Left
-                    ( DnsQueryFailed
-                        mNameserver
-                        name
-                        rr
-                        (DnsQueryExitFailure code (T.strip (T.pack err)))
-                    )
-            Right (ExitSuccess, out, _err) ->
-                let output = T.pack out
-                    responseStatus =
-                        listToMaybe
-                            [ status
-                            | line <- T.lines output
-                            , let (_, suffix) = T.breakOn "status:" line
-                            , not (T.null suffix)
-                            , let statusText = T.strip (T.drop (T.length ("status:" :: Text)) suffix)
-                            , let status = T.takeWhile (\c -> c /= ',' && c /= ' ' && c /= '\t') statusText
-                            , not (T.null status)
-                            ]
-                    answers =
-                        [ normalizeDnsName target
-                        | line <- T.lines output
-                        , let stripped = T.strip line
-                        , not (T.null stripped)
-                        , not (";" `T.isPrefixOf` stripped)
-                        , _owner : _ttl : _class : answerType : rdata <- [T.words stripped]
-                        , T.toUpper answerType == T.toUpper rr
-                        , target : _ <- [reverse rdata]
-                        ]
-                 in case responseStatus of
-                        Just "NOERROR" -> Right answers
-                        Just "NXDOMAIN" -> Right []
-                        Just status ->
-                            Left
-                                ( DnsQueryFailed
-                                    mNameserver
-                                    name
-                                    rr
-                                    (DnsQueryResponseFailure status)
-                                )
-                        Nothing ->
-                            Left
-                                ( DnsQueryFailed
-                                    mNameserver
-                                    name
-                                    rr
-                                    DnsQueryStatusMissing
-                                )
-
-digCnameForPlanSafety :: Text -> IO (Either Text [Text])
-digCnameForPlanSafety name = do
-    result <- digRRResult 2 Nothing name "CNAME"
-    pure $
-        case result of
-            Left err -> Left (renderDnsLookupFailure err)
+            Left err -> Left (Dns.renderLookupFailure err)
             Right answers -> Right answers
-
-zoneCandidates :: Text -> [Text]
-zoneCandidates name =
-    let labels = filter (not . T.null) (T.splitOn "." (normalizeDnsName name))
-        labelCount = length labels
-        indices =
-            if labelCount < 2
-                then []
-                else [0 .. labelCount - 2]
-     in map (\idx -> T.intercalate "." (drop idx labels)) indices
-
-findZoneNameservers :: DnsLookupCache -> Text -> IO (Either DnsLookupFailure [Text])
-findZoneNameservers (DnsLookupCache _ zoneCache) zone =
-    cachedSuccessfulLookup
-        zoneCache
-        (normalizeDnsName zone)
-        (digRRResult 1 Nothing zone "NS")
-
-findAuthoritativeNameserversWith :: DnsLookupCache -> Text -> IO (Either DnsLookupFailure [Text])
-findAuthoritativeNameserversWith cache@(DnsLookupCache authoritativeCache _) name =
-    cachedSuccessfulLookup authoritativeCache (normalizeDnsName name) (go [] (zoneCandidates name))
-  where
-    go failures [] =
-        pure $
-            if null failures
-                then Left (DnsAuthoritativeNameserversNotFound name)
-                else Left (DnsAuthoritativeDiscoveryFailed name (reverse failures))
-    go failures (candidate : rest) =
-        findZoneNameservers cache candidate >>= \case
-            Right [] -> go failures rest
-            Right nameservers -> pure (Right nameservers)
-            Left err -> go ((candidate, err) : failures) rest
-
-concurrentDnsResults ::
-    [Text] ->
-    (Text -> IO (Either DnsLookupFailure a)) ->
-    IO [(Text, Either DnsLookupFailure a)]
-concurrentDnsResults nameservers action = do
-    rawResults <- mapConcurrentlyIO action nameservers
-    pure $
-        zipWith
-            (\nameserver result ->
-                ( nameserver
-                , case result of
-                    Left err ->
-                        Left
-                            ( DnsUnexpectedLookupFailure
-                                ( "query worker for "
-                                    <> nameserver
-                                    <> " failed: "
-                                    <> T.pack (displayException err)
-                                )
-                            )
-                    Right value -> value
-                )
-            )
-            nameservers
-            rawResults
-
-digRRWith :: DnsLookupCache -> Text -> Text -> IO (Either DnsLookupFailure [Text])
-digRRWith cache name rr =
-    findAuthoritativeNameserversWith cache name >>= \case
-        Left err -> pure (Left err)
-        Right nameservers -> do
-            queryResults <-
-                concurrentDnsResults
-                    nameservers
-                    (\nameserver -> digRRResult 1 (Just nameserver) name rr)
-            let failures =
-                    [ (nameserver, err)
-                    | (nameserver, Left err) <- queryResults
-                    ]
-            if null failures
-                then
-                    pure
-                        ( Right
-                            ( S.toList
-                                ( S.fromList
-                                    ( concat
-                                        [ answers
-                                        | (_, Right answers) <- queryResults
-                                        ]
-                                    )
-                                )
-                            )
-                        )
-                else pure (Left (DnsAuthoritativeQueriesFailed name rr failures))
-
-queryDnsTargetAt :: Maybe Text -> Text -> IO (Either DnsLookupFailure ([Text], [Text]))
-queryDnsTargetAt mNameserver name =
-    digRRResult 1 mNameserver name "CNAME" >>= \case
-        Left err -> pure (Left err)
-        Right cnames
-            | not (null cnames) -> pure (Right (cnames, []))
-            | otherwise -> do
-                aResult <- digRRResult 1 mNameserver name "A"
-                aaaaResult <- digRRResult 1 mNameserver name "AAAA"
-                pure $ (\a4 a6 -> ([], a4 ++ a6)) <$> aResult <*> aaaaResult
-
-dnsPropagatedToAllAuthoritative ::
-    DnsLookupCache ->
-    Text ->
-    Text ->
-    IO (Either DnsLookupFailure Bool)
-dnsPropagatedToAllAuthoritative cache name expectedHost =
-    findAuthoritativeNameserversWith cache name >>= \case
-        Left err -> pure (Left err)
-        Right nameservers -> do
-            queryResults <-
-                concurrentDnsResults
-                    nameservers
-                    (\nameserver -> queryDnsTargetAt (Just nameserver) name)
-            let failures =
-                    [ (nameserver, err)
-                    | (nameserver, Left err) <- queryResults
-                    ]
-            if not (null failures)
-                then pure (Left (DnsAuthoritativeQueriesFailed name "CNAME/A/AAAA" failures))
-                else do
-                    let answersByNameserver =
-                            [ answers
-                            | (_, Right answers) <- queryResults
-                            ]
-                    let needsExpectedAddresses =
-                            any (null . fst) answersByNameserver
-                    expectedAddressesResult <-
-                        if needsExpectedAddresses
-                            then do
-                                aResult <- digRRWith cache expectedHost "A"
-                                aaaaResult <- digRRWith cache expectedHost "AAAA"
-                                pure $ (++) <$> aResult <*> aaaaResult
-                            else pure (Right [])
-                    pure $
-                        DnsTransition.authoritativeDnsTargetConverged
-                            expectedHost
-                            <$> expectedAddressesResult
-                            <*> pure answersByNameserver
-
-digRRObserved ::
-    DnsLookupCache ->
-    DnsObservationCache (Either DnsLookupFailure [Text]) ->
-    Text ->
-    Text ->
-    IO (Either DnsLookupFailure [Text])
-digRRObserved dnsCache observationCache =
-    cacheDnsObservation observationCache (digRRWith dnsCache)
-
-digAddrsObserved ::
-    DnsLookupCache ->
-    DnsObservationCache (Either DnsLookupFailure [Text]) ->
-    Text ->
-    IO (Either DnsLookupFailure [Text])
-digAddrsObserved dnsCache observationCache name = do
-    a4 <- digRRObserved dnsCache observationCache name "A"
-    a6 <- digRRObserved dnsCache observationCache name "AAAA"
-    pure $ (++) <$> a4 <*> a6
-
-dnsPointsToObserved ::
-    DnsLookupCache ->
-    DnsObservationCache (Either DnsLookupFailure [Text]) ->
-    Text ->
-    Text ->
-    IO (Either DnsLookupFailure Bool)
-dnsPointsToObserved dnsCache observationCache vhost expectedHost = do
-    let expectHostNorm = normalizeDnsName expectedHost
-    digRRObserved dnsCache observationCache vhost "CNAME" >>= \case
-        Left err -> pure (Left err)
-        Right cn
-            | expectHostNorm `elem` cn -> pure (Right True)
-            | otherwise -> do
-                expIPs <- digAddrsObserved dnsCache observationCache expectedHost
-                vhIPs <- digAddrsObserved dnsCache observationCache vhost
-                pure $ (\expectedIps vhostIps -> not (null (expectedIps `intersect` vhostIps))) <$> expIPs <*> vhIPs
 
 -- -------- JSON helpers --------
 lookupText :: KM.Key -> KM.KeyMap A.Value -> Maybe Text
@@ -987,9 +612,9 @@ classifyUpsertEligibility mToken mZoneId mZoneName vhName
             Nothing -> UpsertIneligible "could not resolve Cloudflare zone name"
 
 waitForDnsPropagationBy ::
-    IO (DnsItem -> IO (Either DnsLookupFailure Bool)) ->
+    IO (DnsItem -> IO (Either Dns.DnsLookupFailure Bool)) ->
     [DnsItem] ->
-    IO (Either DnsLookupFailure (S.Set DnsKey, [DnsItem]))
+    IO (Either Dns.DnsLookupFailure (S.Set DnsKey, [DnsItem]))
 waitForDnsPropagationBy newPhaseCheck items =
     -- Propagation can wait for a known mismatch, but an indeterminate lookup
     -- is different: return its typed cause immediately. Callers can safely
@@ -1036,17 +661,13 @@ waitForDnsPropagationBy newPhaseCheck items =
                 go (resolved <> resolvedNow) unresolvedNow restDelays
 
 waitForAuthoritativeDnsPropagation ::
-    DnsLookupCache ->
+    Dns.LookupCache ->
     [DnsItem] ->
-    IO (Either DnsLookupFailure (S.Set DnsKey, [DnsItem]))
+    IO (Either Dns.DnsLookupFailure (S.Set DnsKey, [DnsItem]))
 waitForAuthoritativeDnsPropagation dnsCache =
-    waitForDnsPropagationBy $ do
-        phaseCache <- newIORef M.empty
+    waitForDnsPropagationBy $
         pure $ \item ->
-            cachedLookup
-                phaseCache
-                (dnsKey item)
-                (dnsPropagatedToAllAuthoritative dnsCache item.diDiscoveryHost item.diExpectedHost)
+            Dns.checkAuthoritativeTarget dnsCache item.diDiscoveryHost item.diExpectedHost
 
 loadPlanCloudflareContext ::
     Maybe Text ->
@@ -1086,14 +707,14 @@ environmentDnsItems hostenvHostname envs envInfo =
                     (KM.singleton (K.fromText envInfo.userName) envValue)
 
 checkDnsItems ::
-    DnsLookupCache ->
-    DnsObservationCache (Either DnsLookupFailure [Text]) ->
+    Dns.LookupCache ->
+    Dns.ObservationCache (Either Dns.DnsLookupFailure [Text]) ->
     [DnsItem] ->
-    IO [(DnsItem, Either DnsLookupFailure Bool)]
+    IO [(DnsItem, Either Dns.DnsLookupFailure Bool)]
 checkDnsItems dnsCache observationCache items =
     forM items $ \item -> do
         pointsToDestination <-
-            dnsPointsToObserved
+            Dns.pointsToObservedHost
                 dnsCache
                 observationCache
                 item.diDiscoveryHost
@@ -1101,7 +722,7 @@ checkDnsItems dnsCache observationCache items =
         pure (item, pointsToDestination)
 
 ensureEnvironmentDns ::
-    DnsLookupCache ->
+    Dns.LookupCache ->
     Maybe Text ->
     Maybe Text ->
     KM.KeyMap A.Value ->
@@ -1109,7 +730,7 @@ ensureEnvironmentDns ::
     [DnsItem] ->
     IO (Either Text ())
 ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = do
-    observationCache <- newDnsObservationCache
+    observationCache <- newDns.ObservationCache
     checks <- checkDnsItems dnsCache observationCache items
     let pending =
             [ (item, lookupFailure)
@@ -1159,7 +780,7 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                                                     "could not verify DNS for "
                                                         <> item.diDiscoveryHost
                                                         <> ": "
-                                                        <> renderDnsLookupFailure dnsFailure
+                                                        <> renderDns.DnsLookupFailure dnsFailure
                                                         <> " (automatic DNS update unavailable: "
                                                         <> reason
                                                         <> ")"
@@ -1173,7 +794,7 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                                                     ( "hostenv-provider: warning: could not verify current DNS for "
                                                         <> item.diDiscoveryHost
                                                         <> " ("
-                                                        <> renderDnsLookupFailure dnsFailure
+                                                        <> renderDns.DnsLookupFailure dnsFailure
                                                         <> "); attempting the configured Cloudflare update"
                                                     )
                                             printProviderLine
@@ -1216,7 +837,7 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                                     pure
                                         ( Left
                                             ( "DNS propagation could not be verified: "
-                                                <> renderDnsLookupFailure err
+                                                <> renderDns.DnsLookupFailure err
                                             )
                                         )
                                 Right (_, timedOutItems) ->
@@ -1654,20 +1275,20 @@ planConnectionNodes plan =
         (map K.toText . KM.keys)
         (lookupObj (K.fromString "nodeConnections") plan)
 
-dnsRemovedInventoryHint :: Text -> [Text] -> EnvInfo -> IO (Either DnsLookupFailure (Maybe Text))
+dnsRemovedInventoryHint :: Text -> [Text] -> EnvInfo -> IO (Either Dns.DnsLookupFailure (Maybe Text))
 dnsRemovedInventoryHint hostenvHostname inventoryNodes envInfo = do
     -- This lookup decides whether an apparently fresh environment may actually
     -- live on a node that was removed from provider inventory. A lookup failure
     -- is therefore indeterminate and must propagate to the caller; treating it
     -- like an empty CNAME answer could skip a required migration.
-    cnameResult <- digRRResult 1 Nothing envInfo.hostname "CNAME"
+    cnameResult <- Dns.queryRecursiveRecord 1 envInfo.hostname "CNAME"
     pure $ do
         cnames <- cnameResult
-        let domain = normalizeDnsName hostenvHostname
+        let domain = Dns.normalizeName hostenvHostname
         let suffix = "." <> domain
-        let inventory = S.fromList (map normalizeDnsName inventoryNodes)
+        let inventory = S.fromList (map Dns.normalizeName inventoryNodes)
         let nodeFromTarget target =
-                let normalized = normalizeDnsName target
+                let normalized = Dns.normalizeName target
                  in case T.stripSuffix suffix normalized of
                         Just nodeName
                             | not (T.null nodeName)
@@ -1826,7 +1447,7 @@ validatePlanDnsSafety previousPlan newPlan = do
             fromMaybe
                 (error "hostenv-provider: generated plan is missing hostenvHostname")
                 (lookupText (K.fromString "hostenvHostname") newPlan)
-    let inventory = S.fromList (map normalizeDnsName (planSystemTargetNodes newPlan Nothing))
+    let inventory = S.fromList (map Dns.normalizeName (planSystemTargetNodes newPlan Nothing))
     let hostnames =
             S.toList . S.fromList $
                 planEnvironmentHostnames newPlan
@@ -1834,7 +1455,7 @@ validatePlanDnsSafety previousPlan newPlan = do
 
     lookupResults <-
         forM hostnames $ \hostname -> do
-            result <- digCnameForPlanSafety hostname
+            result <- queryPlanSafetyCnames hostname
             pure (hostname, result)
 
     let lookupFailures =
@@ -1847,13 +1468,13 @@ validatePlanDnsSafety previousPlan newPlan = do
                 <> T.unpack (T.intercalate "; " lookupFailures)
             )
 
-    let domain = normalizeDnsName hostenvHostname
+    let domain = Dns.normalizeName hostenvHostname
     let suffix = "." <> domain
     let violations =
             [ (hostname, nodeName)
             | (hostname, Right cnames) <- lookupResults
             , cname <- cnames
-            , let normalizedTarget = normalizeDnsName cname
+            , let normalizedTarget = Dns.normalizeName cname
             , Just nodeName <- [T.stripSuffix suffix normalizedTarget]
             , not (T.null nodeName)
             , not (S.member nodeName inventory)
@@ -3067,7 +2688,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                         ( "could not determine whether "
                                                             <> envInfo.hostname
                                                             <> " still points to a removed provider node: "
-                                                            <> renderDnsLookupFailure dnsFailure
+                                                            <> renderDns.DnsLookupFailure dnsFailure
                                                             <> ". Refusing to treat the environment as fresh until DNS can be verified."
                                                         )
                                                 Right (Just removedNode) ->
@@ -3165,8 +2786,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                 )
                         Sh.exitWith (ExitFailure 1)
 
-            deployDnsCache <- newDnsLookupCache
-            preflightDnsObservation <- newDnsObservationCache
+            deployDnsCache <- newDns.LookupCache
+            preflightDnsObservation <- newDns.ObservationCache
             dnsStateRows <-
                 forM envInfosFiltered $ \envInfo -> do
                     let items = environmentDnsItems hostenvHostname envs envInfo
@@ -3189,7 +2810,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                             ( "hostenv-provider: warning: DNS preflight could not verify "
                                 <> item.diDiscoveryHost
                                 <> ": "
-                                <> renderDnsLookupFailure dnsFailure
+                                <> renderDns.DnsLookupFailure dnsFailure
                                 <> "; deployment will attempt DNS reconciliation"
                             )
                     let destinationPresent =
@@ -3691,7 +3312,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                                                 ( Just
                                                                                                     ( userName
                                                                                                         <> ": authoritative DNS propagation could not be verified: "
-                                                                                                        <> renderDnsLookupFailure dnsFailure
+                                                                                                        <> renderDns.DnsLookupFailure dnsFailure
                                                                                                     )
                                                                                                 )
                                                                                         Right (_, pendingDns) ->
