@@ -1,7 +1,7 @@
 cabal-version: 2.4
 name: hostenv-provider-cli
 version: 0.1.0.0
-synopsis: Hostenv provider CLI (plan, dns-gate, deploy)
+synopsis: Hostenv provider CLI (plan, deploy)
 license: LicenseRef-OtherLicense
 build-type: Simple
 
@@ -9,14 +9,18 @@ executable hostenv-provider
   main-is: cli.hs
   hs-source-dirs: .
   other-modules:
+    Hostenv.Provider.Dns
     Hostenv.Provider.DnsBackoff
     Hostenv.Provider.DeployGuidance
-    Hostenv.Provider.DnsGateFilter
-    Hostenv.Provider.DnsPointsToCache
+    Hostenv.Provider.DnsTransition
     Hostenv.Provider.DeployVerification
     Hostenv.Provider.DeployPreflight
-    Hostenv.Provider.PrevNodeDiscovery
+    Hostenv.Provider.EnvironmentState
+    Hostenv.Provider.MigrationHandoff
+    Hostenv.Provider.PlanTransition
     Hostenv.Provider.SigningTarget
+    Hostenv.Provider.TlsReadiness
+    Hostenv.Provider.UserLifecycle
   build-depends:
     base >=4.14 && <5,
     Cabal,

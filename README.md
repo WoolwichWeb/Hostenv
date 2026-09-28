@@ -193,47 +193,42 @@ still working on improvements to Provider support.
    nix run .#hostenv-provider -- plan
    ```
 
-   This writes: `generated/{flake.nix,plan.json,state.json}`.
-
-   ```bash
-   nix run .#hostenv-provider -- dns-gate
-   ```
-
-   This updates `plan.json` so Let's Encrypt is disabled for any environments
-   where the DNS does not point to the correct server. This prevents
-   entire deployments failing when ACME systemd units cannot start.
-
-   @TODO: `nix run .#hostenv-provider` is capable of updating Cloudflare
-   DNS records automatically, which should be documented here.
+   This writes: `generated/{flake.nix,plan.json,state.json}`. Commit
+   `generated/state.json`; it contains Hostenv's durable UID and hostname
+   reservations. It does not store environment placement or provider-node
+   history. `generated/plan.json` is disposable, although an existing valid
+   copy is used as an additional node-removal safety check before it is
+   atomically replaced.
 
 6. **Deploy**
 
-  Deploy using `deploy-rs` and `generated/flake.nix`:
+   `generated/plan.json` always describes the desired end state, and deploy
+   applies that configuration directly. Current nixpkgs generates baseline
+   self-signed certificates before nginx starts and performs the real ACME order
+   separately, so a Let's Encrypt validation failure does not need a weaker
+   Hostenv staging configuration.
 
-  ```bash
-  nix run github:serokell/deploy-rs -- --debug-logs generated/#<node>
-  ```
+   Hostenv therefore treats any failed system deployment as a real deployment
+   failure. For fresh and same-node environments, DNS is reconciled after the
+   destination has deployed. During a migration, Hostenv deploys and verifies
+   the destination, quiesces the source, changes DNS, waits for a publicly
+   trusted HTTPS certificate on TLS-enabled vhosts, and only then removes the
+   source account.
 
-  A concrete example:
+   Run the provider deployment transaction:
 
-  ```bash
-  nix run github:serokell/deploy-rs -- --debug-logs generated/#backend01
-  ```
+   ```bash
+   nix run .#hostenv-provider -- deploy
+   ```
 
-  NixOS-anywhere also works:
+   Use `--node <node>` for a node-local deployment only when no cross-node
+   migration is involved. Cross-node migrations must run unfiltered so Hostenv
+   can keep destination staging, source quiescence, DNS cutover, TLS activation,
+   and source cleanup in one resumable operation.
 
-  ```bash
-  nix run github:numtide/nixos-anywhere -- --flake generated#<node> --target-host root@<node>.hosting.example.com
-  ```
-
-  A concrete nixos-anywhere example:
-
-  ```bash
-  nix run github:numtide/nixos-anywhere -- --flake /home/amir/hosting/generated#backend01 --target-host root@backend01.hostenv.sh
-  ```
-
-  Because hostenv is just Nix (for the most part), deploying using your
-  favourite tool should work.
+   The generated flake remains available for debugging and inspection, but
+   invoking deploy-rs directly bypasses Hostenv's DNS/TLS and migration safety
+   ordering and is not the normal deployment workflow.
 
 ---
 

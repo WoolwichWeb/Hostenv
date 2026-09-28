@@ -73,28 +73,36 @@ using SOPS and age on NixOS or Ubuntu with Nix installed.
 nix run .#hostenv-provider -- plan
 ```
 
-This writes the deployment files under `generated/`.
+This writes configuration files necessary for deployment under `generated/`.
 
 Commit `generated/state.json` to the provider repository. Hostenv uses it to
-keep persistent environment state, including UIDs, node history, and hostname
-reservations, between deployments.
+keep persistent state between deployments, including UIDs and hostname
+reservations between deployments.
 
-## 6. Check DNS
+`generated/plan.json` is a snapshot of the inventory's Nix configuration,
+which may be committed to git or deleted, depending on your auditing needs.
 
-```bash
-nix run .#hostenv-provider -- dns-gate
-```
+`generated/flake.nix` tracks every project environment as a separate input,
+as opposed to `flake.nix` with one input per-project.
 
-If you have configured Hostenv's Cloudflare integration and want it to update
-DNS records, add `--with-dns-update`.
-
-## 7. Deploy
+## 6. Deploy
 
 ```bash
 nix run .#hostenv-provider -- deploy
 ```
 
-Use `-n node-a` to deploy only that node.
+## 7. Deleting a server / Migrating environments to a new server
+
+Before deleting a server from the inventory, or if moving environments to
+a new server, remove the old server from `provider.nodeFor` but keep it in
+`provider.nodeSystems` and set:
+
+```nix
+provider.nodeStatus.old-node = "retiring";
+```
+
+Hostenv will manage moving the environments on that server to another one
+with the same role.
 
 ## Next steps
 

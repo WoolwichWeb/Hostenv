@@ -468,6 +468,12 @@ in
       description = "Map of node name -> system string (e.g. x86_64-linux, aarch64-linux).";
     };
 
+    nodeStatus = mkOption {
+      type = types.attrsOf (types.enum [ "active" "retiring" ]);
+      default = { };
+      description = "Optional map of node name -> lifecycle status. Nodes default to active; retiring nodes remain managed for migration/cleanup but cannot receive environments.";
+    };
+
     nodeAddresses = mkOption {
       type = types.attrsOf types.str;
       default = { };

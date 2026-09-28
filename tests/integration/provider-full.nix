@@ -87,7 +87,7 @@ let
     nodeFor = { default = "node-a"; production = "node-a"; testing = "node-a"; development = "node-a"; };
     statePath = stateStub;
     lockPath = lockPath;
-    nodeSystems = { };
+    nodeSystems = { node-a = localSystem; };
     cloudflare = { enable = false; zoneId = null; apiTokenFile = null; };
     secretsFile = "secrets/secrets.yaml";
   };
@@ -176,7 +176,7 @@ in
         && (drupalMainFrontdoorVHost.globalRedirect or null) == drupalMainCanonicalHost
         && (request.path or null) == "/user/login"
         && (request.followRedirects or false)
-        && (request.tlsMode or null) == "strict"
+        && (request.tlsMode or null) == "insecure"
         && hasConstraintRule "allowNonZeroExitStatus" false
         && hasConstraintRule "minHttpStatus" 200
         && hasConstraintRule "maxHttpStatus" 299

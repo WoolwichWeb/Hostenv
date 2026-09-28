@@ -49,6 +49,11 @@ let
       node = "retired-node";
       virtualHosts = [ "retired.example" ];
     };
+    retiredOnActiveNode = {
+      uid = 4502;
+      node = "node-a";
+      virtualHosts = [ "retired-on-active-node.example" ];
+    };
   };
   stateFile = pkgs.writeText "state.json" (builtins.toJSON persistedState);
   lockFile = pkgs.writeText "flake.lock" (builtins.toJSON {
@@ -76,13 +81,19 @@ let
     hostenvHostname = "hosting.test";
     letsEncrypt = { adminEmail = "ops@example.test"; acceptTerms = true; };
     nodeFor.default = "node-a";
-    nodeSystems.node-a = system;
+    nodeSystems = {
+      node-a = system;
+      old-node = system;
+    };
     secretsFile = "secrets/secrets.yaml";
   } // overrides);
 
   baseline = mkPlan { };
   plan = lib.importJSON baseline.plan;
   state = lib.importJSON baseline.state;
+  replanned = mkPlan { statePath = baseline.state; };
+  replannedPlan = lib.importJSON replanned.plan;
+  replannedState = lib.importJSON replanned.state;
   withoutState = mkPlan { statePath = null; };
   missingState = mkPlan { statePath = providerRoot + "/generated/absent.json"; };
   noStatePlan = lib.importJSON withoutState.plan;
@@ -95,6 +106,21 @@ let
     environments = builtins.tryEval (builtins.deepSeq value.environments true);
   };
   allOutputsFail = value: lib.all (result: !result.success) (builtins.attrValues (outputResults value));
+  retiringPlan = mkPlan {
+    nodeStatus.old-node = "retiring";
+  };
+  retiringPlanData = lib.importJSON retiringPlan.plan;
+  retiringScheduled = builtins.tryEval (builtins.deepSeq (mkPlan {
+    nodeFor.default = "old-node";
+    nodeStatus.old-node = "retiring";
+  }).plan true);
+  unknownStatusNode = builtins.tryEval (builtins.deepSeq (mkPlan {
+    nodeStatus.missing-node = "retiring";
+  }).plan true);
+  unknownScheduledNode = builtins.tryEval (builtins.deepSeq (mkPlan {
+    nodeFor.default = "missing-node";
+  }).plan true);
+
   stateConflict = mkPlan {
     statePath = pkgs.writeText "conflicting-state.json" (builtins.toJSON {
       other = { uid = 6001; virtualHosts = [ "main.example" ]; };
@@ -160,19 +186,58 @@ in
   ) "default paths should read the provider's state and lock, never its existing plan.json";
 
   provider-plan-state-retention = asserts.assertTrue "provider-plan-state-retention" (
-    state.retired == persistedState.retired
+    state.retired == removeAttrs persistedState.retired [ "node" ]
     && state.${mainUser}.retainedField == "keep this field"
-    && state.${mainUser}.node == "node-a"
     && state.${mainUser}.uid == 2501
     && state.${testingUser}.uid > 4501
-  ) "planning must retain retired users and extra state fields without reassigning existing UIDs";
+    && !(state.${mainUser} ? node)
+    && !(state.retired ? node)
+    && !(state.retiredOnActiveNode ? node)
+    && !(state.${testingUser} ? node)
+    && !(state ? _providerNodes)
+  ) "planning must retain durable environment reservations without storing node placement or provider inventory";
 
-  provider-plan-state-node-history = asserts.assertTrue "provider-plan-state-node-history" (
-    plan.environments.${mainUser}.previousNode == "old-node"
-    && plan.environments.${testingUser}.previousNode == null
+  provider-plan-state-has-no-placement-history = asserts.assertTrue "provider-plan-state-has-no-placement-history" (
+    !(plan.environments.${mainUser} ? previousNode)
+    && !(plan.environments.${testingUser} ? previousNode)
     && plan.nodeConnections ? old-node
-    && plan.nodeConnections ? retired-node
-  ) "previous and retired nodes must remain available to migration routing";
+    && !(plan.nodeConnections ? retired-node)
+  ) "migration routing must come from configured nodes rather than placement history in state";
+
+  provider-plan-all-configured-nodes = asserts.assertTrue "provider-plan-all-configured-nodes" (
+    plan.nodes ? node-a
+    && plan.nodes ? old-node
+    && plan.nodes.old-node.users.users == { }
+    && lib.all
+      (env: env.node != "old-node")
+      (builtins.attrValues plan.environments)
+    && !(plan.nodes ? retired-node)
+  ) "every configured provider node must remain deployable even when it has no current environments";
+
+  provider-plan-retiring-node-status = asserts.assertTrue "provider-plan-retiring-node-status" (
+    retiringPlanData.nodeStatus.old-node == "retiring"
+    && retiringPlanData.nodeStatus.node-a == "active"
+    && retiringPlanData.nodes ? old-node
+    && retiringPlanData.nodeConnections ? old-node
+  ) "retiring nodes must remain in the generated provider inventory and deployment routing";
+
+  provider-plan-retiring-node-not-scheduled = asserts.assertTrue "provider-plan-retiring-node-not-scheduled" (
+    !retiringScheduled.success
+  ) "provider.nodeFor must not schedule environments onto a retiring node";
+
+  provider-plan-node-status-must-reference-inventory = asserts.assertTrue "provider-plan-node-status-must-reference-inventory" (
+    !unknownStatusNode.success
+  ) "provider.nodeStatus entries must reference provider.nodeSystems";
+
+  provider-plan-node-for-must-reference-inventory = asserts.assertTrue "provider-plan-node-for-must-reference-inventory" (
+    !unknownScheduledNode.success
+  ) "provider.nodeFor entries must reference provider.nodeSystems";
+
+  provider-plan-state-is-stable-across-replan = asserts.assertTrue "provider-plan-state-is-stable-across-replan" (
+    replannedPlan.nodes ? old-node
+    && !(replannedPlan.environments.${mainUser} ? previousNode)
+    && replannedState == state
+  ) "re-running plan must preserve durable reservations without introducing deployment history";
 
   provider-plan-optional-state = asserts.assertTrue "provider-plan-optional-state" (
     lib.importJSON missingState.plan == noStatePlan

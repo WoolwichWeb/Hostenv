@@ -55,6 +55,10 @@
         # Override by environment type when using more than one node:
         # nodeFor.production = "node-b";
         # nodeSystems.node-b = "aarch64-linux";
+        #
+        # When draining a node, remove it from nodeFor but keep it in
+        # nodeSystems until cleanup completes:
+        # nodeStatus.node-b = "retiring";
 
         # Add NixOS system-level configuration that's common to all servers here:
         # nodeModules = [ "nodes/common.nix" ];
