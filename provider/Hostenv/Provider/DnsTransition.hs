@@ -27,15 +27,14 @@ data DnsItem = DnsItem
 authoritativeDnsTargetConverged ::
     Text ->
     [Text] ->
-    [Either Text ([Text], [Text])] ->
+    [([Text], [Text])] ->
     Bool
 authoritativeDnsTargetConverged expectedHost expectedAddresses answersByNameserver =
     not (null answersByNameserver) && all matchesExpected answersByNameserver
   where
     expectedHostName = normalizeDnsName expectedHost
     expectedAddressSet = S.fromList (map normalizeDnsName expectedAddresses)
-    matchesExpected (Left _) = False
-    matchesExpected (Right (cnames, addresses))
+    matchesExpected (cnames, addresses)
         | not (S.null cnameSet) =
             cnameSet == S.singleton expectedHostName
         | otherwise =

@@ -170,22 +170,74 @@ stripDot = T.dropWhileEnd (== '.')
 normalizeDnsName :: Text -> Text
 normalizeDnsName = T.toLower . stripDot . T.strip
 
-{- | Cache DNS discovery done while checking whether hostnames resolve to the
-expected host.
+data DnsQueryFailureReason
+    = DnsQueryExecutionFailure Text
+    | DnsQueryExitFailure Int Text
+    | DnsQueryResponseFailure Text
+    | DnsQueryStatusMissing
+    deriving (Eq, Show)
 
-These checks do more than ask the local resolver for one record. For each
-hostname, the code first looks for the authoritative nameservers for that
-hostname, then asks those nameservers for CNAME, A, or AAAA records. A single deploy can ask the same questions repeatedly while comparing many
-vhosts, so this value keeps the expensive discovery results for the duration
-of that operation.
+data DnsLookupFailure
+    = DnsQueryFailed (Maybe Text) Text Text DnsQueryFailureReason
+    | DnsAuthoritativeDiscoveryFailed Text [(Text, DnsLookupFailure)]
+    | DnsAuthoritativeNameserversNotFound Text
+    | DnsAuthoritativeQueriesFailed Text Text [(Text, DnsLookupFailure)]
+    | DnsUnexpectedLookupFailure Text
+    deriving (Eq, Show)
 
-This command-scoped cache stores DNS infrastructure discovery only. Record
-answers are cached separately in a short-lived 'DnsObservationCache' for one
-logical observation phase. Starting a new phase creates a new answer cache, so
-post-update propagation checks never reuse CNAME/A/AAAA data observed before
-the update. The first map here stores the authoritative nameservers selected
-for a full hostname. The second map stores NS records found for zone names
-while walking up a hostname.
+renderDnsLookupFailure :: DnsLookupFailure -> Text
+renderDnsLookupFailure = \case
+    DnsQueryFailed mNameserver name rr reason ->
+        "DNS "
+            <> rr
+            <> " lookup for "
+            <> name
+            <> maybe "" (" via " <>) mNameserver
+            <> " failed: "
+            <> renderDnsQueryFailureReason reason
+    DnsAuthoritativeDiscoveryFailed name failures ->
+        "authoritative nameserver discovery for "
+            <> name
+            <> " failed: "
+            <> T.intercalate
+                "; "
+                [ candidate <> ": " <> renderDnsLookupFailure failure
+                | (candidate, failure) <- failures
+                ]
+    DnsAuthoritativeNameserversNotFound name ->
+        "no authoritative nameservers could be found for " <> name
+    DnsAuthoritativeQueriesFailed name rr failures ->
+        "authoritative "
+            <> rr
+            <> " lookup for "
+            <> name
+            <> " failed: "
+            <> T.intercalate
+                "; "
+                [ nameserver <> ": " <> renderDnsLookupFailure failure
+                | (nameserver, failure) <- failures
+                ]
+    DnsUnexpectedLookupFailure message ->
+        "unexpected DNS lookup failure: " <> message
+
+renderDnsQueryFailureReason :: DnsQueryFailureReason -> Text
+renderDnsQueryFailureReason = \case
+    DnsQueryExecutionFailure message -> "could not execute dig (" <> message <> ")"
+    DnsQueryExitFailure code stderrText ->
+        "dig exited "
+            <> T.pack (show code)
+            <> if T.null stderrText then "" else " (" <> stderrText <> ")"
+    DnsQueryResponseFailure status -> "DNS server returned " <> status
+    DnsQueryStatusMissing -> "dig returned no parseable DNS status"
+
+{- | Cache successful DNS infrastructure discovery for the duration of a
+command. Failed discovery is deliberately not cached so a later observation
+phase can recover from a transient DNS failure.
+
+Record answers (including lookup failures) are cached separately in a
+short-lived 'DnsObservationCache' for one logical observation phase. Starting a
+new phase creates a fresh observation cache, so post-update propagation checks
+never reuse pre-update answers or failures.
 -}
 data DnsLookupCache
     = DnsLookupCache
@@ -208,6 +260,23 @@ cachedLookup cacheRef key loadValue = do
             modifyIORef' cacheRef (M.insert key value)
             pure value
 
+cachedSuccessfulLookup ::
+    (Ord k) =>
+    IORef (M.Map k v) ->
+    k ->
+    IO (Either e v) ->
+    IO (Either e v)
+cachedSuccessfulLookup cacheRef key loadValue = do
+    cache <- readIORef cacheRef
+    case M.lookup key cache of
+        Just value -> pure (Right value)
+        Nothing ->
+            loadValue >>= \case
+                Left err -> pure (Left err)
+                Right value -> do
+                    modifyIORef' cacheRef (M.insert key value)
+                    pure (Right value)
+
 tryAny :: IO a -> IO (Either SomeException a)
 tryAny = try
 
@@ -219,103 +288,85 @@ mapConcurrentlyIO action values = do
         pure resultVar
     forM resultVars takeMVar
 
-digCnameForPlanSafety :: Text -> IO (Either Text [Text])
-digCnameForPlanSafety name = do
+digRRResult :: Int -> Maybe Text -> Text -> Text -> IO (Either DnsLookupFailure [Text])
+digRRResult timeoutSeconds mNameserver name rr = do
+    let serverArgs = maybe [] (\nameserver -> ["@" <> T.unpack nameserver]) mNameserver
     let args =
-            [ "+time=2"
-            , "+tries=1"
-            , "+noall"
-            , "+comments"
-            , "+answer"
-            , T.unpack name
-            , "CNAME"
-            ]
-    result <- tryAny (readProcessWithExitCode "dig" args "")
-    pure $ case result of
-        Left err ->
-            Left
-                ( "DNS lookup for "
-                    <> name
-                    <> " failed to execute: "
-                    <> T.pack (displayException err)
-                )
-        Right (ExitFailure code, _out, err) ->
-            Left
-                ( "DNS lookup for "
-                    <> name
-                    <> " failed (dig exit "
-                    <> T.pack (show code)
-                    <> "): "
-                    <> T.strip (T.pack err)
-                )
-        Right (ExitSuccess, out, _err) ->
-            let output = T.pack out
-                responseStatus =
-                    listToMaybe
-                        [ status
-                        | line <- T.lines output
-                        , let (_, suffix) = T.breakOn "status:" line
-                        , not (T.null suffix)
-                        , let statusText = T.strip (T.drop (T.length ("status:" :: Text)) suffix)
-                        , let status = T.takeWhile (\c -> c /= ',' && c /= ' ' && c /= '\t') statusText
-                        , not (T.null status)
-                        ]
-                answers =
-                    [ normalizeDnsName target
-                    | line <- T.lines output
-                    , let stripped = T.strip line
-                    , not (T.null stripped)
-                    , not (";" `T.isPrefixOf` stripped)
-                    , target : _ <- [reverse (T.words stripped)]
-                    ]
-             in case responseStatus of
-                    Just "NOERROR" -> Right answers
-                    Just "NXDOMAIN" -> Right []
-                    Just status ->
-                        Left
-                            ( "DNS lookup for "
-                                <> name
-                                <> " returned "
-                                <> status
-                            )
-                    Nothing ->
-                        Left
-                            ( "DNS lookup for "
-                                <> name
-                                <> " returned no parseable DNS status"
-                            )
-
-digRRRaw :: Maybe Text -> Text -> Text -> IO [Text]
-digRRRaw mNameserver name rr = do
-    let serverArgs = maybe [] (\nameserver -> ["@" <> T.unpack nameserver]) mNameserver
-    let args = serverArgs <> ["+short", "+time=1", "+tries=1", T.unpack name, T.unpack rr]
-    (code, out, _err) <- readProcessWithExitCode "dig" args ""
-    case code of
-        ExitFailure _ -> pure []
-        ExitSuccess ->
-            pure $
-                filter (not . T.null) $
-                    map (stripDot . T.toLower . T.strip . T.pack) $
-                        lines out
-digRRRawResult :: Maybe Text -> Text -> Text -> IO (Either Text [Text])
-digRRRawResult mNameserver name rr = do
-    let serverArgs = maybe [] (\nameserver -> ["@" <> T.unpack nameserver]) mNameserver
-    let args = serverArgs <> ["+short", "+time=1", "+tries=1", T.unpack name, T.unpack rr]
+            serverArgs
+                <> [ "+time=" <> show timeoutSeconds
+                   , "+tries=1"
+                   , "+noall"
+                   , "+comments"
+                   , "+answer"
+                   , T.unpack name
+                   , T.unpack rr
+                   ]
     result <- tryAny (readProcessWithExitCode "dig" args "")
     pure $
         case result of
-            Left err -> Left (T.pack (displayException err))
+            Left err ->
+                Left
+                    ( DnsQueryFailed
+                        mNameserver
+                        name
+                        rr
+                        (DnsQueryExecutionFailure (T.pack (displayException err)))
+                    )
             Right (ExitFailure code, _out, err) ->
                 Left
-                    ( "dig exited "
-                        <> T.pack (show code)
-                        <> if null err then "" else ": " <> T.strip (T.pack err)
+                    ( DnsQueryFailed
+                        mNameserver
+                        name
+                        rr
+                        (DnsQueryExitFailure code (T.strip (T.pack err)))
                     )
             Right (ExitSuccess, out, _err) ->
-                Right $
-                    filter (not . T.null) $
-                        map (stripDot . T.toLower . T.strip . T.pack) $
-                            lines out
+                let output = T.pack out
+                    responseStatus =
+                        listToMaybe
+                            [ status
+                            | line <- T.lines output
+                            , let (_, suffix) = T.breakOn "status:" line
+                            , not (T.null suffix)
+                            , let statusText = T.strip (T.drop (T.length ("status:" :: Text)) suffix)
+                            , let status = T.takeWhile (\c -> c /= ',' && c /= ' ' && c /= '\t') statusText
+                            , not (T.null status)
+                            ]
+                    answers =
+                        [ normalizeDnsName target
+                        | line <- T.lines output
+                        , let stripped = T.strip line
+                        , not (T.null stripped)
+                        , not (";" `T.isPrefixOf` stripped)
+                        , target : _ <- [reverse (T.words stripped)]
+                        ]
+                 in case responseStatus of
+                        Just "NOERROR" -> Right answers
+                        Just "NXDOMAIN" -> Right []
+                        Just status ->
+                            Left
+                                ( DnsQueryFailed
+                                    mNameserver
+                                    name
+                                    rr
+                                    (DnsQueryResponseFailure status)
+                                )
+                        Nothing ->
+                            Left
+                                ( DnsQueryFailed
+                                    mNameserver
+                                    name
+                                    rr
+                                    DnsQueryStatusMissing
+                                )
+
+digCnameForPlanSafety :: Text -> IO (Either Text [Text])
+digCnameForPlanSafety name = do
+    result <- digRRResult 2 Nothing name "CNAME"
+    pure $
+        case result of
+            Left err -> Left (renderDnsLookupFailure err)
+            Right answers -> Right answers
 
 zoneCandidates :: Text -> [Text]
 zoneCandidates name =
@@ -327,134 +378,168 @@ zoneCandidates name =
                 else [0 .. labelCount - 2]
      in map (\idx -> T.intercalate "." (drop idx labels)) indices
 
-findAuthoritativeNameserversWith :: DnsLookupCache -> Text -> IO [Text]
-findAuthoritativeNameserversWith cache@(DnsLookupCache authoritativeCache _) name =
-    cachedLookup authoritativeCache (normalizeDnsName name) (go (zoneCandidates name))
-  where
-    go [] = pure []
-    go (candidate : rest) = do
-        nameservers <- findZoneNameservers cache candidate
-        if null nameservers
-            then go rest
-            else pure nameservers
-
-findZoneNameservers :: DnsLookupCache -> Text -> IO [Text]
+findZoneNameservers :: DnsLookupCache -> Text -> IO (Either DnsLookupFailure [Text])
 findZoneNameservers (DnsLookupCache _ zoneCache) zone =
-    cachedLookup zoneCache (normalizeDnsName zone) (digRRRaw Nothing zone "NS")
+    cachedSuccessfulLookup
+        zoneCache
+        (normalizeDnsName zone)
+        (digRRResult 1 Nothing zone "NS")
 
-digRRWith :: DnsLookupCache -> Text -> Text -> IO [Text]
-digRRWith cache name rr = do
-    authoritativeNameservers <- findAuthoritativeNameserversWith cache name
-    case authoritativeNameservers of
-        [] -> digRRRaw Nothing name rr
-        nameservers -> do
-            queryResults <- mapConcurrentlyIO (\nameserver -> digRRRaw (Just nameserver) name rr) nameservers
-            let answersByNameserver = [answers | Right answers <- queryResults]
-            let nonEmptyAnswers = filter (not . null) answersByNameserver
-            if null nonEmptyAnswers
-                then digRRRaw Nothing name rr
-                else pure (S.toList (S.fromList (concat nonEmptyAnswers)))
+findAuthoritativeNameserversWith :: DnsLookupCache -> Text -> IO (Either DnsLookupFailure [Text])
+findAuthoritativeNameserversWith cache@(DnsLookupCache authoritativeCache _) name =
+    cachedSuccessfulLookup authoritativeCache (normalizeDnsName name) (go [] (zoneCandidates name))
+  where
+    go failures [] =
+        pure $
+            if null failures
+                then Left (DnsAuthoritativeNameserversNotFound name)
+                else Left (DnsAuthoritativeDiscoveryFailed name (reverse failures))
+    go failures (candidate : rest) =
+        findZoneNameservers cache candidate >>= \case
+            Right [] -> go failures rest
+            Right nameservers -> pure (Right nameservers)
+            Left err -> go ((candidate, err) : failures) rest
 
-queryDnsTargetAt :: Maybe Text -> Text -> IO (Either Text ([Text], [Text]))
-queryDnsTargetAt mNameserver name = do
-    cnameResult <- digRRRawResult mNameserver name "CNAME"
-    case cnameResult of
+concurrentDnsResults ::
+    [Text] ->
+    (Text -> IO (Either DnsLookupFailure a)) ->
+    IO [(Text, Either DnsLookupFailure a)]
+concurrentDnsResults nameservers action = do
+    rawResults <- mapConcurrentlyIO action nameservers
+    pure $
+        zipWith
+            (\nameserver result ->
+                ( nameserver
+                , case result of
+                    Left err ->
+                        Left
+                            ( DnsUnexpectedLookupFailure
+                                ( "query worker for "
+                                    <> nameserver
+                                    <> " failed: "
+                                    <> T.pack (displayException err)
+                                )
+                            )
+                    Right value -> value
+                )
+            )
+            nameservers
+            rawResults
+
+digRRWith :: DnsLookupCache -> Text -> Text -> IO (Either DnsLookupFailure [Text])
+digRRWith cache name rr =
+    findAuthoritativeNameserversWith cache name >>= \case
+        Left err -> pure (Left err)
+        Right nameservers -> do
+            queryResults <-
+                concurrentDnsResults
+                    nameservers
+                    (\nameserver -> digRRResult 1 (Just nameserver) name rr)
+            let failures =
+                    [ (nameserver, err)
+                    | (nameserver, Left err) <- queryResults
+                    ]
+            if null failures
+                then
+                    pure
+                        ( Right
+                            ( S.toList
+                                ( S.fromList
+                                    ( concat
+                                        [ answers
+                                        | (_, Right answers) <- queryResults
+                                        ]
+                                    )
+                                )
+                            )
+                        )
+                else pure (Left (DnsAuthoritativeQueriesFailed name rr failures))
+
+queryDnsTargetAt :: Maybe Text -> Text -> IO (Either DnsLookupFailure ([Text], [Text]))
+queryDnsTargetAt mNameserver name =
+    digRRResult 1 mNameserver name "CNAME" >>= \case
         Left err -> pure (Left err)
         Right cnames
             | not (null cnames) -> pure (Right (cnames, []))
             | otherwise -> do
-                aResult <- digRRRawResult mNameserver name "A"
-                aaaaResult <- digRRRawResult mNameserver name "AAAA"
-                pure $
-                    case (aResult, aaaaResult) of
-                        (Right a4, Right a6) -> Right ([], a4 ++ a6)
-                        (Left err, _) -> Left err
-                        (_, Left err) -> Left err
+                aResult <- digRRResult 1 mNameserver name "A"
+                aaaaResult <- digRRResult 1 mNameserver name "AAAA"
+                pure $ (\a4 a6 -> ([], a4 ++ a6)) <$> aResult <*> aaaaResult
 
-dnsPropagatedToAllAuthoritative :: DnsLookupCache -> Text -> Text -> IO Bool
-dnsPropagatedToAllAuthoritative cache name expectedHost = do
-    authoritativeNameservers <- findAuthoritativeNameserversWith cache name
-    answersByNameserver <-
-        case authoritativeNameservers of
-            [] -> do
-                fallback <- queryDnsTargetAt Nothing name
-                pure [fallback]
-            nameservers -> do
-                queryResults <-
-                    mapConcurrentlyIO
-                        (\nameserver -> queryDnsTargetAt (Just nameserver) name)
-                        nameservers
-                pure $
-                    map
-                        (\result ->
-                            case result of
-                                Left err -> Left (T.pack (displayException err))
-                                Right answers -> answers
-                        )
-                        queryResults
-
-    let needsExpectedAddresses =
-            any
-                (\case
-                    Right (cnames, _) -> null cnames
-                    Left _ -> False
-                )
-                answersByNameserver
-    expectedAddressesResult <-
-        if needsExpectedAddresses
-            then do
-                aResult <- digRRRawResult Nothing expectedHost "A"
-                aaaaResult <- digRRRawResult Nothing expectedHost "AAAA"
-                pure $
-                    case (aResult, aaaaResult) of
-                        (Right a4, Right a6) -> Right (a4 ++ a6)
-                        (Left err, _) -> Left err
-                        (_, Left err) -> Left err
-            else pure (Right [])
-
-    pure $
-        case expectedAddressesResult of
-            Left _ -> False
-            Right expectedAddresses ->
-                DnsTransition.authoritativeDnsTargetConverged
-                    expectedHost
-                    expectedAddresses
-                    answersByNameserver
+dnsPropagatedToAllAuthoritative ::
+    DnsLookupCache ->
+    Text ->
+    Text ->
+    IO (Either DnsLookupFailure Bool)
+dnsPropagatedToAllAuthoritative cache name expectedHost =
+    findAuthoritativeNameserversWith cache name >>= \case
+        Left err -> pure (Left err)
+        Right nameservers -> do
+            queryResults <-
+                concurrentDnsResults
+                    nameservers
+                    (\nameserver -> queryDnsTargetAt (Just nameserver) name)
+            let failures =
+                    [ (nameserver, err)
+                    | (nameserver, Left err) <- queryResults
+                    ]
+            if not (null failures)
+                then pure (Left (DnsAuthoritativeQueriesFailed name "CNAME/A/AAAA" failures))
+                else do
+                    let answersByNameserver =
+                            [ answers
+                            | (_, Right answers) <- queryResults
+                            ]
+                    let needsExpectedAddresses =
+                            any (null . fst) answersByNameserver
+                    expectedAddressesResult <-
+                        if needsExpectedAddresses
+                            then do
+                                aResult <- digRRWith cache expectedHost "A"
+                                aaaaResult <- digRRWith cache expectedHost "AAAA"
+                                pure $ (++) <$> aResult <*> aaaaResult
+                            else pure (Right [])
+                    pure $
+                        DnsTransition.authoritativeDnsTargetConverged
+                            expectedHost
+                            <$> expectedAddressesResult
+                            <*> pure answersByNameserver
 
 digRRObserved ::
     DnsLookupCache ->
-    DnsObservationCache ->
+    DnsObservationCache (Either DnsLookupFailure [Text]) ->
     Text ->
     Text ->
-    IO [Text]
+    IO (Either DnsLookupFailure [Text])
 digRRObserved dnsCache observationCache =
     cacheDnsObservation observationCache (digRRWith dnsCache)
 
 digAddrsObserved ::
     DnsLookupCache ->
-    DnsObservationCache ->
+    DnsObservationCache (Either DnsLookupFailure [Text]) ->
     Text ->
-    IO [Text]
+    IO (Either DnsLookupFailure [Text])
 digAddrsObserved dnsCache observationCache name = do
     a4 <- digRRObserved dnsCache observationCache name "A"
     a6 <- digRRObserved dnsCache observationCache name "AAAA"
-    pure $ a4 ++ a6
+    pure $ (++) <$> a4 <*> a6
 
 dnsPointsToObserved ::
     DnsLookupCache ->
-    DnsObservationCache ->
+    DnsObservationCache (Either DnsLookupFailure [Text]) ->
     Text ->
     Text ->
-    IO Bool
+    IO (Either DnsLookupFailure Bool)
 dnsPointsToObserved dnsCache observationCache vhost expectedHost = do
     let expectHostNorm = normalizeDnsName expectedHost
-    cn <- digRRObserved dnsCache observationCache vhost "CNAME"
-    if expectHostNorm `elem` cn
-        then pure True
-        else do
-            expIPs <- digAddrsObserved dnsCache observationCache expectedHost
-            vhIPs <- digAddrsObserved dnsCache observationCache vhost
-            pure $ not (null (expIPs `intersect` vhIPs))
+    digRRObserved dnsCache observationCache vhost "CNAME" >>= \case
+        Left err -> pure (Left err)
+        Right cn
+            | expectHostNorm `elem` cn -> pure (Right True)
+            | otherwise -> do
+                expIPs <- digAddrsObserved dnsCache observationCache expectedHost
+                vhIPs <- digAddrsObserved dnsCache observationCache vhost
+                pure $ (\expectedIps vhostIps -> not (null (expectedIps `intersect` vhostIps))) <$> expIPs <*> vhIPs
 
 -- -------- JSON helpers --------
 lookupText :: KM.Key -> KM.KeyMap A.Value -> Maybe Text

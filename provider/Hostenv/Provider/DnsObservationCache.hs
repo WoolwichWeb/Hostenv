@@ -12,19 +12,19 @@ import Data.Map.Strict qualified as M
 import Data.Text (Text)
 import Data.Text qualified as T
 
-newtype DnsObservationCache =
-    DnsObservationCache (IORef (M.Map (Text, Text) [Text]))
+newtype DnsObservationCache a =
+    DnsObservationCache (IORef (M.Map (Text, Text) a))
 
-newDnsObservationCache :: IO DnsObservationCache
+newDnsObservationCache :: IO (DnsObservationCache a)
 newDnsObservationCache =
     DnsObservationCache <$> newIORef M.empty
 
 cacheDnsObservation ::
-    DnsObservationCache ->
-    (Text -> Text -> IO [Text]) ->
+    DnsObservationCache a ->
+    (Text -> Text -> IO a) ->
     Text ->
     Text ->
-    IO [Text]
+    IO a
 cacheDnsObservation (DnsObservationCache cacheRef) lookupRecord name rr = do
     let key = (normalizeDnsName name, T.toUpper (T.strip rr))
     cache <- readIORef cacheRef

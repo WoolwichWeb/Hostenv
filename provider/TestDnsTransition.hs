@@ -41,8 +41,8 @@ main = do
         ( authoritativeDnsTargetConverged
             "new-node.hosting.test"
             []
-            [ Right (["new-node.hosting.test"], [])
-            , Right (["new-node.hosting.test."], [])
+            [ (["new-node.hosting.test"], [])
+            , (["new-node.hosting.test."], [])
             ]
         )
         "all authoritative nameservers agreeing on the destination CNAME should be ready"
@@ -52,8 +52,8 @@ main = do
             ( authoritativeDnsTargetConverged
                 "new-node.hosting.test"
                 []
-                [ Right (["old-node.hosting.test"], [])
-                , Right (["new-node.hosting.test"], [])
+                [ (["old-node.hosting.test"], [])
+                , (["new-node.hosting.test"], [])
                 ]
             )
         )
@@ -63,8 +63,8 @@ main = do
         ( authoritativeDnsTargetConverged
             "new-node.hosting.test"
             ["192.0.2.20", "2001:db8::20"]
-            [ Right ([], ["192.0.2.20"])
-            , Right ([], ["2001:db8::20"])
+            [ ([], ["192.0.2.20"])
+            , ([], ["2001:db8::20"])
             ]
         )
         "direct address records that all belong to the destination should be ready"
@@ -74,8 +74,8 @@ main = do
             ( authoritativeDnsTargetConverged
                 "new-node.hosting.test"
                 ["192.0.2.20"]
-                [ Right ([], ["192.0.2.10"])
-                , Right ([], ["192.0.2.20"])
+                [ ([], ["192.0.2.10"])
+                , ([], ["192.0.2.20"])
                 ]
             )
         )
@@ -86,9 +86,7 @@ main = do
             ( authoritativeDnsTargetConverged
                 "new-node.hosting.test"
                 []
-                [ Right (["new-node.hosting.test"], [])
-                , Left "nameserver timed out"
-                ]
+                []
             )
         )
-        "a failed authoritative lookup should not be treated as propagated"
+        "no authoritative observations should not be treated as propagated"
