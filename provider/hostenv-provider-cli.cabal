@@ -19,6 +19,7 @@ executable hostenv-provider
     Hostenv.Provider.MigrationHandoff
     Hostenv.Provider.SigningTarget
     Hostenv.Provider.TlsReadiness
+    Hostenv.Provider.UserLifecycle
   build-depends:
     base >=4.14 && <5,
     Cabal,

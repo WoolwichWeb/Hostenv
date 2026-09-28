@@ -40,6 +40,7 @@ import Hostenv.Provider.DnsTransition (
  )
 import Hostenv.Provider.SigningTarget (deployProfilePathInstallableAt)
 import Hostenv.Provider.TlsReadiness qualified as TlsReadiness
+import Hostenv.Provider.UserLifecycle qualified as UserLifecycle
 import Options.Applicative qualified as OA
 import System.Directory qualified as Dir
 import System.Environment qualified as Env
@@ -1042,6 +1043,21 @@ runRemoteOutput :: SshTarget -> [Text] -> IO (ExitCode, Text, Text)
 runRemoteOutput target args =
     runRemoteScriptOutput target (scriptForArgs args)
 
+mkUserLifecycleOps :: Text -> (Text -> NodeConnection) -> UserLifecycle.Ops
+mkUserLifecycleOps deployUser resolveNodeConnection =
+    UserLifecycle.Ops
+        { runRemote = \nodeName args ->
+            runRemote (mkSshTarget deployUser (resolveNodeConnection nodeName)) args
+        , runRemoteOutput = \nodeName args ->
+            runRemoteOutput (mkSshTarget deployUser (resolveNodeConnection nodeName)) args
+        , runRemoteScriptOutput = \nodeName script ->
+            runRemoteScriptOutput (mkSshTarget deployUser (resolveNodeConnection nodeName)) script
+        , runRemoteStrict = \nodeName args ->
+            runRemoteStrict (mkSshTarget deployUser (resolveNodeConnection nodeName)) args
+        , printLine = printProviderLine
+        , printErrLine = printProviderErrLine
+        }
+
 data SigningKeyInfo = SigningKeyInfo
     { secretKeyPath :: Text
     , publicKeyPath :: Text
@@ -1311,96 +1327,6 @@ runNodeDeployPreflight resolveNodeConnection deployUser nodeName requiresTrusted
             , signingPublicKey = signingPublicKey
             , runRemote = runRemoteOutput target
             }
-
-readNodeUsers ::
-    Text ->
-    (Text -> NodeConnection) ->
-    Text ->
-    IO (Either Text (Text, M.Map Text Integer))
-readNodeUsers deployUser nodeConnection nodeName = do
-    let target = mkSshTarget deployUser (nodeConnection nodeName)
-    (code, out, err) <- runRemoteOutput target ["getent", "passwd"]
-    case code of
-        ExitSuccess ->
-            pure (Right (nodeName, EnvironmentState.parsePasswdUsers out))
-        ExitFailure exitCode ->
-            pure
-                ( Left
-                    ( "failed to read passwd database on "
-                        <> nodeName
-                        <> " (exit "
-                        <> T.pack (show exitCode)
-                        <> "): "
-                        <> T.strip err
-                    )
-                )
-
-readNodeRuntimeUsers ::
-    Text ->
-    (Text -> NodeConnection) ->
-    [(Text, Integer)] ->
-    Text ->
-    IO (Either Text (Text, S.Set Text))
-readNodeRuntimeUsers deployUser nodeConnection identities nodeName = do
-    let target = mkSshTarget deployUser (nodeConnection nodeName)
-    let probeFor (userName, uid) =
-            let lingerPath = "/var/lib/systemd/linger/" <> userName
-                unit = "user@" <> T.pack (show uid) <> ".service"
-                runtimeDir = "/run/user/" <> T.pack (show uid)
-             in T.unlines
-                    [ "set +e"
-                    , "unit_row=$(systemctl list-units --all --full --plain --no-legend " <> shellEscape unit <> ")"
-                    , "unit_status=$?"
-                    , "set -e"
-                    , "if [ \"$unit_status\" -ne 0 ]; then"
-                    , "  echo \"failed to inspect " <> unit <> " (systemctl exit $unit_status)\" >&2"
-                    , "  exit \"$unit_status\""
-                    , "fi"
-                    , "if [ -z \"$unit_row\" ]; then"
-                    , "  unit_active=0"
-                    , "else"
-                    , "  read -r _unit _load unit_state _rest <<< \"$unit_row\""
-                    , "  case \"$unit_state\" in"
-                    , "    active|reloading|activating|deactivating) unit_active=1 ;;"
-                    , "    inactive|failed) unit_active=0 ;;"
-                    , "    *) echo \"unexpected ActiveState for " <> unit <> ": $unit_state\" >&2; exit 92 ;;"
-                    , "  esac"
-                    , "fi"
-                    , "if [ -e " <> shellEscape lingerPath <> " ]"
-                        <> " || [ \"$unit_active\" -eq 1 ]"
-                        <> " || [ -e "
-                        <> shellEscape runtimeDir
-                        <> " ]; then"
-                    , "  printf '%s\\n' " <> shellEscape userName
-                    , "fi"
-                    ]
-    let probeScript =
-            T.unlines
-                ( [ "set -euo pipefail"
-                  , "# HOSTENV_RUNTIME_PROBE"
-                  ]
-                    ++ map probeFor identities
-                )
-    (code, out, err) <- runRemoteScriptOutput target probeScript
-    case code of
-        ExitSuccess ->
-            pure
-                ( Right
-                    ( nodeName
-                    , S.fromList (filter (not . T.null) (map T.strip (T.lines out)))
-                    )
-                )
-        ExitFailure exitCode ->
-            pure
-                ( Left
-                    ( "failed to inspect Hostenv user runtime state on "
-                        <> nodeName
-                        <> " (exit "
-                        <> T.pack (show exitCode)
-                        <> "): "
-                        <> T.strip err
-                    )
-                )
 
 planEnvironmentAssignments :: KM.KeyMap A.Value -> [(Text, Text)]
 planEnvironmentAssignments plan =
@@ -1701,257 +1627,6 @@ validatePlanTransition planPath statePath newPlanRaw = do
     when (isNothing previousPlan || not (null removedNodes)) $
         validatePlanDnsSafety previousPlan newPlan
 
-prepareManagedUserCleanupOnNode ::
-    Text ->
-    (Text -> NodeConnection) ->
-    M.Map Text Text ->
-    M.Map Text Integer ->
-    S.Set Text ->
-    KM.KeyMap A.Value ->
-    Text ->
-    (Text -> Integer -> IO ()) ->
-    IO (Either Text ([(Text, Integer)], [Text]))
-prepareManagedUserCleanupOnNode deployUser nodeConnection desiredNodes observedUsers runtimeUsers state nodeName onCleaned = do
-    let target = mkSshTarget deployUser (nodeConnection nodeName)
-    let uidMismatches =
-            EnvironmentState.managedUserUidMismatches
-                observedUsers
-                state
-    let uidOwnerConflicts =
-            EnvironmentState.managedReservedUidConflicts
-                observedUsers
-                state
-    let retiredUsers =
-            EnvironmentState.managedUsersToRetire
-                nodeName
-                desiredNodes
-                observedUsers
-                runtimeUsers
-                state
-    if not (null uidMismatches) || not (null uidOwnerConflicts)
-        then
-            pure
-                ( Left
-                    ( "Hostenv-managed user UID mismatch on "
-                        <> nodeName
-                        <> ": "
-                        <> T.intercalate
-                            ", "
-                            [ userName
-                                <> " observed="
-                                <> T.pack (show observedUid)
-                                <> " expected="
-                                <> T.pack (show expectedUid)
-                            | (userName, expectedUid, observedUid) <- uidMismatches
-                            ]
-                        <> ( if null uidOwnerConflicts
-                                then ""
-                                else
-                                    "; reserved UID conflict(s): "
-                                        <> T.intercalate
-                                            ", "
-                                            [ userName
-                                                <> " expected UID "
-                                                <> T.pack (show expectedUid)
-                                                <> " is owned by "
-                                                <> owner
-                                            | (userName, expectedUid, owner) <- uidOwnerConflicts
-                                            ]
-                           )
-                        <> ". Refusing system deployment until the account drift is resolved."
-                    )
-                )
-        else do
-            cleanupResults <-
-                forM retiredUsers $ \(userName, uid) -> do
-                    let lingerPath = "/var/lib/systemd/linger/" <> userName
-                    let unit = "user@" <> T.pack (show uid) <> ".service"
-                    let runtimeDir = "/run/user/" <> T.pack (show uid)
-                    let cleanupCmd =
-                            "set -euo pipefail; "
-                                <> "if getent passwd "
-                                <> shellEscape userName
-                                <> " >/dev/null; then "
-                                <> "sudo loginctl disable-linger "
-                                <> shellEscape userName
-                                <> " || sudo rm -f "
-                                <> shellEscape lingerPath
-                                <> "; else sudo rm -f "
-                                <> shellEscape lingerPath
-                                <> "; fi; "
-                                <> "set +e; unit_row=$(systemctl list-units --all --full --plain --no-legend "
-                                <> shellEscape unit
-                                <> "); unit_status=$?; set -e; "
-                                <> "if [ \"$unit_status\" -ne 0 ]; then echo \"failed to inspect "
-                                <> unit
-                                <> " (systemctl exit $unit_status)\" >&2; exit \"$unit_status\"; fi; "
-                                <> "stop_status=0; "
-                                <> "if [ -n \"$unit_row\" ]; then "
-                                <> "read -r _unit _load unit_state _rest <<< \"$unit_row\"; "
-                                <> "case \"$unit_state\" in "
-                                <> "active|reloading|activating|deactivating) sudo systemctl stop "
-                                <> shellEscape unit
-                                <> " || stop_status=$? ;; "
-                                <> "inactive|failed) ;; "
-                                <> "*) echo \"unexpected ActiveState for "
-                                <> unit
-                                <> ": $unit_state\" >&2; exit 92 ;; "
-                                <> "esac; fi; "
-                                <> "set +e; unit_row=$(systemctl list-units --all --full --plain --no-legend "
-                                <> shellEscape unit
-                                <> "); unit_status=$?; set -e; "
-                                <> "if [ \"$unit_status\" -ne 0 ]; then echo \"failed to verify "
-                                <> unit
-                                <> " after cleanup (systemctl exit $unit_status)\" >&2; exit \"$unit_status\"; fi; "
-                                <> "if [ -n \"$unit_row\" ]; then "
-                                <> "read -r _unit _load unit_state _rest <<< \"$unit_row\"; "
-                                <> "case \"$unit_state\" in "
-                                <> "inactive|failed) ;; "
-                                <> "active|reloading|activating|deactivating) echo \""
-                                <> unit
-                                <> " is still active after cleanup ($unit_state; stop exit $stop_status)\" >&2; exit 90 ;; "
-                                <> "*) echo \"unexpected ActiveState for "
-                                <> unit
-                                <> " after cleanup: $unit_state\" >&2; exit 92 ;; "
-                                <> "esac; fi; "
-                                <> "if [ -e "
-                                <> shellEscape lingerPath
-                                <> " ]; then echo \"linger remains for "
-                                <> userName
-                                <> " after cleanup\" >&2; exit 91; fi; "
-                                <> "if ! getent passwd "
-                                <> shellEscape userName
-                                <> " >/dev/null; then "
-                                <> "runtime_unit=user-runtime-dir@"
-                                <> T.pack (show uid)
-                                <> ".service; "
-                                <> "sudo systemctl stop \"$runtime_unit\" >/dev/null 2>&1 || true; "
-                                <> "if [ -e "
-                                <> shellEscape runtimeDir
-                                <> " ]; then echo \"runtime directory remains after cleanup: "
-                                <> runtimeDir
-                                <> "\" >&2; exit 93; fi; "
-                                <> "fi"
-                    printProviderLine ("hostenv-provider: preparing retirement of Hostenv user " <> userName <> " from " <> nodeName)
-                    (code, cleanupOut, cleanupErr) <- runRemoteOutput target ["bash", "-lc", cleanupCmd]
-                    when (code /= ExitSuccess) $ do
-                        let detail =
-                                T.strip $
-                                    if T.null (T.strip cleanupErr)
-                                        then cleanupOut
-                                        else cleanupErr
-                        printProviderErrLine
-                            ( "hostenv-provider: error: cleanup command failed for "
-                                <> userName
-                                <> " on "
-                                <> nodeName
-                                <> if T.null detail then "" else ": " <> detail
-                            )
-                    when (code == ExitSuccess) (onCleaned userName uid)
-                    pure ((userName, uid), code)
-            let cleanedUsers = [user | (user, code) <- cleanupResults, code == ExitSuccess]
-            let failures = [userName | ((userName, _), code) <- cleanupResults, code /= ExitSuccess]
-            unless (null failures) $ do
-                -- Fully retired users have no accepted destination to protect.
-                -- Restore every attempted retirement on a partially failed node,
-                -- while leaving successfully quiesced moved users stopped so the
-                -- caller can persist their handoff markers individually.
-                let rollbackUsers =
-                        filter
-                            (\(userName, _) -> M.notMember userName desiredNodes)
-                            (map fst cleanupResults)
-                rollbackManagedUserCleanupOnNode
-                    deployUser
-                    nodeConnection
-                    nodeName
-                    rollbackUsers
-            pure (Right (cleanedUsers, failures))
-
-rollbackManagedUserCleanupOnNode ::
-    Text ->
-    (Text -> NodeConnection) ->
-    Text ->
-    [(Text, Integer)] ->
-    IO ()
-rollbackManagedUserCleanupOnNode deployUser nodeConnection nodeName users = do
-    let target = mkSshTarget deployUser (nodeConnection nodeName)
-    forM_ users $ \(userName, uid) -> do
-        let unit = "user@" <> T.pack (show uid) <> ".service"
-        let rollbackCmd =
-                "if getent passwd "
-                    <> shellEscape userName
-                    <> " >/dev/null; then "
-                    <> "sudo loginctl enable-linger "
-                    <> shellEscape userName
-                    <> " >/dev/null 2>&1 || true; "
-                    <> "sudo systemctl start "
-                    <> shellEscape unit
-                    <> " >/dev/null 2>&1 || true; "
-                    <> "fi"
-        printProviderLine ("hostenv-provider: restoring Hostenv user manager after failed system deployment: " <> userName <> " on " <> nodeName)
-        _ <- runRemote target ["bash", "-lc", rollbackCmd]
-        pure ()
-
-managedUserIsQuiescedOnNode ::
-    Text ->
-    (Text -> NodeConnection) ->
-    Text ->
-    Integer ->
-    Text ->
-    IO Bool
-managedUserIsQuiescedOnNode deployUser nodeConnection userName uid nodeName = do
-    let target = mkSshTarget deployUser (nodeConnection nodeName)
-    let unit = "user@" <> T.pack (show uid) <> ".service"
-    let probeScript =
-            T.unlines
-                [ "set -euo pipefail"
-                , "# HOSTENV_USER_MANAGER_PROBE " <> userName
-                , "set +e"
-                , "unit_row=$(systemctl list-units --all --full --plain --no-legend " <> shellEscape unit <> ")"
-                , "unit_status=$?"
-                , "set -e"
-                , "if [ \"$unit_status\" -ne 0 ]; then"
-                , "  echo \"failed to inspect " <> unit <> " (systemctl exit $unit_status)\" >&2"
-                , "  exit \"$unit_status\""
-                , "fi"
-                , "if [ -z \"$unit_row\" ]; then"
-                , "  printf 'quiesced\\n'"
-                , "else"
-                , "  read -r _unit _load unit_state _rest <<< \"$unit_row\""
-                , "  case \"$unit_state\" in"
-                , "    inactive|failed) printf 'quiesced\\n' ;;"
-                , "    active|reloading|activating|deactivating) printf 'active\\n' ;;"
-                , "    *) echo \"unexpected ActiveState for " <> unit <> ": $unit_state\" >&2; exit 92 ;;"
-                , "  esac"
-                , "fi"
-                ]
-    (code, out, err) <- runRemoteScriptOutput target probeScript
-    case code of
-        ExitFailure exitCode ->
-            error
-                ( "failed to inspect Hostenv user manager for "
-                    <> T.unpack userName
-                    <> " on "
-                    <> T.unpack nodeName
-                    <> " (exit "
-                    <> show exitCode
-                    <> "): "
-                    <> T.unpack (T.strip err)
-                )
-        ExitSuccess ->
-            case T.strip out of
-                "quiesced" -> pure True
-                "active" -> pure False
-                other ->
-                    error
-                        ( "unexpected Hostenv user-manager probe result for "
-                            <> T.unpack userName
-                            <> " on "
-                            <> T.unpack nodeName
-                            <> ": "
-                            <> T.unpack other
-                        )
-
 runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
 runMigrationBackup deployUser nodeConnection envInfo prevNode backupName = do
     let sourceTarget = mkSshTarget deployUser (nodeConnection prevNode)
@@ -2070,160 +1745,6 @@ clearRestorePlan deployUser nodeConnection envInfo = do
             printProviderLine ("hostenv-provider: removed pending restore plan for skipped environment " <> envInfo.userName)
         _ ->
             printProviderLine ("hostenv-provider: no pending restore plan for skipped environment " <> envInfo.userName)
-
-readMigrationHandoff ::
-    Text ->
-    (Text -> NodeConnection) ->
-    EnvInfo ->
-    IO (Maybe MigrationHandoff.MigrationHandoff)
-readMigrationHandoff deployUser nodeConnection envInfo = do
-    let target = mkSshTarget deployUser (nodeConnection envInfo.node)
-    raw <- runRemoteStrict target ["bash", "-lc", MigrationHandoff.readCommand envInfo.uid]
-    case MigrationHandoff.parseMigrationHandoff raw of
-        Left err ->
-            error
-                ( "invalid migration handoff state for "
-                    <> T.unpack envInfo.userName
-                    <> ": "
-                    <> T.unpack err
-                )
-        Right handoff -> pure handoff
-
-readNodeMigrationHandoffs ::
-    Text ->
-    (Text -> NodeConnection) ->
-    Text ->
-    IO (Either Text [(Integer, MigrationHandoff.MigrationHandoff)])
-readNodeMigrationHandoffs deployUser nodeConnection nodeName = do
-    let target = mkSshTarget deployUser (nodeConnection nodeName)
-    (code, out, err) <- runRemoteScriptOutput target MigrationHandoff.listCommand
-    case code of
-        ExitFailure exitCode ->
-            pure
-                ( Left
-                    ( "failed to inspect migration handoffs on "
-                        <> nodeName
-                        <> " (exit "
-                        <> T.pack (show exitCode)
-                        <> "): "
-                        <> T.strip err
-                    )
-                )
-        ExitSuccess ->
-            pure $
-                case MigrationHandoff.parseHandoffListing out of
-                    Left parseErr ->
-                        Left
-                            ( "invalid migration handoff state on "
-                                <> nodeName
-                                <> ": "
-                                <> parseErr
-                            )
-                    Right handoffs -> Right handoffs
-
-writeMigrationHandoff ::
-    Text ->
-    (Text -> NodeConnection) ->
-    EnvInfo ->
-    Text ->
-    MigrationHandoff.MigrationHandoffPhase ->
-    IO ()
-writeMigrationHandoff deployUser nodeConnection envInfo sourceNode phase = do
-    let target = mkSshTarget deployUser (nodeConnection envInfo.node)
-    let handoff = MigrationHandoff.MigrationHandoff sourceNode phase
-    let phaseName = MigrationHandoff.phaseText phase
-    result <-
-        runRemote
-            target
-            [ "bash"
-            , "-lc"
-            , MigrationHandoff.writeAtomicCommand envInfo.uid handoff
-            ]
-    case result of
-        ExitSuccess ->
-            printProviderLine
-                ( "hostenv-provider: recorded migration handoff "
-                    <> phaseName
-                    <> " for "
-                    <> envInfo.userName
-                    <> " from "
-                    <> sourceNode
-                )
-        ExitFailure code ->
-            error
-                ( "failed to record migration handoff "
-                    <> T.unpack phaseName
-                    <> " for "
-                    <> T.unpack envInfo.userName
-                    <> " (exit "
-                    <> show code
-                    <> ")"
-                )
-
-writeMigrationHandoffAccepted ::
-    Text ->
-    (Text -> NodeConnection) ->
-    EnvInfo ->
-    Text ->
-    IO ()
-writeMigrationHandoffAccepted deployUser nodeConnection envInfo sourceNode = do
-    existing <- readMigrationHandoff deployUser nodeConnection envInfo
-    case existing of
-        Just handoff
-            | MigrationHandoff.handoffSourceNode handoff == sourceNode
-            , MigrationHandoff.handoffPhase handoff == MigrationHandoff.HandoffQuiesced ->
-                pure ()
-        _ ->
-            writeMigrationHandoff
-                deployUser
-                nodeConnection
-                envInfo
-                sourceNode
-                MigrationHandoff.HandoffAccepted
-
-writeMigrationHandoffQuiesced ::
-    Text ->
-    (Text -> NodeConnection) ->
-    EnvInfo ->
-    Text ->
-    IO ()
-writeMigrationHandoffQuiesced deployUser nodeConnection envInfo sourceNode =
-    writeMigrationHandoff
-        deployUser
-        nodeConnection
-        envInfo
-        sourceNode
-        MigrationHandoff.HandoffQuiesced
-
-clearMigrationHandoffOnNode ::
-    Text ->
-    (Text -> NodeConnection) ->
-    Text ->
-    Integer ->
-    Text ->
-    IO ()
-clearMigrationHandoffOnNode deployUser nodeConnection userName uid nodeName = do
-    let target = mkSshTarget deployUser (nodeConnection nodeName)
-    result <-
-        runRemote
-            target
-            [ "bash"
-            , "-lc"
-            , MigrationHandoff.clearCommand uid
-            ]
-    case result of
-        ExitSuccess -> pure ()
-        ExitFailure code ->
-            error
-                ( "failed to clear migration handoff marker for "
-                    <> T.unpack userName
-                    <> " on "
-                    <> T.unpack nodeName
-                    <> " (exit "
-                    <> show code
-                    <> ")"
-                )
-
 
 writeRestorePlan :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> [(Text, Text)] -> IO ()
 writeRestorePlan deployUser nodeConnection envInfo prevNode snapshots = do
@@ -2455,6 +1976,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                 Sh.exitWith $ if failures then ExitFailure 1 else ExitSuccess
 
             let deployUser = planDeployUser plan
+            let userLifecycleOps = mkUserLifecycleOps deployUser resolveNodeConnection
             let remoteBuildMap = planNodeRemoteBuild plan
             let usesRemoteBuild nodeName = forceRemoteBuild || nodeUsesRemoteBuild remoteBuildMap nodeName
             let requiresLocalPush nodeName = not (usesRemoteBuild nodeName)
@@ -2530,7 +2052,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                             ++ if null lifecycleEnvInfos then [] else discoveryNodes
             observedResults <-
                 forM observationNodes $
-                    readNodeUsers deployUser resolveNodeConnection
+                    UserLifecycle.readNodeUsers userLifecycleOps
             let observationErrors = [err | Left err <- observedResults]
             unless (null observationErrors) $ do
                 forM_ observationErrors $
@@ -2542,9 +2064,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
             let managedIdentities = EnvironmentState.managedIdentities state
             runtimeResults <-
                 forM observationNodes $
-                    readNodeRuntimeUsers
-                        deployUser
-                        resolveNodeConnection
+                    UserLifecycle.readNodeRuntimeUsers
+                        userLifecycleOps
                         managedIdentities
             let runtimeErrors = [err | Left err <- runtimeResults]
             unless (null runtimeErrors) $ do
@@ -2605,10 +2126,11 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                 fmap catMaybes $
                     forM lifecycleEnvInfos $ \envInfo -> do
                         existingHandoff <-
-                            readMigrationHandoff
-                                deployUser
-                                resolveNodeConnection
-                                envInfo
+                            UserLifecycle.readMigrationHandoff
+                                userLifecycleOps
+                                envInfo.userName
+                                envInfo.uid
+                                envInfo.node
                         pure $
                             case existingHandoff of
                                 Nothing -> Nothing
@@ -2703,10 +2225,11 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                 Right Nothing -> Right Nothing
                                         [sourceNode] -> do
                                             completedHandoff <-
-                                                readMigrationHandoff
-                                                    deployUser
-                                                    resolveNodeConnection
-                                                    envInfo
+                                                UserLifecycle.readMigrationHandoff
+                                                    userLifecycleOps
+                                                    envInfo.userName
+                                                    envInfo.uid
+                                                    envInfo.node
                                             if null envInfo.migrateBackups
                                                 then do
                                                     printProviderLine
@@ -2845,10 +2368,11 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
             migrationHandoffStates <-
                 forM migrations $ \migration@(envInfo, prevNode) -> do
                     completedHandoff <-
-                        readMigrationHandoff
-                            deployUser
-                            resolveNodeConnection
-                            envInfo
+                        UserLifecycle.readMigrationHandoff
+                            userLifecycleOps
+                            envInfo.userName
+                            envInfo.uid
+                            envInfo.node
                     alreadyQuiesced <-
                         case completedHandoff of
                             Nothing -> pure False
@@ -2862,9 +2386,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                             <> "; current source is "
                                             <> prevNode
                                         )
-                                    clearMigrationHandoffOnNode
-                                        deployUser
-                                        resolveNodeConnection
+                                    UserLifecycle.clearMigrationHandoffOnNode
+                                        userLifecycleOps
                                         envInfo.userName
                                         envInfo.uid
                                         envInfo.node
@@ -2885,19 +2408,19 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                             pure True
                                         else do
                                             sourceQuiesced <-
-                                                managedUserIsQuiescedOnNode
-                                                    deployUser
-                                                    resolveNodeConnection
+                                                UserLifecycle.managedUserIsQuiescedOnNode
+                                                    userLifecycleOps
                                                     envInfo.userName
                                                     envInfo.uid
                                                     prevNode
                                             if sourceQuiesced
                                                 then do
                                                     when (MigrationHandoff.handoffPhase handoff == MigrationHandoff.HandoffAccepted) $
-                                                        writeMigrationHandoffQuiesced
-                                                            deployUser
-                                                            resolveNodeConnection
-                                                            envInfo
+                                                        UserLifecycle.writeMigrationHandoffQuiesced
+                                                            userLifecycleOps
+                                                            envInfo.userName
+                                                            envInfo.uid
+                                                            envInfo.node
                                                             prevNode
                                                     printProviderLine
                                                         ( "hostenv-provider: migration handoff for "
@@ -2916,9 +2439,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                 <> prevNode
                                                                 <> " has a live source; taking a fresh migration backup"
                                                             )
-                                                        clearMigrationHandoffOnNode
-                                                            deployUser
-                                                            resolveNodeConnection
+                                                        UserLifecycle.clearMigrationHandoffOnNode
+                                                            userLifecycleOps
                                                             envInfo.userName
                                                             envInfo.uid
                                                             envInfo.node
@@ -3002,9 +2524,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                             filter
                                 (\(userName, _) -> M.notMember userName desiredNodesByUser)
                                 cleanedUsers
-                    rollbackManagedUserCleanupOnNode
-                        deployUser
-                        resolveNodeConnection
+                    UserLifecycle.rollbackManagedUserCleanupOnNode
+                        userLifecycleOps
                         nodeName
                         rollbackUsers
 
@@ -3179,10 +2700,11 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                 else
                                     case M.lookup envName acceptedMigrationSources of
                                         Just sourceNode -> do
-                                            writeMigrationHandoffAccepted
-                                                deployUser
-                                                resolveNodeConnection
-                                                envInfo
+                                            UserLifecycle.writeMigrationHandoffAccepted
+                                                userLifecycleOps
+                                                envInfo.userName
+                                                envInfo.uid
+                                                envInfo.node
                                                 sourceNode
                                             pure (envResult, True, verificationFailure)
                                         Nothing ->
@@ -3218,9 +2740,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                         let onCleaned userName uid =
                                                 case M.lookup userName desiredNodesByUser of
                                                     Nothing ->
-                                                        clearMigrationHandoffOnNode
-                                                            deployUser
-                                                            resolveNodeConnection
+                                                        UserLifecycle.clearMigrationHandoffOnNode
+                                                            userLifecycleOps
                                                             userName
                                                             uid
                                                             nodeName
@@ -3235,10 +2756,11 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                             case M.lookup userName acceptedMigrationSources of
                                                                 Just sourceNode
                                                                     | sourceNode == nodeName ->
-                                                                        writeMigrationHandoffQuiesced
-                                                                            deployUser
-                                                                            resolveNodeConnection
-                                                                            envInfo
+                                                                        UserLifecycle.writeMigrationHandoffQuiesced
+                                                                            userLifecycleOps
+                                                                            envInfo.userName
+                                                                            envInfo.uid
+                                                                            envInfo.node
                                                                             sourceNode
                                                                 Just sourceNode ->
                                                                     error
@@ -3257,9 +2779,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                             <> T.unpack nodeName
                                                                         )
                                         prepared <-
-                                            prepareManagedUserCleanupOnNode
-                                                deployUser
-                                                resolveNodeConnection
+                                            UserLifecycle.prepareManagedUserCleanupOnNode
+                                                userLifecycleOps
                                                 desiredNodesByUser
                                                 (M.findWithDefault M.empty nodeName observedNodeUsers)
                                                 (M.findWithDefault S.empty nodeName observedNodeRuntimeUsers)
@@ -3352,9 +2873,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                 when (systemCode == ExitSuccess) $ do
                                                                     forM_ movedCleanedUsers $ \userName ->
                                                                         forM_ (M.lookup userName envInfoByUser) $ \envInfo ->
-                                                                            clearMigrationHandoffOnNode
-                                                                                deployUser
-                                                                                resolveNodeConnection
+                                                                            UserLifecycle.clearMigrationHandoffOnNode
+                                                                                userLifecycleOps
                                                                                 envInfo.userName
                                                                                 envInfo.uid
                                                                                 envInfo.node
@@ -3370,9 +2890,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                                     <> " after reconciling source node "
                                                                                     <> nodeName
                                                                                 )
-                                                                            clearMigrationHandoffOnNode
-                                                                                deployUser
-                                                                                resolveNodeConnection
+                                                                            UserLifecycle.clearMigrationHandoffOnNode
+                                                                                userLifecycleOps
                                                                                 envInfo.userName
                                                                                 envInfo.uid
                                                                                 envInfo.node
