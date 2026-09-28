@@ -1425,13 +1425,12 @@ in
       PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
 
-      # Reservations for environments already absent from the previous plan
-      # still participate in DNS safety.
-      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_RETIRED=1 \
-        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
-        echo "reserved retired environment DNS did not block node removal"
-        exit 1
-      fi
+      # state.json keeps old UID and hostname reservations, but those
+      # reservations are not evidence that an environment is still deployed.
+      # If this old hostname were queried, the fake DNS response would point at
+      # old-node and make the plan fail.
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 DNS_RETIRED=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
 
       # plan.json is disposable. Without historical plan data, live DNS is
       # the safety tripwire: a CNAME to the removed node blocks publication.
@@ -1491,6 +1490,7 @@ in
       ${pkgs.jq}/bin/jq -S . generated/plan.json > "$TMPDIR/published.json"
       ${pkgs.jq}/bin/jq -S . "$newPlan" > "$TMPDIR/expected.json"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/expected.json" "$TMPDIR/published.json"
+      ${pkgs.jq}/bin/jq -e '.retired.uid == 2002' generated/state.json >/dev/null
       test -z "$(find generated -maxdepth 1 -name '.plan.json.tmp-*' -print -quit)"
     )
 
