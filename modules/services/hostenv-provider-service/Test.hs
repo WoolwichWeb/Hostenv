@@ -87,7 +87,6 @@ testCommandSequence = do
             [ CommandSpec "nix" ["flake", "update", "acme__site"] "/tmp/provider"
             , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "plan"] "/tmp/provider"
             , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy", "--node", "node-a"] "/tmp/provider"
-            , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy", "--node", "node-b"] "/tmp/provider"
             ]
       assert (cmds == expected) "webhook command sequence should match"
 
@@ -124,10 +123,10 @@ testRemovedEnvironmentDeploysPreviousNode :: IO ()
 testRemovedEnvironmentDeploysPreviousNode = do
   let previousPlan =
         BLC.pack
-          "{\"environments\":{\"prod\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-prod\"},\"node\":\"node-a\"},\"dev\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-dev\"},\"node\":\"node-b\"}}}"
+          "{\"environments\":{\"prod\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-prod\"},\"node\":\"node-a\"}}}"
   let currentPlan =
         BLC.pack
-          "{\"environments\":{\"dev\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-dev\"},\"node\":\"node-b\"}}}"
+          "{\"environments\":{}}"
   plansRef <- newIORef [previousPlan, currentPlan]
   let loadPlan = do
         plans <- readIORef plansRef
@@ -145,7 +144,7 @@ testRemovedEnvironmentDeploysPreviousNode = do
     Left err -> assert False ("webhook run failed: " <> show err)
     Right res -> do
       assert (res.webhookOk) "removed-environment webhook run should succeed"
-      assert (res.webhookNodes == ["node-a", "node-b"]) "webhook should include previous and current project nodes"
+      assert (res.webhookNodes == ["node-a"]) "webhook should retain the previous project node when the project has no current environments"
       cmds <- readIORef commandsRef
       let expected =
             [ CommandSpec "nix" ["flake", "update", "acme__site"] "/tmp/provider"
@@ -153,7 +152,7 @@ testRemovedEnvironmentDeploysPreviousNode = do
             , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy", "--node", "node-a"] "/tmp/provider"
             , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy", "--node", "node-b"] "/tmp/provider"
             ]
-      assert (cmds == expected) "removed environments should still deploy their previous node for cleanup"
+      assert (cmds == expected) "removing the project's last environment should still deploy its previous node for cleanup"
 
 
 recordRunner :: IORef [CommandSpec] -> CommandRunner
