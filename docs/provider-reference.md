@@ -100,6 +100,13 @@ the destination. If Cloudflare credentials are configured, `deploy` performs
 the update and waits for propagation. Before source removal, every authoritative
 nameserver must point the environment at the destination, either with the
 expected CNAME or with direct A/AAAA records belonging to the destination.
+Hostenv does not fall back to a recursive resolver when authoritative
+nameserver discovery or an authoritative query fails. Those failures remain
+distinct from a valid empty/mismatched DNS answer and abort migration
+finalization with the specific DNS failure. Earlier, non-destructive DNS
+reconciliation may still recover from an indeterminate read by writing the
+configured Cloudflare record and then performing the strict authoritative
+check.
 Otherwise Hostenv stops with the source safely quiesced; update DNS manually and
 rerun `deploy`.
 
