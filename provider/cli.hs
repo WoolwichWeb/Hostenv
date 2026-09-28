@@ -39,6 +39,7 @@ import Hostenv.Provider.DnsTransition (
     DnsItem (..),
     collectDnsItems,
  )
+import Hostenv.Provider.DnsTransition qualified as DnsTransition
 import Hostenv.Provider.DnsObservationCache (
     DnsObservationCache,
     cacheDnsObservation,
@@ -296,6 +297,25 @@ digRRRaw mNameserver name rr = do
                 filter (not . T.null) $
                     map (stripDot . T.toLower . T.strip . T.pack) $
                         lines out
+digRRRawResult :: Maybe Text -> Text -> Text -> IO (Either Text [Text])
+digRRRawResult mNameserver name rr = do
+    let serverArgs = maybe [] (\nameserver -> ["@" <> T.unpack nameserver]) mNameserver
+    let args = serverArgs <> ["+short", "+time=1", "+tries=1", T.unpack name, T.unpack rr]
+    result <- tryAny (readProcessWithExitCode "dig" args "")
+    pure $
+        case result of
+            Left err -> Left (T.pack (displayException err))
+            Right (ExitFailure code, _out, err) ->
+                Left
+                    ( "dig exited "
+                        <> T.pack (show code)
+                        <> if null err then "" else ": " <> T.strip (T.pack err)
+                    )
+            Right (ExitSuccess, out, _err) ->
+                Right $
+                    filter (not . T.null) $
+                        map (stripDot . T.toLower . T.strip . T.pack) $
+                            lines out
 
 zoneCandidates :: Text -> [Text]
 zoneCandidates name =
@@ -334,6 +354,29 @@ digRRWith cache name rr = do
             if null nonEmptyAnswers
                 then digRRRaw Nothing name rr
                 else pure (S.toList (S.fromList (concat nonEmptyAnswers)))
+
+cnamePropagatedToAllAuthoritative :: DnsLookupCache -> Text -> Text -> IO Bool
+cnamePropagatedToAllAuthoritative cache name expectedHost = do
+    authoritativeNameservers <- findAuthoritativeNameserversWith cache name
+    answersByNameserver <-
+        case authoritativeNameservers of
+            [] -> do
+                fallback <- digRRRawResult Nothing name "CNAME"
+                pure [fallback]
+            nameservers -> do
+                queryResults <-
+                    mapConcurrentlyIO
+                        (\nameserver -> digRRRawResult (Just nameserver) name "CNAME")
+                        nameservers
+                pure $
+                    map
+                        (\result ->
+                            case result of
+                                Left err -> Left (T.pack (displayException err))
+                                Right answers -> answers
+                        )
+                        queryResults
+    pure (DnsTransition.authoritativeCnameConverged expectedHost answersByNameserver)
 
 digRRObserved ::
     DnsLookupCache ->
@@ -851,15 +894,12 @@ waitForDnsPropagationBy newPhaseCheck items = do
 waitForCnamePropagation :: DnsLookupCache -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
 waitForCnamePropagation dnsCache =
     waitForDnsPropagationBy $ do
-        observationCache <- newDnsObservationCache
-        pure $ \item -> do
-            cnames <-
-                digRRObserved
-                    dnsCache
-                    observationCache
-                    item.diDiscoveryHost
-                    "CNAME"
-            pure (normalizeDnsName item.diExpectedHost `elem` cnames)
+        phaseCache <- newIORef M.empty
+        pure $ \item ->
+            cachedLookup
+                phaseCache
+                (dnsKey item)
+                (cnamePropagatedToAllAuthoritative dnsCache item.diDiscoveryHost item.diExpectedHost)
 
 loadPlanCloudflareContext ::
     Maybe Text ->
@@ -2739,6 +2779,41 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                         )
                 printProviderErrLine "hostenv-provider: error: refusing deployment until account UID drift is resolved"
                 Sh.exitWith (ExitFailure 1)
+
+            -- A handoff can survive a crash after the source system has already
+            -- removed the old account. If the recorded source is still in
+            -- inventory and has no matching account or runtime left, the move
+            -- is complete and the stale marker can be removed.
+            forM_ lifecycleEnvInfos $ \envInfo -> do
+                existingHandoff <-
+                    readMigrationHandoff
+                        deployUser
+                        resolveNodeConnection
+                        envInfo
+                forM_ existingHandoff $ \handoff -> do
+                    let sourceNode = MigrationHandoff.handoffSourceNode handoff
+                    when (sourceNode `elem` observationNodes) $ do
+                        let sourceAccountPresent =
+                                (M.lookup sourceNode observedNodeUsers >>= M.lookup envInfo.userName)
+                                    == Just envInfo.uid
+                        let sourceRuntimePresent =
+                                S.member
+                                    envInfo.userName
+                                    (M.findWithDefault S.empty sourceNode observedNodeRuntimeUsers)
+                        when (not sourceAccountPresent && not sourceRuntimePresent) $ do
+                            printProviderLine
+                                ( "hostenv-provider: clearing completed migration handoff for "
+                                    <> envInfo.userName
+                                    <> " from "
+                                    <> sourceNode
+                                    <> "; the source has no remaining Hostenv account or runtime"
+                                )
+                            clearMigrationHandoffOnNode
+                                deployUser
+                                resolveNodeConnection
+                                envInfo.userName
+                                envInfo.uid
+                                envInfo.node
 
             let skippedEnvInfos =
                     filter (\envInfo -> envInfo.userName `elem` skipHits) envInfosFiltered

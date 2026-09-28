@@ -5,6 +5,7 @@
 
 module Hostenv.Provider.DnsTransition
     ( DnsItem (..)
+    , authoritativeCnameConverged
     , collectDnsItems
     ) where
 
@@ -12,6 +13,7 @@ import Data.Aeson qualified as A
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.Maybe (fromMaybe)
+import Data.Set qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
 
@@ -24,6 +26,19 @@ data DnsItem = DnsItem
     , diTlsEnabled :: Bool
     }
     deriving (Eq, Show)
+
+authoritativeCnameConverged :: Text -> [Either Text [Text]] -> Bool
+authoritativeCnameConverged expectedHost answersByNameserver =
+    not (null answersByNameserver) && all matchesExpected answersByNameserver
+  where
+    expected = normalizeDnsName expectedHost
+    matchesExpected (Left _) = False
+    matchesExpected (Right answers) =
+        S.fromList (map normalizeDnsName answers) == S.singleton expected
+
+normalizeDnsName :: Text -> Text
+normalizeDnsName =
+    T.toLower . T.dropWhileEnd (== '.') . T.strip
 
 nodeKey :: K.Key
 nodeKey = K.fromString "node"

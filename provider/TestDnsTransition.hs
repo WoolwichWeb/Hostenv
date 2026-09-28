@@ -38,3 +38,33 @@ main = do
             == ["acme-prod.hosting.test"]
         )
         "retain which vhosts require trusted HTTPS"
+    assertTrue
+        ( authoritativeCnameConverged
+            "new-node.hosting.test"
+            [ Right ["new-node.hosting.test"]
+            , Right ["new-node.hosting.test."]
+            ]
+        )
+        "all authoritative nameservers agreeing on the destination should be ready"
+
+    assertTrue
+        ( not
+            ( authoritativeCnameConverged
+                "new-node.hosting.test"
+                [ Right ["old-node.hosting.test"]
+                , Right ["new-node.hosting.test"]
+                ]
+            )
+        )
+        "mixed authoritative CNAME answers should not be treated as propagated"
+
+    assertTrue
+        ( not
+            ( authoritativeCnameConverged
+                "new-node.hosting.test"
+                [ Right ["new-node.hosting.test"]
+                , Left "nameserver timed out"
+                ]
+            )
+        )
+        "a failed authoritative lookup should not be treated as propagated"
