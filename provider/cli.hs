@@ -3460,7 +3460,18 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                             case result of
                                                                                 Left err -> pure (Just (userName <> ": " <> err))
                                                                                 Right () -> do
-                                                                                    (_, pendingDns) <- waitForCnamePropagation deployDnsCache allItems
+                                                                                    cnameObservation <- newDnsObservationCache
+                                                                                    cnameItems <-
+                                                                                        fmap catMaybes $
+                                                                                            forM allItems $ \item -> do
+                                                                                                cnames <-
+                                                                                                    digRRObserved
+                                                                                                        deployDnsCache
+                                                                                                        cnameObservation
+                                                                                                        item.diDiscoveryHost
+                                                                                                        "CNAME"
+                                                                                                pure $ if null cnames then Nothing else Just item
+                                                                                    (_, pendingDns) <- waitForCnamePropagation deployDnsCache cnameItems
                                                                                     if not (null pendingDns)
                                                                                         then
                                                                                             pure
