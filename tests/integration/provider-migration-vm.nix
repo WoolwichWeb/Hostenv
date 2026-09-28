@@ -248,7 +248,9 @@ let
   '';
 
   fakeDig = pkgs.writeShellScript "hostenv-provider-vm-test-dig" ''
-    exit 0
+    # A successful DNS lookup with no records still has a response status.
+    # The provider distinguishes that from an indeterminate lookup failure.
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
   '';
 
   commonNode = { ... }: {
