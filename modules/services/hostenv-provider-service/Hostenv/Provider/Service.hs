@@ -75,23 +75,26 @@ lookupObj key obj = case KM.lookup key obj of
   Just (Object o) -> Just o
   _ -> Nothing
 
-nodesForProject :: Text -> Text -> BL.ByteString -> Either Text [Text]
-nodesForProject org project raw = do
+projectEnvironmentPlacements :: Text -> Text -> BL.ByteString -> Either Text [(Text, Text)]
+projectEnvironmentPlacements org project raw = do
   envs <- decodeEnvironments raw
-  let nodes =
-        sort . nub $
-          mapMaybe extractNode (KM.toList envs)
-  Right nodes
+  pure . sortOn fst . mapMaybe extractEnvironment $ KM.toList envs
   where
-    extractNode (_kEnv, vEnv) = case vEnv of
+    extractEnvironment (kEnv, vEnv) = case vEnv of
       Object envObj -> do
         hostenvObj <- lookupObj (K.fromString "hostenv") envObj
         org' <- lookupText (K.fromString "organisation") hostenvObj
         project' <- lookupText (K.fromString "project") hostenvObj
         if org' == org && project' == project
-          then lookupText (K.fromString "node") envObj
+          then do
+            node <- lookupText (K.fromString "node") envObj
+            pure (K.toText kEnv, node)
           else Nothing
       _ -> Nothing
+
+nodesForProject :: Text -> Text -> BL.ByteString -> Either Text [Text]
+nodesForProject org project raw =
+  fmap (sort . nub . map snd) (projectEnvironmentPlacements org project raw)
 
 projectForHash :: Text -> BL.ByteString -> Either Text ProjectRef
 projectForHash hash raw = do
@@ -312,9 +315,9 @@ type PlanLoader = IO BL.ByteString
 runWebhookWith :: CommandRunner -> PlanLoader -> WebhookConfig -> ProjectRef -> IO (Either WebhookError WebhookResult)
 runWebhookWith runner loadPlan cfg ref = do
   previousPlanRaw <- loadPlan
-  case nodesForProject ref.prOrg ref.prProject previousPlanRaw of
+  case projectEnvironmentPlacements ref.prOrg ref.prProject previousPlanRaw of
     Left err -> pure (Left (WebhookPlanError err))
-    Right previousNodes -> do
+    Right previousEnvironments -> do
       let inputName = ref.prOrg <> "__" <> ref.prProject
       step runner (CommandSpec "nix" ["flake", "update", inputName] (cfg.whWorkDir)) >>= \case
         Left err -> pure (Left err)
@@ -323,18 +326,38 @@ runWebhookWith runner loadPlan cfg ref = do
             Left err -> pure (Left err)
             Right _ -> do
               currentPlanRaw <- loadPlan
-              case nodesForProject ref.prOrg ref.prProject currentPlanRaw of
+              case projectEnvironmentPlacements ref.prOrg ref.prProject currentPlanRaw of
                 Left err -> pure (Left (WebhookPlanError err))
-                Right currentNodes -> do
-                  let nodes = sort (nub (previousNodes <> currentNodes))
-                  -- Deploy nodes that hosted the project before or after the
-                  -- update. Old nodes are needed to retire environments that
-                  -- disappeared from the new plan. The service deliberately
-                  -- does not infer migrations from DNS; the provider CLI
-                  -- observes live state and refuses unsafe node-scoped moves.
-                  deploys <- foldM (deployNode runner cfg) [] nodes
-                  let ok = all (\d -> d.deploySuccess) deploys
-                  pure (Right (WebhookResult nodes deploys ok))
+                Right currentEnvironments -> do
+                  let currentNames = map fst currentEnvironments
+                  let removedNames =
+                        [ envName
+                        | (envName, _) <- previousEnvironments
+                        , envName `notElem` currentNames
+                        ]
+                  if not (null removedNames)
+                    then
+                      -- Desired plan history cannot tell us where a partially
+                      -- finalized migration still exists. Do not guess a cleanup
+                      -- scope for removals; an unfiltered provider deploy observes
+                      -- every live node and is the safe recovery path.
+                      pure
+                        ( Left
+                            ( WebhookPlanError
+                                ( "automatic webhook deployment cannot safely remove environment(s): "
+                                    <> T.intercalate ", " removedNames
+                                    <> ". Run `nix run .#hostenv-provider -- deploy` from the provider repository to reconcile live placement."
+                                )
+                            )
+                        )
+                    else do
+                      let nodes = sort . nub $ map snd currentEnvironments
+                      -- The service deliberately does not infer migrations from
+                      -- DNS. The provider CLI observes live state and refuses an
+                      -- unsafe node-scoped move before activation.
+                      deploys <- foldM (deployNode runner cfg) [] nodes
+                      let ok = all (\d -> d.deploySuccess) deploys
+                      pure (Right (WebhookResult nodes deploys ok))
   where
     step :: CommandRunner -> CommandSpec -> IO (Either WebhookError ())
     step run spec = do

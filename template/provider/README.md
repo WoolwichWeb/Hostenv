@@ -17,8 +17,9 @@ Commit `generated/state.json`; it contains Hostenv's durable UID and hostname
 reservations, not environment placement or provider-node history.
 `generated/plan.json` is disposable generated output. When a previous valid
 plan is present, Hostenv uses it as an additional node-removal check. When that
-generated history is unavailable, live DNS and pending provider-owned migration
-handoffs remain the node-removal safety tripwires.
+generated history is unavailable, live DNS remains the best-effort node-removal
+warning. Hostenv deliberately does not SSH into every proposed node to enumerate
+migration handoffs, so first-time planning does not depend on provider SSH access.
 
 When draining a provider node, keep it in `provider.nodeSystems`, remove it
 from `provider.nodeFor`, and set

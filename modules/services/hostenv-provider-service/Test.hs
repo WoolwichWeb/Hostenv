@@ -31,7 +31,7 @@ main = do
   testProjectHashSelection
   testCommandSequence
   testNodeDeployFailureIsReported
-  testRemovedEnvironmentDeploysPreviousNode
+  testRemovedEnvironmentRequiresUnfilteredDeploy
   testTemplateRender
   testGitCredentials
   testReadGitlabSecrets
@@ -120,11 +120,11 @@ testNodeDeployFailureIsReported = do
       assert (cmds == expected) "webhook should delegate node lifecycle safety to hostenv-provider deploy"
 
 
-testRemovedEnvironmentDeploysPreviousNode :: IO ()
-testRemovedEnvironmentDeploysPreviousNode = do
+testRemovedEnvironmentRequiresUnfilteredDeploy :: IO ()
+testRemovedEnvironmentRequiresUnfilteredDeploy = do
   let previousPlan =
         BLC.pack
-          "{\"environments\":{\"prod\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-prod\"},\"node\":\"node-a\"}}}"
+          "{\"environments\":{\"prod\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-prod\"},\"node\":\"node-b\"}}}"
   let currentPlan =
         BLC.pack
           "{\"environments\":{}}"
@@ -142,17 +142,17 @@ testRemovedEnvironmentDeploysPreviousNode = do
   let proj = ProjectRef "acme" "site"
   result <- runWebhookWith runner loadPlan cfg proj
   case result of
-    Left err -> assert False ("webhook run failed: " <> show err)
-    Right res -> do
-      assert (res.webhookOk) "removed-environment webhook run should succeed"
-      assert (res.webhookNodes == ["node-a"]) "webhook should retain the previous project node when the project has no current environments"
+    Left (WebhookPlanError err) -> do
+      assert ("prod" `T.isInfixOf` err) "removal error should name the removed environment"
+      assert ("nix run .#hostenv-provider -- deploy" `T.isInfixOf` err) "removal error should require an unfiltered provider deploy"
       cmds <- readIORef commandsRef
       let expected =
             [ CommandSpec "nix" ["flake", "update", "acme__site"] "/tmp/provider"
             , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "plan"] "/tmp/provider"
-            , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy", "--node", "node-a"] "/tmp/provider"
             ]
-      assert (cmds == expected) "removing the project's last environment should still deploy its previous node for cleanup"
+      assert (cmds == expected) "environment removal should stop before any node-scoped deploy"
+    Left err -> assert False ("unexpected webhook error: " <> show err)
+    Right _ -> assert False "environment removal should fail closed instead of guessing a cleanup node"
 
 
 recordRunner :: IORef [CommandSpec] -> CommandRunner

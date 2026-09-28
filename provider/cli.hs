@@ -1796,7 +1796,7 @@ validatePlanTransition planPath statePath newPlanRaw = do
                         printProviderLine
                             ( "hostenv-provider: warning: existing "
                                 <> planPath
-                                <> " is invalid; skipping previous-plan comparison and relying on DNS and migration-handoff safety checks ("
+                                <> " is invalid; skipping previous-plan comparison and relying on the DNS safety check ("
                                 <> T.pack err
                                 <> ")"
                             )
