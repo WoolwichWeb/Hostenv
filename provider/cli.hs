@@ -985,28 +985,37 @@ classifyUpsertEligibility mToken mZoneId mZoneName vhName
             Nothing -> UpsertIneligible "could not resolve Cloudflare zone name"
 
 waitForDnsPropagationBy ::
-    IO (DnsItem -> IO Bool) ->
+    IO (DnsItem -> IO (Either DnsLookupFailure Bool)) ->
     [DnsItem] ->
-    IO (S.Set DnsKey, [DnsItem])
-waitForDnsPropagationBy newPhaseCheck items = do
-    (resolved0, unresolved0) <- partitionByDns items
-    go resolved0 unresolved0 (backoffDelays 1 30 600)
+    IO (Either DnsLookupFailure (S.Set DnsKey, [DnsItem]))
+waitForDnsPropagationBy newPhaseCheck items =
+    partitionByDns items >>= \case
+        Left err -> pure (Left err)
+        Right (resolved0, unresolved0) ->
+            go resolved0 unresolved0 (backoffDelays 1 30 600)
   where
     partitionByDns recs = do
         pointsToExpected <- newPhaseCheck
         checks <- forM recs $ \item -> do
-            ok <- pointsToExpected item
-            pure (item, ok)
-        pure
-            ( [ item
-              | (item, True) <- checks
-              ]
-            , [ item
-              | (item, False) <- checks
-              ]
-            )
-    go resolved unresolved _ | null unresolved = pure (S.fromList (map dnsKey resolved), [])
-    go resolved unresolved [] = pure (S.fromList (map dnsKey resolved), unresolved)
+            result <- pointsToExpected item
+            pure (item, result)
+        case [err | (_, Left err) <- checks] of
+            err : _ -> pure (Left err)
+            [] ->
+                pure
+                    ( Right
+                        ( [ item
+                          | (item, Right True) <- checks
+                          ]
+                        , [ item
+                          | (item, Right False) <- checks
+                          ]
+                        )
+                    )
+    go resolved [] _ =
+        pure (Right (S.fromList (map dnsKey resolved), []))
+    go resolved unresolved [] =
+        pure (Right (S.fromList (map dnsKey resolved), unresolved))
     go resolved unresolved (delaySec : restDelays) = do
         printProviderLine
             ( "hostenv-provider: waiting "
@@ -1016,10 +1025,15 @@ waitForDnsPropagationBy newPhaseCheck items = do
                 <> " vhost(s)"
             )
         threadDelay (delaySec * 1000000)
-        (resolvedNow, unresolvedNow) <- partitionByDns unresolved
-        go (resolved <> resolvedNow) unresolvedNow restDelays
+        partitionByDns unresolved >>= \case
+            Left err -> pure (Left err)
+            Right (resolvedNow, unresolvedNow) ->
+                go (resolved <> resolvedNow) unresolvedNow restDelays
 
-waitForAuthoritativeDnsPropagation :: DnsLookupCache -> [DnsItem] -> IO (S.Set DnsKey, [DnsItem])
+waitForAuthoritativeDnsPropagation ::
+    DnsLookupCache ->
+    [DnsItem] ->
+    IO (Either DnsLookupFailure (S.Set DnsKey, [DnsItem]))
 waitForAuthoritativeDnsPropagation dnsCache =
     waitForDnsPropagationBy $ do
         phaseCache <- newIORef M.empty
@@ -1066,21 +1080,20 @@ environmentDnsItems hostenvHostname envs envInfo =
                     hostenvHostname
                     (KM.singleton (K.fromText envInfo.userName) envValue)
 
-checkDnsItems :: DnsLookupCache -> DnsObservationCache -> [DnsItem] -> IO [DnsItem]
-checkDnsItems dnsCache observationCache items = do
-    checks <-
-        forM items $ \item -> do
-            pointsToDestination <-
-                dnsPointsToObserved
-                    dnsCache
-                    observationCache
-                    item.diDiscoveryHost
-                    item.diExpectedHost
-            pure (item, pointsToDestination)
-    pure
-        [ item
-        | (item, False) <- checks
-        ]
+checkDnsItems ::
+    DnsLookupCache ->
+    DnsObservationCache (Either DnsLookupFailure [Text]) ->
+    [DnsItem] ->
+    IO [(DnsItem, Either DnsLookupFailure Bool)]
+checkDnsItems dnsCache observationCache items =
+    forM items $ \item -> do
+        pointsToDestination <-
+            dnsPointsToObserved
+                dnsCache
+                observationCache
+                item.diDiscoveryHost
+                item.diExpectedHost
+        pure (item, pointsToDestination)
 
 ensureEnvironmentDns ::
     DnsLookupCache ->
@@ -1092,8 +1105,17 @@ ensureEnvironmentDns ::
     IO (Either Text ())
 ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = do
     observationCache <- newDnsObservationCache
-    mismatched <- checkDnsItems dnsCache observationCache items
-    if null mismatched
+    checks <- checkDnsItems dnsCache observationCache items
+    let pending =
+            [ (item, lookupFailure)
+            | (item, result) <- checks
+            , lookupFailure <-
+                case result of
+                    Right True -> []
+                    Right False -> [Nothing]
+                    Left err -> [Just err]
+            ]
+    if null pending
         then do
             when (not (null items)) $
                 printProviderLine
@@ -1115,22 +1137,40 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                         )
                 Right (mToken, mZone, mZoneName) -> do
                     upsertResults <-
-                        forM mismatched $ \item ->
+                        forM pending $ \(item, lookupFailure) ->
                             case classifyUpsertEligibility mToken mZone mZoneName item.diDiscoveryHost of
                                 UpsertIneligible reason ->
                                     pure
                                         ( Left
-                                            ( item.diDiscoveryHost
-                                                <> " must point to "
-                                                <> item.diExpectedHost
-                                                <> " (automatic DNS update unavailable: "
-                                                <> reason
-                                                <> ")"
+                                            ( case lookupFailure of
+                                                Nothing ->
+                                                    item.diDiscoveryHost
+                                                        <> " must point to "
+                                                        <> item.diExpectedHost
+                                                        <> " (automatic DNS update unavailable: "
+                                                        <> reason
+                                                        <> ")"
+                                                Just dnsFailure ->
+                                                    "could not verify DNS for "
+                                                        <> item.diDiscoveryHost
+                                                        <> ": "
+                                                        <> renderDnsLookupFailure dnsFailure
+                                                        <> " (automatic DNS update unavailable: "
+                                                        <> reason
+                                                        <> ")"
                                             )
                                         )
                                 UpsertEligible ->
                                     case (mToken, mZone) of
                                         (Just token, Just zoneId) -> do
+                                            forM_ lookupFailure $ \dnsFailure ->
+                                                printProviderLine
+                                                    ( "hostenv-provider: warning: could not verify current DNS for "
+                                                        <> item.diDiscoveryHost
+                                                        <> " ("
+                                                        <> renderDnsLookupFailure dnsFailure
+                                                        <> "); attempting the configured Cloudflare update"
+                                                    )
                                             printProviderLine
                                                 ( "hostenv-provider: updating DNS "
                                                     <> item.diDiscoveryHost
@@ -1166,20 +1206,28 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                                 ( "hostenv-provider: waiting for DNS propagation for "
                                     <> envInfo.userName
                                 )
-                            (_, timedOutItems) <- waitForAuthoritativeDnsPropagation dnsCache updatedItems
-                            if null timedOutItems
-                                then pure (Right ())
-                                else
+                            waitForAuthoritativeDnsPropagation dnsCache updatedItems >>= \case
+                                Left err ->
                                     pure
                                         ( Left
-                                            ( "DNS did not propagate to the destination for: "
-                                                <> T.intercalate
-                                                    ", "
-                                                    [ item.diDiscoveryHost <> " -> " <> item.diExpectedHost
-                                                    | item <- timedOutItems
-                                                    ]
+                                            ( "DNS propagation could not be verified: "
+                                                <> renderDnsLookupFailure err
                                             )
                                         )
+                                Right (_, timedOutItems) ->
+                                    if null timedOutItems
+                                        then pure (Right ())
+                                        else
+                                            pure
+                                                ( Left
+                                                    ( "DNS did not propagate to the destination for: "
+                                                        <> T.intercalate
+                                                            ", "
+                                                            [ item.diDiscoveryHost <> " -> " <> item.diExpectedHost
+                                                            | item <- timedOutItems
+                                                            ]
+                                                    )
+                                                )
 
 -- -------- Plan --------
 runPlan :: Bool -> IO ()
@@ -1601,20 +1649,22 @@ planConnectionNodes plan =
         (map K.toText . KM.keys)
         (lookupObj (K.fromString "nodeConnections") plan)
 
-dnsRemovedInventoryHint :: Text -> [Text] -> EnvInfo -> IO (Maybe Text)
+dnsRemovedInventoryHint :: Text -> [Text] -> EnvInfo -> IO (Either DnsLookupFailure (Maybe Text))
 dnsRemovedInventoryHint hostenvHostname inventoryNodes envInfo = do
-    cnames <- digRRRaw Nothing envInfo.hostname "CNAME"
-    let domain = normalizeDnsName hostenvHostname
-    let suffix = "." <> domain
-    let inventory = S.fromList (map normalizeDnsName inventoryNodes)
-    let nodeFromTarget target =
-            let normalized = normalizeDnsName target
-             in case T.stripSuffix suffix normalized of
-                    Just nodeName
-                        | not (T.null nodeName)
-                        , not (S.member nodeName inventory) -> Just nodeName
-                    _ -> Nothing
-    pure (listToMaybe (mapMaybe nodeFromTarget cnames))
+    cnameResult <- digRRResult 1 Nothing envInfo.hostname "CNAME"
+    pure $ do
+        cnames <- cnameResult
+        let domain = normalizeDnsName hostenvHostname
+        let suffix = "." <> domain
+        let inventory = S.fromList (map normalizeDnsName inventoryNodes)
+        let nodeFromTarget target =
+                let normalized = normalizeDnsName target
+                 in case T.stripSuffix suffix normalized of
+                        Just nodeName
+                            | not (T.null nodeName)
+                            , not (S.member nodeName inventory) -> Just nodeName
+                        _ -> Nothing
+        pure (listToMaybe (mapMaybe nodeFromTarget cnames))
 
 nodeUsesRemoteBuild :: KM.KeyMap A.Value -> Text -> Bool
 nodeUsesRemoteBuild remoteBuildMap nodeName =
@@ -3003,7 +3053,15 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                     inventoryNodes
                                                     envInfo
                                             pure $ case removedNodeHint of
-                                                Just removedNode ->
+                                                Left dnsFailure ->
+                                                    Left
+                                                        ( "could not determine whether "
+                                                            <> envInfo.hostname
+                                                            <> " still points to a removed provider node: "
+                                                            <> renderDnsLookupFailure dnsFailure
+                                                            <> ". Refusing to treat the environment as fresh until DNS can be verified."
+                                                        )
+                                                Right (Just removedNode) ->
                                                     Left
                                                         ( "DNS for "
                                                             <> envInfo.hostname
@@ -3012,7 +3070,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                             <> ", but that node is not in provider.nodeSystems. "
                                                             <> "Restore the source node to provider inventory until migration and retirement complete."
                                                         )
-                                                Nothing -> Right Nothing
+                                                Right Nothing -> Right Nothing
                                         [sourceNode] -> do
                                             completedHandoff <-
                                                 readMigrationHandoff
@@ -3103,7 +3161,23 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
             dnsStateRows <-
                 forM envInfosFiltered $ \envInfo -> do
                     let items = environmentDnsItems hostenvHostname envs envInfo
-                    mismatched <- checkDnsItems deployDnsCache preflightDnsObservation items
+                    dnsChecks <- checkDnsItems deployDnsCache preflightDnsObservation items
+                    let mismatched =
+                            [ item
+                            | (item, Right False) <- dnsChecks
+                            ]
+                    let lookupFailures =
+                            [ (item, dnsFailure)
+                            | (item, Left dnsFailure) <- dnsChecks
+                            ]
+                    forM_ lookupFailures $ \(item, dnsFailure) ->
+                        printProviderLine
+                            ( "hostenv-provider: warning: DNS preflight could not verify "
+                                <> item.diDiscoveryHost
+                                <> ": "
+                                <> renderDnsLookupFailure dnsFailure
+                                <> "; deployment will attempt DNS reconciliation"
+                            )
                     let destinationPresent =
                             (M.lookup envInfo.node observedNodeUsers >>= M.lookup envInfo.userName)
                                 == Just envInfo.uid
@@ -3125,9 +3199,10 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                             <> " ("
                             <> lifecycleText
                             <> "): "
-                            <> if null mismatched
-                                then "ready"
-                                else T.pack (show (length mismatched)) <> " vhost(s) require DNS reconciliation after deployment"
+                            <> let pendingCount = length mismatched + length lookupFailures
+                                in if pendingCount == 0
+                                    then "ready"
+                                    else T.pack (show pendingCount) <> " vhost(s) require DNS reconciliation after deployment"
                         )
                     pure (envInfo.userName, items)
             let dnsItemsByUser = M.fromList dnsStateRows
@@ -3596,22 +3671,31 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                             case result of
                                                                                 Left err -> pure (Just (userName <> ": " <> err))
                                                                                 Right () -> do
-                                                                                    (_, pendingDns) <- waitForAuthoritativeDnsPropagation deployDnsCache allItems
-                                                                                    if not (null pendingDns)
-                                                                                        then
+                                                                                    waitForAuthoritativeDnsPropagation deployDnsCache allItems >>= \case
+                                                                                        Left dnsFailure ->
                                                                                             pure
                                                                                                 ( Just
                                                                                                     ( userName
-                                                                                                        <> ": DNS has not converged on every authoritative nameserver for "
-                                                                                                        <> T.intercalate ", " (map (.diDiscoveryHost) pendingDns)
+                                                                                                        <> ": authoritative DNS propagation could not be verified: "
+                                                                                                        <> renderDnsLookupFailure dnsFailure
                                                                                                     )
                                                                                                 )
-                                                                                        else do
-                                                                                            httpsResult <- waitForTrustedHttps envInfo
-                                                                                            pure $
-                                                                                                case httpsResult of
-                                                                                                    Right () -> Nothing
-                                                                                                    Left err -> Just (userName <> ": " <> err)
+                                                                                        Right (_, pendingDns) ->
+                                                                                            if not (null pendingDns)
+                                                                                                then
+                                                                                                    pure
+                                                                                                        ( Just
+                                                                                                            ( userName
+                                                                                                                <> ": DNS has not converged on every authoritative nameserver for "
+                                                                                                                <> T.intercalate ", " (map (.diDiscoveryHost) pendingDns)
+                                                                                                            )
+                                                                                                        )
+                                                                                                else do
+                                                                                                    httpsResult <- waitForTrustedHttps envInfo
+                                                                                                    pure $
+                                                                                                        case httpsResult of
+                                                                                                            Right () -> Nothing
+                                                                                                            Left err -> Just (userName <> ": " <> err)
                                                         if not (null dnsFailures)
                                                             then do
                                                                 forM_ dnsFailures $ \err ->
