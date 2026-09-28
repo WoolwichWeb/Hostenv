@@ -1618,12 +1618,6 @@ planEnvironmentHostnames plan =
         lookupText (K.fromString "hostname") hostenvObj
     hostnameFor _ = Nothing
 
-stateReservedHostnames :: Text -> KM.KeyMap A.Value -> [Text]
-stateReservedHostnames hostenvHostname state =
-    [ normalizeDnsName userName <> "." <> normalizeDnsName hostenvHostname
-    | (userName, _) <- EnvironmentState.managedIdentities state
-    ]
-
 loadProviderState :: Text -> IO (KM.KeyMap A.Value)
 loadProviderState statePath = do
     stateExists <- Dir.doesFileExist (T.unpack statePath)
@@ -1651,7 +1645,6 @@ validatePlanDnsSafety state previousPlan newPlan = do
             S.toList . S.fromList $
                 planEnvironmentHostnames newPlan
                     ++ maybe [] planEnvironmentHostnames previousPlan
-                    ++ stateReservedHostnames hostenvHostname state
 
     lookupResults <-
         forM hostnames $ \hostname -> do
