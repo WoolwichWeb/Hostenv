@@ -60,9 +60,24 @@ let
   defaultPackage = unwrapDefault perSystem.packages.default;
   providerApp = perSystem.apps.hostenv-provider;
   defaultApp = unwrapDefault perSystem.apps.default;
+
+  # Package and dev-shell values are lazy. Force their derivations here so
+  # invalid package paths and other evaluation errors cannot remain hidden
+  # until a downstream provider evaluates its dev shell.
+  toolingDerivations =
+    [
+      providerPackage
+      defaultPackage
+    ]
+    ++ builtins.attrValues perSystem.provider.planPaths
+    ++ perSystem.devshells.default.devshell.packages;
+  toolingDerivationsEvaluate = lib.all (
+    drv: lib.isDerivation drv && builtins.seq drv.drvPath true
+  ) toolingDerivations;
 in
 asserts.assertTrue "provider-tooling-plan-paths-eval" (
   perSystem.provider.planPaths.plan == expectedPlan
   && defaultPackage.outPath == providerPackage.outPath
   && defaultApp.program == providerApp.program
-) "provider tooling should build plan paths and default to the provider CLI"
+  && toolingDerivationsEvaluate
+) "provider tooling should fully evaluate its packages, dev-shell dependencies, plan paths, and default CLI"
