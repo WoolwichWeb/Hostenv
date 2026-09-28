@@ -534,11 +534,26 @@ in
     #!${pkgs.runtimeShell}
     set -euo pipefail
     args=" $* "
-    if [ "''${DNS_SPLIT_AUTH:-0}" = 1 ] || [ "''${DNS_SPLIT_ADDR:-0}" = 1 ]; then
-      if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' hosting.test NS '; then
-        printf 'ns1.hosting.test.\nns2.hosting.test.\n'
-        exit 0
+
+    if [ "''${DNS_NS_FAIL:-0}" = 1 ]       && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' NS '; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    if [ "''${DNS_OBSERVATION_FAIL:-0}" = 1 ]       && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq '@ns1.hosting.test'       && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME '       && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod.hosting.test'       && { [ -z "''${DNS_STATE_DIR:-}" ] || [ ! -f "$DNS_STATE_DIR/acme-prod-new" ]; }; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
+
+    if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' hosting.test NS '; then
+      if [ "''${DNS_SPLIT_AUTH:-0}" = 1 ] || [ "''${DNS_SPLIT_ADDR:-0}" = 1 ]; then
+        printf 'hosting.test. 60 IN NS ns1.hosting.test.\nhosting.test. 60 IN NS ns2.hosting.test.\n'
+      else
+        printf 'hosting.test. 60 IN NS ns1.hosting.test.\n'
       fi
+      exit 0
     fi
 
     if [ "''${DNS_SPLIT_AUTH:-0}" = 1 ]; then
@@ -825,6 +840,23 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
+
+      # Failure to discover authoritative nameservers is indeterminate, not a
+      # reason to fall back to the recursive resolver. The source stays
+      # quiesced and its system account is not removed.
+      rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/* "$DNS_STATE_DIR"/*
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" DNS_STATE_DIR="$DNS_STATE_DIR" DNS_NS_FAIL=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/ns-fail.out" 2>&1; then
+        echo "migration finalized despite failed authoritative nameserver discovery"
+        exit 1
+      fi
+      ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'authoritative nameserver discovery' "$TMPDIR/ns-fail.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'DNS server returned SERVFAIL' "$TMPDIR/ns-fail.out"
 
       # DNS is part of migration finalization. If automatic updates are
       # unavailable, a moved source is quiesced but its account is not removed
@@ -1162,11 +1194,28 @@ in
     set -euo pipefail
     args=" $* "
     printf '%s\n' "$*" >> "$DIG_LOG"
+
+    if [ "''${DNS_HINT_FAIL:-0}" = 1 ]       && ! printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq '@'       && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME'       && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'fresh-prod.hosting.test'; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    if [ "''${DNS_OBSERVATION_FAIL:-0}" = 1 ]       && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq '@ns1.hosting.test'       && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME'       && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'fresh-prod.hosting.test'       && [ ! -f "$DNS_STATE_DIR/fresh-prod-new" ]; then
+      printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
+      exit 0
+    fi
+
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
+    if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' hosting.test NS '; then
+      printf 'hosting.test. 60 IN NS ns1.hosting.test.\n'
+      exit 0
+    fi
+
     if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME'; then
       if [ "''${DNS_STRANDED:-0}" = 1 ]; then
-        printf 'old-node.hosting.test.\n'
+        printf 'fresh-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
       elif [ -f "$DNS_STATE_DIR/fresh-prod-new" ]; then
-        printf 'new-node.hosting.test.\n'
+        printf 'fresh-prod.hosting.test. 60 IN CNAME new-node.hosting.test.\n'
       fi
     fi
     EOF
@@ -1216,6 +1265,18 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq '#"new-node"."fresh-prod"' "$log"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
 
+      # An indeterminate authoritative read can still be repaired when
+      # Cloudflare is configured. The failed read is reported, the CNAME is
+      # written, and the post-update authoritative check must then succeed.
+      : > "$log"
+      : > "$digLog"
+      rm -f "$TMPDIR/dns-state/fresh-prod-new"
+      PATH="$fakeBin:$PATH" NIX_LOG="$log" DIG_LOG="$digLog" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_OBSERVATION_FAIL=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/lookup-repair.out" 2>&1
+      ${pkgs.gnugrep}/bin/grep -Fq 'could not verify current DNS for fresh-prod.hosting.test' "$TMPDIR/lookup-repair.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'attempting the configured Cloudflare update' "$TMPDIR/lookup-repair.out"
+      test -f "$TMPDIR/dns-state/fresh-prod-new"
+      ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
+
       # Existing environment on the same node follows the same canonical
       # deploy/DNS-reconciliation flow and is classified from live username+UID observation.
       : > "$log"
@@ -1240,6 +1301,20 @@ in
         exit 1
       fi
       test ! -s "$log"
+
+      # If this safety lookup itself fails, the CLI cannot safely conclude that
+      # the environment is fresh. Preserve the exact DNS failure and abort
+      # before any deployment.
+      : > "$log"
+      : > "$digLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$log" DIG_LOG="$digLog" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_HINT_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/hint-fail.out" 2>&1; then
+        echo "failed removed-inventory DNS lookup was treated as fresh"
+        exit 1
+      fi
+      test ! -s "$log"
+      ${pkgs.gnugrep}/bin/grep -Fq 'Refusing to treat the environment as fresh until DNS can be verified' "$TMPDIR/hint-fail.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'DNS server returned SERVFAIL' "$TMPDIR/hint-fail.out"
     )
 
     echo ok > "$out"
