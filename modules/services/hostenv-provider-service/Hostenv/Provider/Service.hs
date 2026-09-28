@@ -646,13 +646,24 @@ runWebhookWith runner loadPlan cfg ref = do
           planRaw <- loadPlan
           projectDeployScopeWithDns ref.prOrg ref.prProject planRaw >>= \case
             Left err -> pure (Left (WebhookPlanError err))
-            Right scope -> do
-              deploys <-
-                if scope.scopeHasMigration
-                  then deployMigrationTransaction runner cfg scope.scopeNodes
-                  else foldM (deployNode runner cfg) [] scope.scopeNodes
-              let ok = all (\d -> d.deploySuccess) deploys
-              pure (Right (WebhookResult scope.scopeNodes deploys ok))
+            Right scope ->
+              if scope.scopeHasMigration
+                then
+                  -- A migration can need both the old and new nodes. Running
+                  -- deploy without a filter here would also deploy every other
+                  -- project in the provider. Until deploy can select a project
+                  -- or environment and still include the nodes needed for its
+                  -- migration, stop and let the provider operator run it.
+                  pure
+                    ( Left
+                        ( WebhookPlanError
+                            "automatic webhook deployment cannot safely run a cross-node migration yet; run \`nix run .#hostenv-provider -- deploy\` from the provider repository to complete the migration"
+                        )
+                    )
+                else do
+                  deploys <- foldM (deployNode runner cfg) [] scope.scopeNodes
+                  let ok = all (\d -> d.deploySuccess) deploys
+                  pure (Right (WebhookResult scope.scopeNodes deploys ok))
   where
     step run spec = do
       res <- run spec
@@ -667,16 +678,3 @@ runWebhookWith runner loadPlan cfg ref = do
           pure (acc ++ [DeployResult node True out.outStdout out.outStderr])
         Left err ->
           pure (acc ++ [DeployResult node False err.errStdout err.errStderr])
-
-    deployMigrationTransaction run config nodes = do
-      res <- run (CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy"] (config.whWorkDir))
-      pure $
-        case res of
-          Right out ->
-            [ DeployResult node True out.outStdout out.outStderr
-            | node <- nodes
-            ]
-          Left err ->
-            [ DeployResult node False err.errStdout err.errStderr
-            | node <- nodes
-            ]

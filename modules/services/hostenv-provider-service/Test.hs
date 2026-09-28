@@ -221,17 +221,21 @@ testMigrationCommandSequence = do
   let proj = ProjectRef "acme" "site"
   result <- runWebhookWith runner (pure planJson) cfg proj
   case result of
-    Left err -> assert False ("migration webhook run failed: " <> show err)
-    Right res -> do
-      assert (res.webhookOk) "migration webhook run should succeed"
-      assert (res.webhookNodes == ["new-node", "old-node"]) "migration webhook should report destination then source"
+    Left (WebhookPlanError err) -> do
+      assert
+        ("automatic webhook deployment cannot safely run a cross-node migration yet" `T.isInfixOf` err)
+        "migration webhook should explain why automatic deployment stopped"
+      assert
+        ("nix run .#hostenv-provider -- deploy" `T.isInfixOf` err)
+        "migration webhook should explain how to complete the migration"
       cmds <- readIORef ref
       let expected =
             [ CommandSpec "nix" ["flake", "update", "acme__site"] "/tmp/provider"
             , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "plan"] "/tmp/provider"
-            , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy"] "/tmp/provider"
             ]
-      assert (cmds == expected) "migration webhook must use one unfiltered deploy transaction"
+      assert (cmds == expected) "migration webhook must stop before starting a provider-wide deploy"
+    Left err -> assert False ("migration webhook returned the wrong error: " <> show err)
+    Right _ -> assert False "migration webhook should stop before automatic deployment"
 
 
 
