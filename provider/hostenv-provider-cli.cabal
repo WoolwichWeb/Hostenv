@@ -17,6 +17,7 @@ executable hostenv-provider
     Hostenv.Provider.DeployPreflight
     Hostenv.Provider.EnvironmentState
     Hostenv.Provider.MigrationHandoff
+    Hostenv.Provider.PlanTransition
     Hostenv.Provider.SigningTarget
     Hostenv.Provider.TlsReadiness
     Hostenv.Provider.UserLifecycle

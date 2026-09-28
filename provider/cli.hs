@@ -18,7 +18,6 @@ import Data.Foldable (toList)
 import Data.List ((\\))
 import Data.Map.Strict qualified as M
 import Data.Maybe (catMaybes, fromMaybe, isNothing, listToMaybe, mapMaybe)
-import Data.Scientific (floatingOrInteger)
 import Data.Set qualified as S
 import Data.String (fromString)
 import Data.Text (Text)
@@ -32,6 +31,7 @@ import Hostenv.Provider.DeployVerification (NodeConnection (..), nodeConnectionF
 import Hostenv.Provider.DeployVerification qualified as Verify
 import Hostenv.Provider.EnvironmentState qualified as EnvironmentState
 import Hostenv.Provider.MigrationHandoff qualified as MigrationHandoff
+import Hostenv.Provider.PlanTransition qualified as PlanTransition
 import Hostenv.Provider.Dns qualified as Dns
 import Hostenv.Provider.DnsBackoff (backoffDelays)
 import Hostenv.Provider.DnsTransition (
@@ -178,13 +178,6 @@ lookupText k o = case KM.lookup k o of
 lookupObj :: KM.Key -> KM.KeyMap A.Value -> Maybe (KM.KeyMap A.Value)
 lookupObj k o = case KM.lookup k o of
     Just (A.Object x) -> Just x
-    _ -> Nothing
-
-lookupInt :: KM.Key -> KM.KeyMap A.Value -> Maybe Integer
-lookupInt k o = case KM.lookup k o of
-    Just (A.Number n) -> case floatingOrInteger n of
-        Right i -> Just i
-        Left (_ :: Double) -> Nothing
     _ -> Nothing
 
 lookupTextList :: KM.Key -> KM.KeyMap A.Value -> [Text]
@@ -889,13 +882,13 @@ runPlan dryRun = do
     planPretty <- prettyJson planRaw
     if dryRun
         then do
-            validatePlanTransition planDest stateDest planPretty
+            PlanTransition.validatePlanTransition planTransitionOps planDest stateDest planPretty
             _ <- printDiffAgainstFile planDest planPretty
             printProviderLine "hostenv-provider: dry-run: generated/plan.json was not modified"
         else
             withSameDirectoryTempFile planDest planPretty $ \candidatePlanPath -> do
                 candidatePlanRaw <- BL.readFile candidatePlanPath
-                validatePlanTransition planDest stateDest candidatePlanRaw
+                PlanTransition.validatePlanTransition planTransitionOps planDest stateDest candidatePlanRaw
 
                 stateSource <- nixBuildPath (planAttrBase <> ".state")
                 flakeSource <- nixBuildPath (planAttrBase <> ".flake")
@@ -1056,6 +1049,14 @@ mkUserLifecycleOps deployUser resolveNodeConnection =
             runRemoteStrict (mkSshTarget deployUser (resolveNodeConnection nodeName)) args
         , printLine = printProviderLine
         , printErrLine = printProviderErrLine
+        }
+
+planTransitionOps :: PlanTransition.Ops
+planTransitionOps =
+    PlanTransition.Ops
+        { makeUserLifecycleOps = mkUserLifecycleOps
+        , queryPlanSafetyCnames = queryPlanSafetyCnames
+        , printLine = printProviderLine
         }
 
 data SigningKeyInfo = SigningKeyInfo
@@ -1253,10 +1254,6 @@ detectFlakeKeyStatus key = do
                         then FlakeKeyPresent
                         else FlakeKeyMissing
 
-planDeployUser :: KM.KeyMap A.Value -> Text
-planDeployUser plan =
-    fromMaybe "deploy" (lookupText (K.fromString "deployUser") plan)
-
 planTrustedPublicKeys :: KM.KeyMap A.Value -> [Text]
 planTrustedPublicKeys plan =
     case lookupObj (K.fromString "nixSigning") plan of
@@ -1266,30 +1263,6 @@ planTrustedPublicKeys plan =
 planNodeRemoteBuild :: KM.KeyMap A.Value -> KM.KeyMap A.Value
 planNodeRemoteBuild plan =
     fromMaybe KM.empty (lookupObj (K.fromString "nodeRemoteBuild") plan)
-
-planSystemTargetNodes :: KM.KeyMap A.Value -> Maybe Text -> [Text]
-planSystemTargetNodes plan mNode =
-    let nodeNames =
-            maybe
-                []
-                (map K.toText . KM.keys)
-                (lookupObj (K.fromString "nodes") plan)
-     in case mNode of
-            Nothing -> nodeNames
-            Just nodeName -> filter (== nodeName) nodeNames
-
-planNodeStatus :: KM.KeyMap A.Value -> Text -> Text
-planNodeStatus plan nodeName =
-    fromMaybe "active" $ do
-        statuses <- lookupObj (K.fromString "nodeStatus") plan
-        lookupText (K.fromText nodeName) statuses
-
-planConnectionNodes :: KM.KeyMap A.Value -> [Text]
-planConnectionNodes plan =
-    maybe
-        []
-        (map K.toText . KM.keys)
-        (lookupObj (K.fromString "nodeConnections") plan)
 
 dnsRemovedInventoryHint :: Text -> [Text] -> EnvInfo -> IO (Either Dns.DnsLookupFailure (Maybe Text))
 dnsRemovedInventoryHint hostenvHostname inventoryNodes envInfo = do
@@ -1327,305 +1300,6 @@ runNodeDeployPreflight resolveNodeConnection deployUser nodeName requiresTrusted
             , signingPublicKey = signingPublicKey
             , runRemote = runRemoteOutput target
             }
-
-planEnvironmentAssignments :: KM.KeyMap A.Value -> [(Text, Text)]
-planEnvironmentAssignments plan =
-    case lookupObj (K.fromString "environments") plan of
-        Nothing -> []
-        Just environments ->
-            mapMaybe assignment (KM.toList environments)
-  where
-    assignment (key, A.Object envObj) = do
-        nodeName <- lookupText (K.fromString "node") envObj
-        pure (K.toText key, nodeName)
-    assignment _ = Nothing
-
-planEnvironmentHostnames :: KM.KeyMap A.Value -> [Text]
-planEnvironmentHostnames plan =
-    case lookupObj (K.fromString "environments") plan of
-        Nothing -> []
-        Just environments ->
-            mapMaybe hostnameFor (KM.elems environments)
-  where
-    hostnameFor (A.Object envObj) = do
-        hostenvObj <- lookupObj (K.fromString "hostenv") envObj
-        lookupText (K.fromString "hostname") hostenvObj
-    hostnameFor _ = Nothing
-
-loadProviderState :: Text -> IO (KM.KeyMap A.Value)
-loadProviderState statePath = do
-    stateExists <- Dir.doesFileExist (T.unpack statePath)
-    if not stateExists
-        then pure KM.empty
-        else do
-            stateRaw <- BL.readFile (T.unpack statePath)
-            case A.eitherDecode' stateRaw of
-                Left err ->
-                    error ("hostenv-provider: cannot read " <> T.unpack statePath <> ": " <> err)
-                Right value -> pure value
-
-validatePlanDnsSafety ::
-    Maybe (KM.KeyMap A.Value) ->
-    KM.KeyMap A.Value ->
-    IO ()
-validatePlanDnsSafety previousPlan newPlan = do
-    let hostenvHostname =
-            fromMaybe
-                (error "hostenv-provider: generated plan is missing hostenvHostname")
-                (lookupText (K.fromString "hostenvHostname") newPlan)
-    let inventory = S.fromList (map Dns.normalizeName (planSystemTargetNodes newPlan Nothing))
-    let hostnames =
-            S.toList . S.fromList $
-                planEnvironmentHostnames newPlan
-                    ++ maybe [] planEnvironmentHostnames previousPlan
-
-    lookupResults <-
-        forM hostnames $ \hostname -> do
-            result <- queryPlanSafetyCnames hostname
-            pure (hostname, result)
-
-    let lookupFailures =
-            [ hostname <> ": " <> err
-            | (hostname, Left err) <- lookupResults
-            ]
-    unless (null lookupFailures) $
-        error
-            ( "hostenv-provider: refusing provider plan because Hostenv DNS could not be verified: "
-                <> T.unpack (T.intercalate "; " lookupFailures)
-            )
-
-    let domain = Dns.normalizeName hostenvHostname
-    let suffix = "." <> domain
-    let violations =
-            [ (hostname, nodeName)
-            | (hostname, Right cnames) <- lookupResults
-            , cname <- cnames
-            , let normalizedTarget = Dns.normalizeName cname
-            , Just nodeName <- [T.stripSuffix suffix normalizedTarget]
-            , not (T.null nodeName)
-            , not (S.member nodeName inventory)
-            ]
-
-    unless (null violations) $
-        error
-            ( "hostenv-provider: refusing provider plan because Hostenv DNS still points at node(s) missing from provider.nodeSystems: "
-                <> T.unpack
-                    ( T.intercalate
-                        ", "
-                        [ hostname <> " -> " <> nodeName
-                        | (hostname, nodeName) <- violations
-                        ]
-                    )
-                <> ". Restore the node to inventory, migrate/retire the environment, and run plan again before changing DNS."
-            )
-
-validatePendingMigrationHandoffs ::
-    KM.KeyMap A.Value ->
-    [Text] ->
-    IO ()
-validatePendingMigrationHandoffs plan inventoryNodes = do
-    let hostenvHostname =
-            fromMaybe
-                (error "hostenv-provider: generated plan is missing hostenvHostname")
-                (lookupText (K.fromString "hostenvHostname") plan)
-    let deployUser = planDeployUser plan
-    let resolveConnection = nodeConnectionFor plan hostenvHostname
-    handoffResults <-
-        forM inventoryNodes $ \nodeName ->
-            readNodeMigrationHandoffs
-                deployUser
-                resolveConnection
-                nodeName
-    let handoffErrors = [err | Left err <- handoffResults]
-    unless (null handoffErrors) $
-        error
-            ( "hostenv-provider: refusing provider plan because pending migration handoffs could not be verified: "
-                <> T.unpack (T.intercalate "; " handoffErrors)
-            )
-    let pendingRemovedSources =
-            [ (destinationNode, uid, MigrationHandoff.handoffSourceNode handoff)
-            | (destinationNode, Right handoffs) <- zip inventoryNodes handoffResults
-            , (uid, handoff) <- handoffs
-            , MigrationHandoff.handoffSourceNode handoff `notElem` inventoryNodes
-            ]
-    unless (null pendingRemovedSources) $
-        error
-            ( "hostenv-provider: refusing provider plan because pending migration finalization still references node(s) missing from provider.nodeSystems: "
-                <> T.unpack
-                    ( T.intercalate
-                        ", "
-                        [ "uid "
-                            <> T.pack (show uid)
-                            <> " on "
-                            <> destinationNode
-                            <> " -> "
-                            <> sourceNode
-                        | (destinationNode, uid, sourceNode) <- pendingRemovedSources
-                        ]
-                    )
-                <> ". Keep each source node in inventory until deploy removes its old account and clears the handoff."
-            )
-
-validatePlanTransition :: Text -> Text -> BL.ByteString -> IO ()
-validatePlanTransition planPath statePath newPlanRaw = do
-    newPlan <-
-        case A.eitherDecode' newPlanRaw of
-            Left err ->
-                error ("hostenv-provider: generated plan is invalid JSON: " <> err)
-            Right value -> pure (value :: KM.KeyMap A.Value)
-
-    state <- loadProviderState statePath
-
-    previousPlanExists <- Dir.doesFileExist (T.unpack planPath)
-    previousPlan <-
-        if not previousPlanExists
-            then pure Nothing
-            else do
-                previousRaw <- BL.readFile (T.unpack planPath)
-                case A.eitherDecode' previousRaw of
-                    Left err -> do
-                        printProviderLine
-                            ( "hostenv-provider: warning: existing "
-                                <> planPath
-                                <> " is invalid; skipping previous-plan comparison and relying on the DNS safety check ("
-                                <> T.pack err
-                                <> ")"
-                            )
-                        pure Nothing
-                    Right value -> pure (Just (value :: KM.KeyMap A.Value))
-
-    let newNodes = planSystemTargetNodes newPlan Nothing
-    let removedNodes =
-            maybe
-                []
-                (\oldPlan -> planSystemTargetNodes oldPlan Nothing \\ newNodes)
-                previousPlan
-    let validateRemovedNode nodeName status deployUser connection managedIdentityState = do
-            unless (status == "retiring") $
-                error
-                    ( "hostenv-provider: refusing to remove provider node "
-                        <> T.unpack nodeName
-                        <> " directly from inventory. Mark provider.nodeStatus."
-                        <> T.unpack nodeName
-                        <> " = \"retiring\", move/retire its environments, deploy the cleanup, then run plan again."
-                    )
-
-            let resolveStoredConnection _ = connection
-            observedResult <- readNodeUsers deployUser resolveStoredConnection nodeName
-            observedUsers <-
-                case observedResult of
-                    Left err ->
-                        error
-                            ( "hostenv-provider: refusing to remove retiring node "
-                                <> T.unpack nodeName
-                                <> " because Hostenv could not verify that it is clean: "
-                                <> T.unpack err
-                            )
-                    Right (_, users) -> pure users
-
-            let identities = EnvironmentState.managedIdentities managedIdentityState
-            runtimeResult <-
-                readNodeRuntimeUsers
-                    deployUser
-                    resolveStoredConnection
-                    identities
-                    nodeName
-            runtimeUsers <-
-                case runtimeResult of
-                    Left err ->
-                        error
-                            ( "hostenv-provider: refusing to remove retiring node "
-                                <> T.unpack nodeName
-                                <> " because Hostenv could not verify its user runtime state: "
-                                <> T.unpack err
-                            )
-                    Right (_, users) -> pure users
-
-            let managedUsers =
-                    EnvironmentState.managedUsersToRetire
-                        nodeName
-                        M.empty
-                        observedUsers
-                        runtimeUsers
-                        managedIdentityState
-            let uidMismatches =
-                    EnvironmentState.managedUserUidMismatches
-                        observedUsers
-                        managedIdentityState
-            let uidOwnerConflicts =
-                    EnvironmentState.managedReservedUidConflicts
-                        observedUsers
-                        managedIdentityState
-            unless (null managedUsers && null uidMismatches && null uidOwnerConflicts) $
-                error
-                    ( "hostenv-provider: refusing to remove retiring node "
-                        <> T.unpack nodeName
-                        <> " from inventory because it still contains Hostenv-managed account/runtime state: "
-                        <> T.unpack
-                            ( T.intercalate
-                                ", "
-                                ( map fst managedUsers
-                                    ++ [ userName <> " (UID drift)" | (userName, _, _) <- uidMismatches ]
-                                    ++ [ userName <> " (reserved UID " <> T.pack (show expectedUid) <> " owned by " <> owner <> ")"
-                                       | (userName, expectedUid, owner) <- uidOwnerConflicts
-                                       ]
-                                )
-                            )
-                        <> ". Deploy migrations/retirements until the node is clean, then run plan again."
-                    )
-
-    case previousPlan of
-        Just oldPlan -> do
-            let removedSet = S.fromList removedNodes
-            let removedAssignments =
-                    [ (envName, nodeName)
-                    | (envName, nodeName) <- planEnvironmentAssignments oldPlan
-                    , S.member nodeName removedSet
-                    ]
-
-            unless (null removedAssignments) $
-                error
-                    ( "hostenv-provider: refusing provider plan because environment(s) were assigned to node(s) removed from provider.nodeSystems: "
-                        <> T.unpack
-                            ( T.intercalate
-                                ", "
-                                [ envName <> "@" <> nodeName
-                                | (envName, nodeName) <- removedAssignments
-                                ]
-                            )
-                        <> ". Keep each source node in inventory, move its environments, mark it retiring, deploy the cleanup, then remove it in a later plan."
-                    )
-
-            unless (null removedNodes) $ do
-                let previousEnvironments =
-                        fromMaybe KM.empty (lookupObj (K.fromString "environments") oldPlan)
-                let managedIdentityState = KM.union state previousEnvironments
-                let deployUser = planDeployUser oldPlan
-                let oldHostname =
-                        fromMaybe
-                            (error ("hostenv-provider: hostenvHostname missing from existing " <> T.unpack planPath))
-                            (lookupText (K.fromString "hostenvHostname") oldPlan)
-                let resolveOldConnection = nodeConnectionFor oldPlan oldHostname
-                forM_ removedNodes $ \nodeName ->
-                    validateRemovedNode
-                        nodeName
-                        (planNodeStatus oldPlan nodeName)
-                        deployUser
-                        (resolveOldConnection nodeName)
-                        managedIdentityState
-        Nothing -> pure ()
-
-    -- Check handoff markers only when the previous plan proves that a node is
-    -- being removed. When plan history is missing, do not probe every proposed
-    -- node for handoffs: a new provider may not have working SSH access until
-    -- its first deployment. This intentionally means that deleting plan.json
-    -- also loses the handoff-based removal warning. DNS remains the best-effort
-    -- warning in that case, and provider inventory is still the source of truth.
-    when (not (null removedNodes)) $
-        validatePendingMigrationHandoffs newPlan newNodes
-
-    when (isNothing previousPlan || not (null removedNodes)) $
-        validatePlanDnsSafety previousPlan newPlan
 
 runMigrationBackup :: Text -> (Text -> NodeConnection) -> EnvInfo -> Text -> Text -> IO Text
 runMigrationBackup deployUser nodeConnection envInfo prevNode backupName = do
@@ -1892,8 +1566,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
             let sourceFor envName = lookup envName migrationSources
             let discoveryNodes =
                     S.toList . S.fromList $
-                        planConnectionNodes plan
-                            ++ planSystemTargetNodes plan Nothing
+                        PlanTransition.planConnectionNodes plan
+                            ++ PlanTransition.planSystemTargetNodes plan Nothing
                             ++ map snd sourceHits
 
             -- Perform data migrations if the environment has moved node.
@@ -1915,7 +1589,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
             -- System profiles come from plan.nodes, not plan.environments.
             -- A node may intentionally have no current environments while it
             -- receives one final system deployment to retire lingering users.
-            let targetNodes = planSystemTargetNodes plan mNode
+            let targetNodes = PlanTransition.planSystemTargetNodes plan mNode
             stateRaw <- BL.readFile (T.unpack statePath)
             state <- case A.eitherDecode' stateRaw of
                 Left err -> error ("failed to parse " <> T.unpack statePath <> ": " <> err)
@@ -1975,7 +1649,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                 when failures $ printProviderLine "hostenv-provider: dry-run deployment completed with errors"
                 Sh.exitWith $ if failures then ExitFailure 1 else ExitSuccess
 
-            let deployUser = planDeployUser plan
+            let deployUser = PlanTransition.planDeployUser plan
             let userLifecycleOps = mkUserLifecycleOps deployUser resolveNodeConnection
             let remoteBuildMap = planNodeRemoteBuild plan
             let usesRemoteBuild nodeName = forceRemoteBuild || nodeUsesRemoteBuild remoteBuildMap nodeName
@@ -2040,7 +1714,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                 printProviderLine "hostenv-provider: aborting deployment because one or more preflight checks failed"
                 Sh.exitWith (ExitFailure 1)
 
-            let inventoryNodes = planSystemTargetNodes plan Nothing
+            let inventoryNodes = PlanTransition.planSystemTargetNodes plan Nothing
 
             let lifecycleEnvInfos =
                     filter
@@ -2747,9 +2421,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                             nodeName
                                                     Just _ ->
                                                         forM_ (M.lookup userName envInfoByUser) $ \envInfo -> do
-                                                            clearMigrationHandoffOnNode
-                                                                deployUser
-                                                                resolveNodeConnection
+                                                            UserLifecycle.clearMigrationHandoffOnNode
+                                                                userLifecycleOps
                                                                 envInfo.userName
                                                                 envInfo.uid
                                                                 nodeName
