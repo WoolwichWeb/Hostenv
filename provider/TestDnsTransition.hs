@@ -31,7 +31,6 @@ main = do
                 ]
     let items = collectDnsItems "hosting.test" envs
     assertTrue (length items == 2) "collect every environment vhost"
-    assertTrue (all ((== Just "new-node") . (.diNodeName)) items) "retain destination node"
     assertTrue (all ((== "new-node.hosting.test") . (.diExpectedHost)) items) "target destination node hostname"
     assertTrue
         ( [item.diDiscoveryHost | item <- items, item.diTlsEnabled]

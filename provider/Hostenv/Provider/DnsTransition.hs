@@ -18,10 +18,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 
 data DnsItem = DnsItem
-    { diEnvName :: Text
-    , diNodeName :: Maybe Text
-    , diVhostName :: Text
-    , diDiscoveryHost :: Text
+    { diDiscoveryHost :: Text
     , diExpectedHost :: Text
     , diTlsEnabled :: Bool
     }
@@ -52,18 +49,14 @@ normalizeDnsName :: Text -> Text
 normalizeDnsName =
     T.toLower . T.dropWhileEnd (== '.') . T.strip
 
-nodeKey :: K.Key
-nodeKey = K.fromString "node"
-
 collectDnsItems :: Text -> KM.KeyMap A.Value -> [DnsItem]
 collectDnsItems hostenvHostname envs =
     concatMap collectEnv (KM.toList envs)
   where
-    collectEnv (kEnv, vEnv) =
+    collectEnv (_kEnv, vEnv) =
         case vEnv of
             A.Object envObj ->
-                let envName = K.toText kEnv
-                    nodeName = lookupText nodeKey envObj
+                let nodeName = lookupText (K.fromString "node") envObj
                     expectedHostFor vh = maybe vh (`canonicalHostInDomain` hostenvHostname) nodeName
                     vhosts = fromMaybe KM.empty (lookupObj (K.fromString "virtualHosts") envObj)
                  in map
@@ -77,10 +70,7 @@ collectDnsItems hostenvHostname envs =
                                         _ -> False
                              in
                                 DnsItem
-                                    { diEnvName = envName
-                                    , diNodeName = nodeName
-                                    , diVhostName = vhName
-                                    , diDiscoveryHost = vhName
+                                    { diDiscoveryHost = vhName
                                     , diExpectedHost = expectedHostFor vhName
                                     , diTlsEnabled = tlsEnabled
                                     }

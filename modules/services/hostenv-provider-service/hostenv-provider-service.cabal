@@ -12,10 +12,8 @@ executable hostenv-provider-service
     Hostenv.Provider.Command
     Hostenv.Provider.Config
     Hostenv.Provider.DB
-    Hostenv.Provider.DnsPointsToCache
     Hostenv.Provider.Gitlab
     Hostenv.Provider.Http
-    Hostenv.Provider.PrevNodeDiscovery
     Hostenv.Provider.Project
     Hostenv.Provider.Repo
     Hostenv.Provider.Server
@@ -67,10 +65,7 @@ test-suite hostenv-provider-service-tests
     base >=4.14 && <5,
     aeson,
     bytestring,
-    containers,
     cryptonite,
     directory,
     memory,
-    process,
-    text,
-    time
+    text
