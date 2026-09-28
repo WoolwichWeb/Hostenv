@@ -560,9 +560,9 @@ in
       if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME ' \
         && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod.hosting.test'; then
         if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq '@ns1.hosting.test'; then
-          printf 'old-node.hosting.test.\n'
+          printf 'acme-prod.hosting.test. 60 IN CNAME old-node.hosting.test.\n'
         else
-          printf 'new-node.hosting.test.\n'
+          printf 'acme-prod.hosting.test. 60 IN CNAME new-node.hosting.test.\n'
         fi
         exit 0
       fi
@@ -575,15 +575,15 @@ in
       fi
       if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' A ' \
         && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'new-node.hosting.test'; then
-        printf '192.0.2.20\n'
+        printf 'new-node.hosting.test. 60 IN A 192.0.2.20\n'
         exit 0
       fi
       if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' A ' \
         && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod.hosting.test'; then
         if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq '@ns1.hosting.test'; then
-          printf '192.0.2.10\n'
+          printf 'acme-prod.hosting.test. 60 IN A 192.0.2.10\n'
         else
-          printf '192.0.2.20\n'
+          printf 'acme-prod.hosting.test. 60 IN A 192.0.2.20\n'
         fi
         exit 0
       fi
@@ -600,13 +600,13 @@ in
         *) dns_user="acme-prod" ;;
       esac
       if [ "''${DNS_OLD:-0}" = 1 ]; then
-        printf 'old-node.hosting.test.\n'
+        printf '%s.hosting.test. 60 IN CNAME old-node.hosting.test.\n' "$dns_user"
         printf 'DNS_OLD %s\n' "$dns_user" >> "$EVENT_LOG"
       elif [ "''${DNS_AUTOMATIC:-0}" = 1 ] && [ ! -f "$DNS_STATE_DIR/$dns_user-new" ]; then
-        printf 'old-node.hosting.test.\n'
+        printf '%s.hosting.test. 60 IN CNAME old-node.hosting.test.\n' "$dns_user"
         printf 'DNS_OLD %s\n' "$dns_user" >> "$EVENT_LOG"
       else
-        printf 'new-node.hosting.test.\n'
+        printf '%s.hosting.test. 60 IN CNAME new-node.hosting.test.\n' "$dns_user"
         printf 'DNS_NEW %s\n' "$dns_user" >> "$EVENT_LOG"
       fi
     fi
