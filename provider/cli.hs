@@ -161,15 +161,6 @@ cliOpts =
 tryAny :: IO a -> IO (Either SomeException a)
 tryAny = try
 
-queryPlanSafetyCnames :: Text -> IO (Either Text [Text])
-queryPlanSafetyCnames name = do
-    result <- Dns.queryRecursiveRecord 2 name "CNAME"
-    pure $
-        case result of
-            Left err -> Left (Dns.renderLookupFailure err)
-            Right answers -> Right answers
-
--- -------- JSON helpers --------
 lookupText :: KM.Key -> KM.KeyMap A.Value -> Maybe Text
 lookupText k o = case KM.lookup k o of
     Just (A.String t) -> Just t
@@ -1055,7 +1046,6 @@ planTransitionOps :: PlanTransition.Ops
 planTransitionOps =
     PlanTransition.Ops
         { makeUserLifecycleOps = mkUserLifecycleOps
-        , queryPlanSafetyCnames = queryPlanSafetyCnames
         , printLine = printProviderLine
         }
 

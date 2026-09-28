@@ -34,7 +34,6 @@ import System.Directory qualified as Dir
 
 data Ops = Ops
     { makeUserLifecycleOps :: Text -> (Text -> NodeConnection) -> UserLifecycle.Ops
-    , queryPlanSafetyCnames :: Text -> IO (Either Text [Text])
     , printLine :: Text -> IO ()
     }
 
@@ -49,6 +48,14 @@ lookupObj key object =
     case KM.lookup key object of
         Just (A.Object value) -> Just value
         _ -> Nothing
+
+queryPlanSafetyCnames :: Text -> IO (Either Text [Text])
+queryPlanSafetyCnames name = do
+    result <- Dns.queryRecursiveRecord 2 name "CNAME"
+    pure $
+        case result of
+            Left err -> Left (Dns.renderLookupFailure err)
+            Right answers -> Right answers
 
 planDeployUser :: KM.KeyMap A.Value -> Text
 planDeployUser plan =
@@ -132,7 +139,7 @@ validatePlanDnsSafety ops previousPlan newPlan = do
 
     lookupResults <-
         forM hostnames $ \hostname -> do
-            result <- ops.queryPlanSafetyCnames hostname
+            result <- queryPlanSafetyCnames hostname
             pure (hostname, result)
 
     let lookupFailures =
