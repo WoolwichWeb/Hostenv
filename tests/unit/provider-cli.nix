@@ -1408,6 +1408,10 @@ in
     fi
 
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "/var/lib/hostenv/provider/migration-handoffs"; then
+      if [ "''${HANDOFF_PROBE_FAIL:-0}" = 1 ]; then
+        echo "unexpected migration handoff probe" >&2
+        exit 97
+      fi
       if [ "''${HANDOFF_PENDING:-0}" = 1 ]; then
         printf '2000\tquiesced old-node\n'
       fi
@@ -1500,17 +1504,10 @@ in
         echo "missing previous plan ignored DNS pointing at the removed node"
         exit 1
       fi
-      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+      # Missing plan history still uses DNS as a warning, but does not SSH
+      # into every proposed node looking for migration handoffs.
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PENDING=1 HANDOFF_PROBE_FAIL=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
-
-      # DNS may already have moved before source-system finalization. In that
-      # window the provider-owned handoff is the durable tripwire preventing
-      # the source node from disappearing from inventory.
-      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PENDING=1 \
-        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
-        echo "pending migration handoff did not block source-node removal"
-        exit 1
-      fi
 
       # A malformed generated plan has the same semantics: skip historical
       # comparison, but still fail closed while DNS identifies the old node.
@@ -1520,7 +1517,7 @@ in
         echo "malformed previous plan ignored DNS pointing at the removed node"
         exit 1
       fi
-      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
+      PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" HANDOFF_PROBE_FAIL=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run
 
       # DNS is checked before the candidate plan is published. If live Hostenv

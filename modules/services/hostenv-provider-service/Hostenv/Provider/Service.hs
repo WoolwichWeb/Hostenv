@@ -250,7 +250,9 @@ projectDeployScopeWithDnsWith pointsTo org project raw = do
                                 <> envName
                                 <> ": "
                                 <> T.intercalate ", " [ nodeName | PrevNode.NodeName nodeName <- nodes ]
-                                <> ". Set previousNode explicitly."
+                                <> ". Run `nix run .#hostenv-provider -- deploy --migration-source "
+                                <> envName
+                                <> "=NODE` from the provider repository, replacing NODE with the actual source node."
                             )
                         )
         PrevNode.DeclaredCurrentNode _source _sourceNode -> pure (Right Nothing)

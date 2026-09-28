@@ -65,15 +65,15 @@ also causes Hostenv to contact it using the previous connection details and
 verify that no reserved Hostenv account or runtime state remains.
 
 The previous plan is not persistent state. If it is missing or malformed,
-Hostenv cannot tell whether the provider inventory shrank, so it performs
-best-effort safety checks using the Hostenv hostnames still present in the
-proposed plan and any pending migration handoffs. A CNAME that identifies a
-node outside `provider.nodeSystems` aborts planning. If DNS cannot be queried
-reliably (for example SERVFAIL, resolver failure, or `dig` execution failure),
-planning also stops rather than treating the lookup as evidence that no old
-node exists. Old reservations that exist only in `state.json` are not queried;
-they reserve identities and hostnames but do not prove that an environment was
-ever deployed.
+Hostenv cannot tell whether the provider inventory shrank, so it performs a
+best-effort DNS safety check using the Hostenv hostnames still present in the
+proposed plan. It does not SSH into every proposed node looking for migration
+handoffs when plan history is missing. A CNAME that identifies a node outside
+`provider.nodeSystems` aborts planning. If DNS cannot be queried reliably (for
+example SERVFAIL, resolver failure, or `dig` execution failure), planning also
+stops rather than treating the lookup as evidence that no old node exists. Old
+reservations that exist only in `state.json` are not queried; they reserve
+identities and hostnames but do not prove that an environment was ever deployed.
 
 A UID reservation in `state.json` does **not** mean an environment has
 already been deployed; planning a brand-new environment creates its reservation
@@ -234,10 +234,10 @@ When a valid previous plan shows that a provider node is being removed, Hostenv
 checks the old node directly, checks pending migration handoffs on the remaining
 nodes, and checks the current/previous plan hostnames for CNAMEs that still
 identify nodes outside the proposed inventory. If the previous plan is missing
-or malformed, Hostenv cannot know whether inventory shrank, so it runs the
-handoff and DNS checks as a conservative fallback using only hostnames in the
-proposed plan. A DNS lookup failure is fatal when one of these safety checks is
-required; it is not treated as an empty answer.
+or malformed, Hostenv cannot know whether inventory shrank, so it runs only the
+DNS check as a conservative fallback using hostnames in the proposed plan. A DNS
+lookup failure is fatal when that safety check is required; it is not treated as
+an empty answer.
 
 DNS can legitimately move before old-account removal finishes during a
 migration. Pending root-owned migration handoffs therefore also prevent a

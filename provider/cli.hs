@@ -1924,12 +1924,13 @@ validatePlanTransition planPath statePath newPlanRaw = do
                         managedIdentityState
         Nothing -> pure ()
 
-    -- DNS and handoff checks are node-removal safeguards, not prerequisites for
-    -- ordinary replanning. Without usable plan history we cannot tell whether
-    -- inventory shrank, so run the fallback checks. With valid history, run
-    -- them only when a provider node is actually disappearing.
-    when (isNothing previousPlan || not (null removedNodes)) $ do
+    -- Handoff markers are checked only when the previous plan proves that a
+    -- node is being removed. If plan history is missing, DNS remains a
+    -- best-effort warning without requiring SSH access to every proposed node.
+    when (not (null removedNodes)) $
         validatePendingMigrationHandoffs newPlan newNodes
+
+    when (isNothing previousPlan || not (null removedNodes)) $
         validatePlanDnsSafety previousPlan newPlan
 
 prepareManagedUserCleanupOnNode ::

@@ -33,6 +33,7 @@ main = do
   testNodeOrderWithDnsDiscoversMoveWithoutBackupHooks
   testSingleNodePlanSkipsDns
   testNodeOrderWithDnsFallsBackToVhosts
+  testAmbiguousPreviousNodeGuidance
   testNodeOrderWithDnsIncludesStateOnlyPreviousNode
   testRepeatedDnsChecksAreCached
   testProjectHashSelection
@@ -142,6 +143,29 @@ testNodeOrderWithDnsFallsBackToVhosts = do
       assert
         (("www.customer.com", "node-a.hosting.test") `elem` calls)
         "dns discovery should fall back to configured vhosts"
+
+
+testAmbiguousPreviousNodeGuidance :: IO ()
+testAmbiguousPreviousNodeGuidance = do
+  let planJson =
+        BLC.pack
+          "{\"hostenvHostname\":\"hosting.test\",\"nodes\":{\"node-a\":{},\"node-b\":{},\"node-c\":{}},\"environments\":{\"env-a\":{\"hostenv\":{\"organisation\":\"acme\",\"project\":\"site\",\"projectNameHash\":\"hash-main\"},\"node\":\"node-c\",\"migrations\":[]}}}"
+  let pointsTo vhost expectedHost =
+        pure
+          ( vhost == "env-a.hosting.test"
+              && expectedHost `elem` ["node-a.hosting.test", "node-b.hosting.test"]
+          )
+  result <- nodesForProjectWithDnsWith pointsTo "acme" "site" planJson
+  case result of
+    Left err -> do
+      assert
+        ("--migration-source env-a=NODE" `T.isInfixOf` err)
+        "ambiguous DNS discovery should explain how to choose the source node"
+      assert
+        (not ("previousNode" `T.isInfixOf` err))
+        "ambiguous DNS discovery should not mention removed previousNode metadata"
+    Right _ ->
+      assert False "ambiguous DNS discovery should fail with operator guidance"
 
 
 testNodeOrderWithDnsIncludesStateOnlyPreviousNode :: IO ()
