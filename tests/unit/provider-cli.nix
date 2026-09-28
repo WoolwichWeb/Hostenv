@@ -463,7 +463,13 @@ in
           quiesced) printf 'HANDOFF_QUIESCED %s\n' "$handoff_user" >> "$EVENT_LOG" ;;
         esac
       elif printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "sudo rm -f"; then
+        if [ "''${FAIL_DEST_HANDOFF_CLEAR:-0}" = 1 ] \
+          && printf '%s\n' "$target" | ${pkgs.gnugrep}/bin/grep -Fq 'new-node.hosting.test'; then
+          printf 'HANDOFF_CLEAR_FAIL %s\n' "$handoff_user" >> "$EVENT_LOG"
+          exit 47
+        fi
         rm -f "$handoff_file"
+        printf 'HANDOFF_CLEARED %s\n' "$handoff_user" >> "$EVENT_LOG"
       fi
       exit 0
     fi
@@ -471,7 +477,7 @@ in
     if printf '%s\n' "$script" | ${pkgs.gnugrep}/bin/grep -Fq "'getent' 'passwd'"; then
       case "$target" in
         *old-node.hosting.test*)
-          if [ "''${ORPHAN_SOURCE:-0}" != 1 ]; then
+          if [ "''${ORPHAN_SOURCE:-0}" != 1 ] && [ "''${SOURCE_REMOVED:-0}" != 1 ]; then
             printf 'acme-prod:x:2000:100::/home/acme-prod:/bin/sh\n'
             if [ "''${MULTI_MOVE:-0}" = 1 ]; then
               printf 'acme-stage:x:2001:100::/home/acme-stage:/bin/sh\n'
@@ -878,6 +884,31 @@ in
       ' generated/plan.json >/dev/null
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/canonical-plan.json" generated/plan.json
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/state-before.json" generated/state.json
+
+      # If the source system succeeds but clearing the destination handoff
+      # fails, the next deploy can see that the old account and runtime are
+      # already gone and remove the stale marker.
+      rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/* "$DNS_STATE_DIR"/*
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      if PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" FAIL_DEST_HANDOFF_CLEAR=1 DNS_AUTOMATIC=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification; then
+        echo "destination handoff clear failure was reported as success"
+        exit 1
+      fi
+      ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_CLEAR_FAIL acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -qx 'quiesced old-node' "$HANDOFF_DIR/new-node-acme-prod"
+
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" SOURCE_REMOVED=1 \
+        ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_CLEARED acme-prod' "$eventLog"
+      test ! -f "$HANDOFF_DIR/new-node-acme-prod"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'snapshots --latest 1' "$sshLog"
 
       # A matching accepted handoff is also sufficient to resume finalization
       # when the source passwd entry has disappeared but runtime survives. There
