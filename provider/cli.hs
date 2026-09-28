@@ -562,8 +562,8 @@ cfZoneName token zoneId = do
 
 isSubdomainOf :: Text -> Text -> Bool
 isSubdomainOf host zone =
-    let host' = T.toLower (stripDot host)
-        zone' = T.toLower (stripDot zone)
+    let host' = Dns.normalizeName host
+        zone' = Dns.normalizeName zone
      in host' == zone' || T.isSuffixOf ("." <> zone') host'
 
 type DnsKey = (Text, Text)
