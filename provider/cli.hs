@@ -1924,9 +1924,12 @@ validatePlanTransition planPath statePath newPlanRaw = do
                         managedIdentityState
         Nothing -> pure ()
 
-    -- Handoff markers are checked only when the previous plan proves that a
-    -- node is being removed. If plan history is missing, DNS remains a
-    -- best-effort warning without requiring SSH access to every proposed node.
+    -- Check handoff markers only when the previous plan proves that a node is
+    -- being removed. When plan history is missing, do not probe every proposed
+    -- node for handoffs: a new provider may not have working SSH access until
+    -- its first deployment. This intentionally means that deleting plan.json
+    -- also loses the handoff-based removal warning. DNS remains the best-effort
+    -- warning in that case, and provider inventory is still the source of truth.
     when (not (null removedNodes)) $
         validatePendingMigrationHandoffs newPlan newNodes
 
