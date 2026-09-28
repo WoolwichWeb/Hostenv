@@ -1796,7 +1796,7 @@ validatePlanTransition planPath statePath newPlanRaw = do
                         printProviderLine
                             ( "hostenv-provider: warning: existing "
                                 <> planPath
-                                <> " is invalid; skipping previous-plan comparison and relying on DNS safety ("
+                                <> " is invalid; skipping previous-plan comparison and relying on DNS and migration-handoff safety checks ("
                                 <> T.pack err
                                 <> ")"
                             )
@@ -1931,6 +1931,7 @@ validatePlanTransition planPath statePath newPlanRaw = do
     when (isNothing previousPlan || not (null removedNodes)) $ do
         validatePendingMigrationHandoffs newPlan newNodes
         validatePlanDnsSafety previousPlan newPlan
+
 prepareManagedUserCleanupOnNode ::
     Text ->
     (Text -> NodeConnection) ->

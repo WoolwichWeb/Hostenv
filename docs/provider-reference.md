@@ -97,8 +97,11 @@ manager, and atomically promotes the handoff to `quiesced`.
 
 Only after the source is quiesced does Hostenv cut the environment DNS over to
 the destination. If Cloudflare credentials are configured, `deploy` performs
-the update and waits for propagation. Otherwise it stops with the source safely
-quiesced; update DNS manually and rerun `deploy`.
+the update and waits for propagation. Before source removal, every authoritative
+nameserver must point the environment at the destination, either with the
+expected CNAME or with direct A/AAAA records belonging to the destination.
+Otherwise Hostenv stops with the source safely quiesced; update DNS manually and
+rerun `deploy`.
 
 `generated/plan.json` always describes the desired end state and deploy applies
 that configuration directly. Current nixpkgs separates baseline certificate
