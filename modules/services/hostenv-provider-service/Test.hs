@@ -87,6 +87,7 @@ testCommandSequence = do
             [ CommandSpec "nix" ["flake", "update", "acme__site"] "/tmp/provider"
             , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "plan"] "/tmp/provider"
             , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy", "--node", "node-a"] "/tmp/provider"
+            , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy", "--node", "node-b"] "/tmp/provider"
             ]
       assert (cmds == expected) "webhook command sequence should match"
 
@@ -150,7 +151,6 @@ testRemovedEnvironmentDeploysPreviousNode = do
             [ CommandSpec "nix" ["flake", "update", "acme__site"] "/tmp/provider"
             , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "plan"] "/tmp/provider"
             , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy", "--node", "node-a"] "/tmp/provider"
-            , CommandSpec "nix" ["run", ".#hostenv-provider", "--", "deploy", "--node", "node-b"] "/tmp/provider"
             ]
       assert (cmds == expected) "removing the project's last environment should still deploy its previous node for cleanup"
 
