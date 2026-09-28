@@ -39,30 +39,55 @@ main = do
         )
         "retain which vhosts require trusted HTTPS"
     assertTrue
-        ( authoritativeCnameConverged
+        ( authoritativeDnsTargetConverged
             "new-node.hosting.test"
-            [ Right ["new-node.hosting.test"]
-            , Right ["new-node.hosting.test."]
+            []
+            [ Right (["new-node.hosting.test"], [])
+            , Right (["new-node.hosting.test."], [])
             ]
         )
-        "all authoritative nameservers agreeing on the destination should be ready"
+        "all authoritative nameservers agreeing on the destination CNAME should be ready"
 
     assertTrue
         ( not
-            ( authoritativeCnameConverged
+            ( authoritativeDnsTargetConverged
                 "new-node.hosting.test"
-                [ Right ["old-node.hosting.test"]
-                , Right ["new-node.hosting.test"]
+                []
+                [ Right (["old-node.hosting.test"], [])
+                , Right (["new-node.hosting.test"], [])
                 ]
             )
         )
         "mixed authoritative CNAME answers should not be treated as propagated"
 
     assertTrue
+        ( authoritativeDnsTargetConverged
+            "new-node.hosting.test"
+            ["192.0.2.20", "2001:db8::20"]
+            [ Right ([], ["192.0.2.20"])
+            , Right ([], ["2001:db8::20"])
+            ]
+        )
+        "direct address records that all belong to the destination should be ready"
+
+    assertTrue
         ( not
-            ( authoritativeCnameConverged
+            ( authoritativeDnsTargetConverged
                 "new-node.hosting.test"
-                [ Right ["new-node.hosting.test"]
+                ["192.0.2.20"]
+                [ Right ([], ["192.0.2.10"])
+                , Right ([], ["192.0.2.20"])
+                ]
+            )
+        )
+        "mixed authoritative address answers should not be treated as propagated"
+
+    assertTrue
+        ( not
+            ( authoritativeDnsTargetConverged
+                "new-node.hosting.test"
+                []
+                [ Right (["new-node.hosting.test"], [])
                 , Left "nameserver timed out"
                 ]
             )

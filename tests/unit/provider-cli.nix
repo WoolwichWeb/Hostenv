@@ -534,11 +534,14 @@ in
     #!${pkgs.runtimeShell}
     set -euo pipefail
     args=" $* "
-    if [ "''${DNS_SPLIT_AUTH:-0}" = 1 ]; then
+    if [ "''${DNS_SPLIT_AUTH:-0}" = 1 ] || [ "''${DNS_SPLIT_ADDR:-0}" = 1 ]; then
       if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' hosting.test NS '; then
         printf 'ns1.hosting.test.\nns2.hosting.test.\n'
         exit 0
       fi
+    fi
+
+    if [ "''${DNS_SPLIT_AUTH:-0}" = 1 ]; then
       if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME ' \
         && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod.hosting.test'; then
         if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq '@ns1.hosting.test'; then
@@ -546,6 +549,30 @@ in
         else
           printf 'new-node.hosting.test.\n'
         fi
+        exit 0
+      fi
+    fi
+
+    if [ "''${DNS_SPLIT_ADDR:-0}" = 1 ]; then
+      if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' CNAME ' \
+        && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod.hosting.test'; then
+        exit 0
+      fi
+      if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' A ' \
+        && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'new-node.hosting.test'; then
+        printf '192.0.2.20\n'
+        exit 0
+      fi
+      if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' A ' \
+        && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'acme-prod.hosting.test'; then
+        if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq '@ns1.hosting.test'; then
+          printf '192.0.2.10\n'
+        else
+          printf '192.0.2.20\n'
+        fi
+        exit 0
+      fi
+      if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' AAAA '; then
         exit 0
       fi
     fi
@@ -778,6 +805,23 @@ in
       split_status=$?
       set -e
       test "$split_status" -eq 124
+      ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
+
+      # The same rule applies when the vhost uses direct A/AAAA records
+      # instead of a CNAME. A union of split authoritative answers is not enough
+      # to prove that traffic has left the source.
+      rm -f "$HANDOFF_DIR"/* "$SOURCE_STATE_DIR"/* "$DNS_STATE_DIR"/*
+      : > "$nixLog"
+      : > "$sshLog"
+      : > "$eventLog"
+      set +e
+      PATH="$fakeBin:$PATH" NIX_LOG="$nixLog" SSH_LOG="$sshLog" EVENT_LOG="$eventLog" DNS_SPLIT_ADDR=1 \
+        ${pkgs.coreutils}/bin/timeout 3 ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification
+      split_addr_status=$?
+      set -e
+      test "$split_addr_status" -eq 124
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
@@ -1396,6 +1440,13 @@ in
     (
       cd "$work"
 
+      # DNS is a node-removal safeguard, not a prerequisite for an ordinary
+      # replan. A DNS outage must not block planning when the provider inventory
+      # is unchanged and valid previous-plan history is available.
+      cp generated/plan.json "$TMPDIR/unchanged-plan.json"
+      PATH="$fakeBin:$PATH" NEW_PLAN="$TMPDIR/unchanged-plan.json" NEW_STATE="$newState" NEW_FLAKE="$newFlake" DNS_FAIL=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run
+
       # The previous plan is useful evidence when it exists: an environment
       # cannot jump away from a node that disappears in the same plan.
       if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" \
@@ -1419,6 +1470,15 @@ in
       if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 ORPHAN_RUNTIME=1 \
         ${cliPkg}/bin/hostenv-provider plan --dry-run; then
         echo "retiring node with orphan Hostenv runtime was removed"
+        exit 1
+      fi
+
+      # Even with valid previous-plan history and a clean retiring source,
+      # a destination handoff must keep that source in inventory until deploy
+      # has cleared the marker.
+      if PATH="$fakeBin:$PATH" NEW_PLAN="$newPlan" NEW_STATE="$newState" NEW_FLAKE="$newFlake" NODE_EMPTY=1 HANDOFF_PENDING=1 \
+        ${cliPkg}/bin/hostenv-provider plan --dry-run; then
+        echo "valid previous plan ignored pending migration handoff"
         exit 1
       fi
 
