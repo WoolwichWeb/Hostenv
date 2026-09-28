@@ -3,13 +3,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Hostenv.Provider.Dns
-    ( DnsLookupFailure (..)
-    , DnsQueryFailureReason (..)
+    ( DnsLookupFailure
     , LookupCache
     , ObservationCache
     , cacheObservation
     , checkAuthoritativeTarget
-    , lookupAuthoritativeRecords
     , newLookupCache
     , newObservationCache
     , normalizeName
