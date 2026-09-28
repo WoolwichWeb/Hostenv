@@ -18,11 +18,9 @@ module Hostenv.Provider.Service
   , CommandSpec(..)
   , CommandOutput(..)
   , CommandError(..)
-  , DeployResult(..)
   , WebhookResult(..)
   , WebhookError(..)
   , CommandRunner
-  , PlanLoader
   , runWebhookWith
   ) where
 
@@ -305,9 +303,7 @@ data WebhookError
 
 type CommandRunner = CommandSpec -> IO (Either CommandError CommandOutput)
 
-type PlanLoader = IO BL.ByteString
-
-runWebhookWith :: CommandRunner -> PlanLoader -> WebhookConfig -> ProjectRef -> IO (Either WebhookError WebhookResult)
+runWebhookWith :: CommandRunner -> IO BL.ByteString -> WebhookConfig -> ProjectRef -> IO (Either WebhookError WebhookResult)
 runWebhookWith runner loadPlan cfg ref = do
   previousPlanRaw <- loadPlan
   case projectEnvironmentPlacements ref.prOrg ref.prProject previousPlanRaw of
