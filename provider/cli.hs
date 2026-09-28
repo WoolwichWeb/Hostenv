@@ -730,7 +730,7 @@ ensureEnvironmentDns ::
     [DnsItem] ->
     IO (Either Text ())
 ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = do
-    observationCache <- newDns.ObservationCache
+    observationCache <- Dns.newObservationCache
     checks <- checkDnsItems dnsCache observationCache items
     let pending =
             [ (item, lookupFailure)
@@ -780,7 +780,7 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                                                     "could not verify DNS for "
                                                         <> item.diDiscoveryHost
                                                         <> ": "
-                                                        <> renderDns.DnsLookupFailure dnsFailure
+                                                        <> Dns.renderLookupFailure dnsFailure
                                                         <> " (automatic DNS update unavailable: "
                                                         <> reason
                                                         <> ")"
@@ -794,7 +794,7 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                                                     ( "hostenv-provider: warning: could not verify current DNS for "
                                                         <> item.diDiscoveryHost
                                                         <> " ("
-                                                        <> renderDns.DnsLookupFailure dnsFailure
+                                                        <> Dns.renderLookupFailure dnsFailure
                                                         <> "); attempting the configured Cloudflare update"
                                                     )
                                             printProviderLine
@@ -837,7 +837,7 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                                     pure
                                         ( Left
                                             ( "DNS propagation could not be verified: "
-                                                <> renderDns.DnsLookupFailure err
+                                                <> Dns.renderLookupFailure err
                                             )
                                         )
                                 Right (_, timedOutItems) ->
@@ -2688,7 +2688,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                         ( "could not determine whether "
                                                             <> envInfo.hostname
                                                             <> " still points to a removed provider node: "
-                                                            <> renderDns.DnsLookupFailure dnsFailure
+                                                            <> Dns.renderLookupFailure dnsFailure
                                                             <> ". Refusing to treat the environment as fresh until DNS can be verified."
                                                         )
                                                 Right (Just removedNode) ->
@@ -2786,8 +2786,8 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                 )
                         Sh.exitWith (ExitFailure 1)
 
-            deployDnsCache <- newDns.LookupCache
-            preflightDnsObservation <- newDns.ObservationCache
+            deployDnsCache <- Dns.newLookupCache
+            preflightDnsObservation <- Dns.newObservationCache
             dnsStateRows <-
                 forM envInfosFiltered $ \envInfo -> do
                     let items = environmentDnsItems hostenvHostname envs envInfo
@@ -2810,7 +2810,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                             ( "hostenv-provider: warning: DNS preflight could not verify "
                                 <> item.diDiscoveryHost
                                 <> ": "
-                                <> renderDns.DnsLookupFailure dnsFailure
+                                <> Dns.renderLookupFailure dnsFailure
                                 <> "; deployment will attempt DNS reconciliation"
                             )
                     let destinationPresent =
@@ -3312,7 +3312,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                                                 ( Just
                                                                                                     ( userName
                                                                                                         <> ": authoritative DNS propagation could not be verified: "
-                                                                                                        <> renderDns.DnsLookupFailure dnsFailure
+                                                                                                        <> Dns.renderLookupFailure dnsFailure
                                                                                                     )
                                                                                                 )
                                                                                         Right (_, pendingDns) ->
