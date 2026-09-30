@@ -75,7 +75,7 @@ in
               assertion = lib.elem migrateBackupName (
                 config.services.restic.backups.${migrateBackupName}.tags or [ ]
               );
-              message = "services.restic.backups.php-app-migrate.tags must include \"php-app-migrate\" so migrations can locate snapshots";
+              message = "services.restic.backups.php-app-migrate.tags must include \"php-app-migrate\" so Hostenv can find migration snapshots";
             }
           );
 
@@ -316,12 +316,12 @@ in
 
           if [ "$db_initialized" -eq 0 ] && [ ! -f "$restore_marker" ]; then
             if [ ! -f "$restore_plan" ]; then
-              echo "hostenv: restore plan not found; skipping PHP app restore"
+              echo "No migration restore plan found; skipping the PHP application restore."
             else
-              echo "hostenv: attempting PHP app restore"
+              echo "Restoring the PHP application database."
               restore_snapshot="$(${pkgs.jq}/bin/jq -r '.snapshots["'"$restore_key"'"] // empty' "$restore_plan")"
               if [ -z "$restore_snapshot" ]; then
-                echo "hostenv: restore plan missing snapshot id for $restore_key" >&2
+                echo "Migration restore plan has no snapshot for $restore_key." >&2
                 exit 1
               fi
 
@@ -335,7 +335,7 @@ in
               ${config.systemd.package}/bin/systemctl --user stop mysql.service || true
 
               if ! "$restic_migrate" restore "$restore_snapshot" --target "$restore_tmp"; then
-                echo "hostenv: restic restore failed" >&2
+                echo "Restic restore failed" >&2
                 rm -rf "$restore_tmp"
                 exit 1
               fi
@@ -344,7 +344,7 @@ in
               if ! ${config.services.mysql.backups.scripts.restore}/bin/mysql-backup-restore \
                 "$restore_state_dir" \
                 "${config.services.mysql.dataDir}"; then
-                echo "hostenv: mysql restore failed" >&2
+                echo "MariaDB restore failed" >&2
                 rm -rf "$restore_tmp"
                 exit 1
               fi
@@ -355,7 +355,7 @@ in
                 sleep 1
               done
               if [ ! -S "$mysql_runtime_dir/mysql.sock" ]; then
-                echo "hostenv: mysql did not start after restore" >&2
+                echo "MariaDB did not start after the restore" >&2
                 rm -rf "$restore_tmp"
                 exit 1
               fi

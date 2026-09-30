@@ -187,7 +187,8 @@
               # https://github.com/nix-community/home-manager/blob/9a9fef316ad191b3086edda465e850af282de4e0/modules/systemd.nix#L340C1-L368C26
     
               if [ ! -n "$XDG_CONFIG_HOME" ]; then
-                echo '$XDG_CONFIG_HOME is not set, cannot continue'
+                echo '⚠️ XDG_CONFIG_HOME is not set.' >&2
+                echo 'ℹ️ Set it before activating the environment.' >&2
                 exit 1
               fi
     
@@ -198,9 +199,9 @@
     
               if [ "$systemdStatus" == 'running' ] || [ "$systemdStatus" == 'degraded' ]; then
                 if [ "$systemdStatus" == 'degraded' ]; then
-                  echo "⚠️ The user systemd session is degraded:"
-                  ${systemctl} --user --no-pager --state=failed
-                  echo "⚠️ Attempting to reload services anyway... ⚠️"
+                  echo "⚠️ The user systemd session is degraded. Failed units:" >&2
+                  ${systemctl} --user --no-pager --state=failed >&2
+                  echo "ℹ️ Hostenv will try to reload the services anyway." >&2
                 fi
     
                 mkdir -p "${config.hostenv.stateDir}/hostenv/current-state" || exit 1
@@ -217,8 +218,8 @@
                     rm "$XDG_CONFIG_HOME"/systemd
                   else
                     # Otherwise the file exists, but is not a symlink.
-                    echo "Couldn't unlink old systemd user directory at '$XDG_CONFIG_HOME/systemd'. Please check and delete it manually, then try again."
-                    echo "hostenv takes over the user systemd directory, so run 'ls -lah $XDG_CONFIG_HOME/systemd' to see what's in the directory, then 'mv $XDG_CONFIG_HOME/systemd' once you have checked there isn't anything important in that directory."
+                    echo "⚠️ '$XDG_CONFIG_HOME/systemd' already exists and is not a symbolic link." >&2
+                    echo "ℹ️ Move or remove it after checking that it contains nothing you need, then try again." >&2
                     exit 1
                   fi
                 fi
@@ -239,7 +240,8 @@
                   if [ -L "$XDG_STATE_HOME"/hostenv/current-state/systemd ]; then
                     rm "$XDG_STATE_HOME"/hostenv/current-state/systemd
                   else
-                    echo "Couldn't unlink old systemd user directory at '$XDG_STATE_HOME/hostenv/current-state/systemd'. Please check and delete it manually, then try again."
+                    echo "⚠️ '$XDG_STATE_HOME/hostenv/current-state/systemd' already exists and is not a symbolic link." >&2
+                    echo "ℹ️ Move or remove it, then try again." >&2
                     exit 1
                   fi
                 fi
@@ -249,7 +251,8 @@
                 unset oldUnitsDir newUnits
     
               else
-                echo "⚠️ User systemd daemon not running. The hosting environment cannot be started. ⚠️"
+                echo "⚠️ The user systemd service manager is not running, so the environment cannot start." >&2
+                echo "ℹ️ Ensure that it is running, then try again." >&2
               fi
     
               unset systemdStatus

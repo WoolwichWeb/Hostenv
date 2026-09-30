@@ -78,7 +78,7 @@ readSecret path = do
   raw <- BS.readFile path
   let trimmed = BSC.dropWhile isSpace (BSC.dropWhileEnd isSpace raw)
   if BS.null trimmed
-    then dieWith "webhook secret file is empty"
+    then dieWith "Webhook secret file is empty."
     else pure trimmed
 
 pickFirstExisting :: [FilePath] -> IO (Maybe BS.ByteString)
@@ -92,5 +92,5 @@ pickFirstExisting (p:ps) = do
 
 dieWith :: String -> IO a
 dieWith msg = do
-  hPutStrLn stderr msg
+  hPutStrLn stderr ("hostenv-provider-service: " <> msg)
   exitFailure

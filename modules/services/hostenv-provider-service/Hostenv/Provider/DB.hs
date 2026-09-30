@@ -75,7 +75,7 @@ withDb :: AppConfig -> (Connection -> IO a) -> IO a
 withDb cfg action =
   let AppConfig { appDbConnString = dbConn } = cfg
    in case dbConn of
-    Nothing -> error "Database not configured"
+    Nothing -> error "Provider database is not configured."
     Just connStr -> do
       conn <- connectPostgreSQL connStr
       result <- action conn
@@ -162,4 +162,4 @@ createSession conn userIdVal = do
   rows <- query conn "SELECT id, gitlab_user_id, username, name, role FROM users WHERE id = ?" (Only userIdVal)
   case rows of
     (user:_) -> pure (SessionInfo sid csrf user)
-    _ -> error "session user not found"
+    _ -> error "The signed-in user could not be found."

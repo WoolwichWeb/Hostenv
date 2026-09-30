@@ -88,7 +88,7 @@ main = do
 
     assertEqual
         "explicit current node cannot suppress an observed source"
-        (Left "migration source override for moved names its destination node new-node, but the same Hostenv user with UID 2001 is still present on source node(s): old-node. Use --skip-migrations moved only when intentionally deploying without migration.")
+        (Left "Migration source override for moved selects its destination node new-node, but the Hostenv account with UID 2001 is still present on source nodes: old-node.\n\nUse --skip-migrations moved only if you intend to deploy without migrating its data.")
         (resolveMigrationSourceNode "new-node" "moved" 2001 (Just "new-node") observed)
 
     assertEqual
@@ -98,13 +98,13 @@ main = do
 
     assertEqual
         "explicit source validates UID"
-        (Left "migration source old-node does not contain Hostenv user moved with UID 9999")
+        (Left "Migration source old-node does not contain the Hostenv account moved with UID 9999")
         (resolveMigrationSourceNode "new-node" "moved" 9999 (Just "old-node") observed)
 
     let ambiguous = M.insert "other-node" (M.fromList [("moved", 2001)]) observed
     assertEqual
         "ambiguous observed migration source"
-        (Left "Hostenv user moved with UID 2001 exists on more than one possible migration source: old-node, other-node. Set --migration-source moved=<node>.")
+        (Left "Hostenv account moved with UID 2001 exists on more than one possible source node: old-node, other-node.\n\nSet --migration-source moved=<node>.")
         (resolveMigrationSourceNode "new-node" "moved" 2001 Nothing ambiguous)
 
     assertEqual

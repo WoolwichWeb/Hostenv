@@ -114,7 +114,7 @@
           postStart = ''
             redis_sock=${lib.escapeShellArg cfg.socket}
             if [ ! -S "$redis_sock" ]; then
-              echo "hostenv: Valkey reported ready without creating $redis_sock" >&2
+              echo "Valkey started without creating its socket at $redis_sock" >&2
               exit 1
             fi
           '';

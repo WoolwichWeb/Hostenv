@@ -24,7 +24,7 @@ data PreflightFailure = PreflightFailure
     }
 
 signingKeyNotTrustedReason :: Text
-signingKeyNotTrustedReason = "signing key is not trusted by remote Nix daemon"
+signingKeyNotTrustedReason = "the signing key is not trusted by the remote Nix daemon"
 
 runPreflight :: DeployPreflightConfig -> IO (Maybe PreflightFailure)
 runPreflight cfg = do
@@ -36,16 +36,16 @@ runPreflight cfg = do
                     { failureNode = cfg.nodeName
                     , failureReason = reason
                     , failureRemediation =
-                        [ "Verify SSH connectivity and run `cat /etc/os-release` manually."
+                        [ "Check SSH access to the node, then run `cat /etc/os-release` there."
                         ]
                     }
         Right False ->
             pure . Just $
                 PreflightFailure
                     { failureNode = cfg.nodeName
-                    , failureReason = "target machine is not NixOS"
+                    , failureReason = "the target machine is not running NixOS"
                     , failureRemediation =
-                        [ "Provision this node with NixOS before deploying with hostenv."
+                        [ "Install NixOS on this node before deploying with Hostenv."
                         ]
                     }
         Right True ->
@@ -56,9 +56,9 @@ runPreflight cfg = do
                         pure . Just $
                             PreflightFailure
                                 { failureNode = cfg.nodeName
-                                , failureReason = "internal error: signing public key missing during trust check"
+                                , failureReason = "the signing public key is unavailable for the trust check"
                                 , failureRemediation =
-                                    [ "Re-run with `--signing-key-file` or set `HOSTENV_SIGNING_KEY_FILE`."
+                                    [ "Run the command again with `--signing-key-file`, or set `HOSTENV_SIGNING_KEY_FILE`."
                                     ]
                                 }
                     Just key -> do
@@ -70,7 +70,7 @@ runPreflight cfg = do
                                         { failureNode = cfg.nodeName
                                         , failureReason = reason
                                         , failureRemediation =
-                                            [ "Ensure user `" <> cfg.deployUser <> "` can run `nix config show trusted-public-keys` (with or without sudo)."
+                                            [ "Ensure that user `" <> cfg.deployUser <> "` can run `nix config show trusted-public-keys`, with or without sudo."
                                             ]
                                         }
                             Right trustedKeys ->
@@ -82,7 +82,7 @@ runPreflight cfg = do
                                                 { failureNode = cfg.nodeName
                                                 , failureReason = signingKeyNotTrustedReason
                                                 , failureRemediation =
-                                                    [ "remote Nix reports the signing key is missing from trusted-public-keys."
+                                                    [ "The remote Nix daemon does not list the signing key in trusted-public-keys."
                                                     ]
                                                 }
 
@@ -96,7 +96,7 @@ checkNixOs cfg = do
                 idValue = lookupOsReleaseKey "ID" lines'
              in pure (Right (idValue == Just "nixos"))
         ExitFailure _ ->
-            pure (Left (commandFailure "unable to read /etc/os-release" cmd code out err))
+            pure (Left (commandFailure "Could not read /etc/os-release" cmd code out err))
 
 lookupOsReleaseKey :: Text -> [Text] -> Maybe Text
 lookupOsReleaseKey key lines' =
@@ -136,8 +136,8 @@ readTrustedPublicKeys cfg = do
                         ( Left $
                             T.intercalate
                                 "\n"
-                                [ commandFailure "reading trusted-public-keys via sudo failed" sudoCmd sudoCode sudoOut sudoErr
-                                , commandFailure "reading trusted-public-keys without sudo failed" userCmd userCode userOut userErr
+                                [ commandFailure "Could not read trusted-public-keys with sudo" sudoCmd sudoCode sudoOut sudoErr
+                                , commandFailure "Could not read trusted-public-keys without sudo" userCmd userCode userOut userErr
                                 ]
                         )
 

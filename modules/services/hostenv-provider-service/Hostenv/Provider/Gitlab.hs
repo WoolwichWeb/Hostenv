@@ -47,7 +47,7 @@ requireSecrets cfg =
   let AppConfig { appGitlabSecrets = secrets } = cfg
    in case secrets of
     Just s -> Right s
-    Nothing -> Left "GitLab OAuth is not configured"
+    Nothing -> Left "GitLab sign-in is not configured for this provider."
 
 requireManager :: AppConfig -> IO Manager
 requireManager cfg =
@@ -121,7 +121,7 @@ exchangeOAuthCode cfg host code = do
         then case A.eitherDecode' (responseBody resp) of
           Left err -> pure (Left (T.pack err))
           Right token -> pure (Right token)
-        else pure (Left "GitLab OAuth token exchange failed")
+        else pure (Left "GitLab sign-in failed while requesting an access token. Try again.")
 
 fetchGitlabUser :: AppConfig -> Text -> Text -> IO (Either Text GitlabUser)
 fetchGitlabUser cfg host token = do
@@ -133,14 +133,14 @@ fetchGitlabUser cfg host token = do
     then case A.eitherDecode' (responseBody resp) of
       Left err -> pure (Left (T.pack err))
       Right user -> pure (Right user)
-    else pure (Left "GitLab user lookup failed")
+    else pure (Left "Could not load your GitLab account. Sign out, then sign in again.")
 
 loadUserProjects :: AppConfig -> SessionInfo -> IO (Either Text [GitlabProject])
 loadUserProjects cfg sess = withDb cfg $ \conn -> do
   let SessionInfo { sessionUser = User { userId = userIdVal } } = sess
   tokenRows <- query conn "SELECT git_host, token FROM gitlab_tokens WHERE user_id = ? AND project_id IS NULL ORDER BY created_at DESC LIMIT 1" (Only userIdVal)
   case tokenRows of
-    [] -> pure (Left "No GitLab token available for this user")
+    [] -> pure (Left "No GitLab access token is available. Sign out, then sign in again.")
     ((host, token):_) -> fetchGitlabProjects cfg host token
 
 fetchGitlabProjects :: AppConfig -> Text -> Text -> IO (Either Text [GitlabProject])
@@ -153,7 +153,7 @@ fetchGitlabProjects cfg host token = do
     then case A.eitherDecode' (responseBody resp) of
       Left err -> pure (Left (T.pack err))
       Right projects -> pure (Right projects)
-    else pure (Left "GitLab project listing failed")
+    else pure (Left "Could not load your GitLab projects. Try again.")
 
 fetchGitlabProject :: AppConfig -> Text -> Text -> Int64 -> IO (Either Text GitlabProject)
 fetchGitlabProject cfg host token repoId = do
@@ -165,7 +165,7 @@ fetchGitlabProject cfg host token repoId = do
     then case A.eitherDecode' (responseBody resp) of
       Left err -> pure (Left (T.pack err))
       Right project -> pure (Right project)
-    else pure (Left "GitLab project lookup failed")
+    else pure (Left "Could not load the selected GitLab project. Try again.")
 
 createGitlabWebhook :: AppConfig -> Text -> Text -> Int64 -> Text -> Text -> IO (Either Text GitlabHook)
 createGitlabWebhook cfg host token repoId url secret = do
@@ -188,7 +188,7 @@ createGitlabWebhook cfg host token repoId url secret = do
     then case A.eitherDecode' (responseBody resp) of
       Left err -> pure (Left (T.pack err))
       Right hook -> pure (Right hook)
-    else pure (Left "GitLab webhook creation failed")
+    else pure (Left "GitLab could not create the project webhook. Check that the access token can manage webhooks.")
 
 updateGitlabWebhook :: AppConfig -> Text -> Text -> Int64 -> Int64 -> Text -> Text -> IO (Either Text GitlabHook)
 updateGitlabWebhook cfg host token repoId hookId url secret = do
@@ -211,7 +211,7 @@ updateGitlabWebhook cfg host token repoId hookId url secret = do
     then case A.eitherDecode' (responseBody resp) of
       Left err -> pure (Left (T.pack err))
       Right hook -> pure (Right hook)
-    else pure (Left "GitLab webhook update failed")
+    else pure (Left "GitLab could not update the project webhook. Check that the access token can manage webhooks.")
 
 
 -- GitLab JSON types

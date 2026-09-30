@@ -38,7 +38,11 @@ let
 
       system =
         if builtins.hasAttr node nodeSystems then nodeSystems.${node}
-        else builtins.throw "No system specified for node '${node}' (set provider.nodeSystems.${node})";
+        else builtins.throw ''
+          No system is configured for node '${node}'.
+
+          Set provider.nodeSystems.${node}.
+        '';
 
       nodeConfig = plan.nodes.${node};
       envsAll = plan.environments or { };
@@ -225,7 +229,11 @@ let
             ];
         }
     else
-      throw "hostenv provider: environment keys must match hostenv.userName (mismatched: ${toString envUserMismatch})";
+      throw ''
+        Environment keys must match hostenv.userName.
+
+        Mismatched environments: ${toString envUserMismatch}.
+      '';
 
   providerDeployOutputs =
     { inputs
@@ -471,7 +479,7 @@ in
     nodeStatus = mkOption {
       type = types.attrsOf (types.enum [ "active" "retiring" ]);
       default = { };
-      description = "Optional map of node name -> lifecycle status. Nodes default to active; retiring nodes remain managed for migration/cleanup but cannot receive environments.";
+      description = "Optional node lifecycle status. Nodes default to active; retiring nodes remain managed for migration and clean-up but cannot receive environments.";
     };
 
     nodeAddresses = mkOption {
@@ -550,7 +558,7 @@ in
         };
       };
       default = { };
-      description = "Customization for generated/flake.nix inputs and per-environment inputs.";
+      description = "Customisation of generated/flake.nix inputs and per-environment inputs.";
     };
 
     cloudflare = mkOption {

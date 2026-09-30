@@ -777,8 +777,8 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP_QUERY_FAIL acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'failed to inspect user@2000.service' "$sshLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'failed to verify user@2000.service after cleanup' "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'could not inspect user@2000.service' "$sshLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'could not verify user@2000.service after clean-up' "$sshLog"
 
       # If promotion to quiesced fails after source cleanup, the atomic marker
       # writer must leave the earlier accepted state intact for recovery.
@@ -1313,7 +1313,7 @@ in
         exit 1
       fi
       test ! -s "$log"
-      ${pkgs.gnugrep}/bin/grep -Fq 'Refusing to treat the environment as fresh until DNS can be verified' "$TMPDIR/hint-fail.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'Cannot treat the environment as new until DNS can be verified' "$TMPDIR/hint-fail.out"
       ${pkgs.gnugrep}/bin/grep -Fq 'DNS server returned SERVFAIL' "$TMPDIR/hint-fail.out"
     )
 

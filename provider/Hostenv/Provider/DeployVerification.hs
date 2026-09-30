@@ -88,7 +88,7 @@ instance A.FromJSON TargetHostSource where
     parseJSON = A.withText "TargetHostSource" $ \value ->
         case value of
             "nodeConnectionHost" -> pure TargetNodeConnectionHost
-            _ -> fail ("unknown targetHostSource: " <> T.unpack value)
+            _ -> fail ("Unknown targetHostSource value: " <> T.unpack value)
 
 data TlsMode
     = TlsStrict
@@ -100,7 +100,7 @@ instance A.FromJSON TlsMode where
         case value of
             "strict" -> pure TlsStrict
             "insecure" -> pure TlsInsecure
-            _ -> fail ("unknown tlsMode: " <> T.unpack value)
+            _ -> fail ("Unknown tlsMode value: " <> T.unpack value)
 
 data VerificationRequest = VerificationRequest
     { vrVirtualHost :: Text
@@ -153,32 +153,32 @@ instance A.FromJSON VerificationConstraint where
             "allowNonZeroExitStatus" ->
                 case value of
                     A.Bool b -> pure (AllowNonZeroExitStatus b)
-                    _ -> fail "allowNonZeroExitStatus requires a boolean value"
+                    _ -> fail "allowNonZeroExitStatus must be a Boolean value"
             "skipStdoutRegexOnRedirect" ->
                 case value of
                     A.Bool b -> pure (SkipStdoutRegexOnRedirect b)
-                    _ -> fail "skipStdoutRegexOnRedirect requires a boolean value"
+                    _ -> fail "skipStdoutRegexOnRedirect must be a Boolean value"
             "stdoutRegexMustMatch" ->
                 case value of
                     A.String t -> pure (StdoutRegexMustMatch t)
-                    _ -> fail "stdoutRegexMustMatch requires a string regex value"
+                    _ -> fail "stdoutRegexMustMatch must be a regular-expression string"
             "stderrRegexMustNotMatch" ->
                 case value of
                     A.String t -> pure (StderrRegexMustNotMatch t)
-                    _ -> fail "stderrRegexMustNotMatch requires a string regex value"
+                    _ -> fail "stderrRegexMustNotMatch must be a regular-expression string"
             "minHttpStatus" ->
                 case value of
                     A.Number n -> case (floatingOrInteger n :: Either Double Int) of
                         Right i -> pure (MinHttpStatus i)
-                        Left _ -> fail "minHttpStatus requires an integer value"
-                    _ -> fail "minHttpStatus requires an integer value"
+                        Left _ -> fail "minHttpStatus must be an integer"
+                    _ -> fail "minHttpStatus must be an integer"
             "maxHttpStatus" ->
                 case value of
                     A.Number n -> case (floatingOrInteger n :: Either Double Int) of
                         Right i -> pure (MaxHttpStatus i)
-                        Left _ -> fail "maxHttpStatus requires an integer value"
-                    _ -> fail "maxHttpStatus requires an integer value"
-            _ -> fail ("unknown verification constraint rule: " <> T.unpack rule)
+                        Left _ -> fail "maxHttpStatus must be an integer"
+                    _ -> fail "maxHttpStatus must be an integer"
+            _ -> fail ("Unknown verification constraint: " <> T.unpack rule)
 
 data VerificationCheck = VerificationCheck
     { vcName :: Text
@@ -271,7 +271,7 @@ runOneCheck runCurl targetHost check =
                     { vcrName = check.vcName
                     , vcrPassed = False
                     , vcrHttpStatus = Nothing
-                    , vcrFailures = ["unsupported verification check type: " <> check.vcType]
+                    , vcrFailures = ["Unsupported verification check type: " <> check.vcType]
                     }
         else do
             let request = check.vcRequest
@@ -377,21 +377,22 @@ evaluateConstraints exitCode mHttpStatus stdoutText stderrText constraints = do
                                 case matched of
                                     Left err -> [err]
                                     Right True -> []
-                                    Right False -> ["stdout did not match regex: " <> pattern]
+                                    Right False -> ["Standard output did not match the regular expression: " <> pattern]
                 StderrRegexMustNotMatch pattern -> do
                     matched <- regexMatches pattern stderrText
                     pure $
                         case matched of
                             Left err -> [err]
-                            Right True -> ["stderr matched forbidden regex: " <> pattern]
+                            Right True -> ["Standard error matched a forbidden regular expression: " <> pattern]
                             Right False -> []
                 _ -> pure []
 
     let allowNonZero = resolveAllowNonZero constraints
     let exitFailures =
-            if exitCode /= ExitSuccess && not allowNonZero
-                then ["curl exited non-zero: " <> T.pack (show exitCode)]
-                else []
+            case exitCode of
+                ExitFailure code
+                    | not allowNonZero -> ["curl exited with status " <> T.pack (show code)]
+                _ -> []
 
     let statusFailures = concatMap (checkHttpStatus mHttpStatus) constraints
     pure (exitFailures <> statusFailures <> regexFailures)
@@ -419,14 +420,14 @@ checkHttpStatus mHttpStatus constraint =
     case constraint of
         MinHttpStatus minStatus ->
             case mHttpStatus of
-                Nothing -> ["missing HTTP status while evaluating minHttpStatus"]
+                Nothing -> ["No HTTP status was returned for minHttpStatus"]
                 Just status ->
                     if status >= minStatus
                         then []
                         else ["HTTP status " <> T.pack (show status) <> " is below minimum " <> T.pack (show minStatus)]
         MaxHttpStatus maxStatus ->
             case mHttpStatus of
-                Nothing -> ["missing HTTP status while evaluating maxHttpStatus"]
+                Nothing -> ["No HTTP status was returned for maxHttpStatus"]
                 Just status ->
                     if status <= maxStatus
                         then []
@@ -441,7 +442,7 @@ regexMatches pattern subject = do
         ExitFailure 1 -> Right False
         ExitFailure _ ->
             Left
-                ( "regex evaluation failed for pattern '"
+                ( "Could not evaluate regular expression '"
                     <> pattern
                     <> "': "
                     <> T.strip (T.pack err)

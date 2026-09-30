@@ -84,16 +84,16 @@ handleAddProjectPost cfg req respond = do
           body <- strictRequestBody req
           let params = parseForm body
           case lookupParam csrfFieldName params of
-            Nothing -> respondHtml respond status400 (errorPage cfg "Missing CSRF token")
+            Nothing -> respondHtml respond status400 (errorPage cfg "This form is no longer valid. Go back and try again.")
             Just csrfToken ->
               if csrfToken /= csrf
-                then respondHtml respond status403 (errorPage cfg "Invalid CSRF token")
+                then respondHtml respond status403 (errorPage cfg "This form is no longer valid. Go back and try again.")
                 else do
                   let mRepoId = lookupParam "repo_id" params >>= readInt64
                   let orgInput = lookupParam "org" params
                   let projectInput = lookupParam "project" params
                   case mRepoId of
-                    Nothing -> respondHtml respond status400 (errorPage cfg "Missing repository selection")
+                    Nothing -> respondHtml respond status400 (errorPage cfg "Select a repository.")
                     Just repoId -> do
                       result <- addProjectFlow cfg sess repoId orgInput projectInput
                       case result of
@@ -107,7 +107,7 @@ handleOauthStart cfg req respond = do
     Right GitlabSecrets { gitlabClientId = clientId } -> do
       let host = selectGitlabHost cfg req
       case host of
-        Nothing -> respondHtml respond status400 (errorPage cfg "No GitLab host configured")
+        Nothing -> respondHtml respond status400 (errorPage cfg "No GitLab host is configured for this provider.")
         Just glHost -> do
           state <- createOauthState cfg glHost
           let redirectUri = oauthRedirectUri cfg
@@ -137,7 +137,7 @@ handleOauthCallback cfg req respond = do
       let state = TE.decodeUtf8 stateRaw
       mHost <- consumeOauthState cfg state
       case mHost of
-        Nothing -> respondHtml respond status400 (errorPage cfg "Invalid OAuth state")
+        Nothing -> respondHtml respond status400 (errorPage cfg "This GitLab sign-in request has expired or is invalid. Start again.")
         Just glHost -> do
           tokenResp <- exchangeOAuthCode cfg glHost code
           case tokenResp of
@@ -151,4 +151,4 @@ handleOauthCallback cfg req respond = do
                   session <- upsertUserSession cfg glHost glUser token
                   let cookieHeader = ("Set-Cookie", renderSessionCookie session)
                   respondHtmlWithHeaders respond status302 [(hLocation, TE.encodeUtf8 (uiPath cfg "/")), cookieHeader] mempty
-    _ -> respondHtml respond status400 (errorPage cfg "Missing OAuth callback parameters")
+    _ -> respondHtml respond status400 (errorPage cfg "GitLab did not return the information needed to sign in. Start again.")

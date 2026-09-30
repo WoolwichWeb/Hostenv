@@ -51,11 +51,15 @@ let
       hostenvInput = hostenvInputs.requireInput {
         inherit inputs;
         name = "hostenv";
-        context = "provider plan";
+        context = "the provider configuration";
       };
       hostenvMakeHostenv =
         hostenvInput.makeHostenv.${system}
-          or (throw "provider plan: hostenv input missing makeHostenv.${system} output.");
+          or (throw ''
+            The Hostenv input does not provide makeHostenv.${system}.
+
+            Update the Hostenv input.
+          '');
 
       defaultEnvInputFollows = {
         hostenv = "hostenv";
@@ -79,7 +83,7 @@ let
               module
             else if builtins.isPath module then
               if basePath == null then
-                throw "provider plan: nodeModules path values require inputs.self; use string paths relative to the provider root."
+                throw "provider.nodeModules path values require inputs.self; use string paths relative to the provider repository."
               else
                 let
                   modulePath = toString module;
@@ -87,9 +91,9 @@ let
                 if lib.hasPrefix (basePath + "/") modulePath then
                   lib.removePrefix (basePath + "/") modulePath
                 else
-                  throw "provider plan: nodeModules path '${modulePath}' must be under provider root (${basePath})"
+                  throw "provider.nodeModules path '${modulePath}' must be inside the provider repository (${basePath})."
             else
-              throw "provider plan: nodeModules entries must be strings or paths.";
+              throw "provider.nodeModules entries must be strings or paths.";
         in
         map normalize nodeModules;
 
@@ -108,11 +112,10 @@ let
       assertProjectInputs =
         if projectInputs == [ ] then
           throw ''
-            provider plan: no client projects found.
+            No client projects were found.
 
-            Each client flake must expose a `lib.hostenv.<system>.environments` output.
-            Ensure inputs are named organisation__project, export `outputs.lib.hostenv`,
-            and include `hostenv.nix` at the flake root (typically by using dir=.hostenv).
+            Add at least one flake input named organisation__project that points to a
+            Hostenv project flake (normally with dir=.hostenv).
           ''
         else
           true;
@@ -132,8 +135,9 @@ let
           lib.importJSON lockPath
         else
           throw ''
-            flake.lock is missing at ${toString lockPath}.
-            Please run: nix flake lock (or nix flake update) at repo root
+            The file flake.lock is missing at ${toString lockPath}.
+
+            Run 'nix flake lock' (or 'nix flake update') from the provider repository root.
           '';
 
       deployHasSettings =
@@ -156,21 +160,21 @@ let
       assertUnsupportedProviderServiceOptions =
         if deployHasSettings then
           throw ''
-            provider plan: provider.deploy is reserved for provider-service node agent wiring, but it is not wired into generated node configuration yet.
+            provider.deploy is not supported yet.
 
-            Leave provider.deploy at its defaults until the provider-service node wiring PR lands.
+            Leave provider.deploy at its default settings.
           ''
         else if serviceResolution != null then
           throw ''
-            provider plan: provider.serviceResolution is reserved for provider-service secret wiring, but it is not wired into generated node configuration yet.
+            provider.serviceResolution is not supported yet.
 
-            Leave provider.serviceResolution unset until the provider-service wiring PR lands.
+            Leave provider.serviceResolution unset.
           ''
         else if cacheHasSettings then
           throw ''
-            provider plan: provider.cache is reserved for provider-service cache wiring, but outer provider.cache settings are not wired into generated node configuration yet.
+            provider.cache is not supported yet.
 
-            Leave provider.cache at its defaults until the provider-service cache wiring PR lands.
+            Leave provider.cache at its default settings.
           ''
         else
           true;
@@ -186,7 +190,7 @@ let
           parts = lib.filter (part: part != "") (lib.splitString "__" inputName);
         in
         if builtins.length parts != 2 then
-          throw "provider plan: input '${inputName}' must be named organisation__project."
+          throw "Input '${inputName}' must be named organisation__project."
         else
           {
             organisation = builtins.elemAt parts 0;
@@ -200,7 +204,9 @@ let
         let
           repo =
             lockData.nodes.${name}.original or (throw ''
-              Could not find ${name} in Flake inputs, do you need to run 'nix flake update ${name}'?
+              '${name}' is missing from flake.lock.
+
+              Run 'nix flake update ${name}' from the provider repository root.
             '');
           orgAndProject = inputNameToProject name;
           enabledProjectEnvironments = lib.filterAttrs (
@@ -212,7 +218,7 @@ let
           let
             envRoot =
               envCfg.hostenv.root
-                or (throw "provider plan: environment '${envName}' in ${name} is missing hostenv.root");
+                or (throw "Environment '${envName}' in ${name} is missing hostenv.root.");
             evaluatedHostenv = hostenvMakeHostenv [
               (inputs.${name} + /hostenv.nix)
               ({ ... }: {
@@ -274,10 +280,10 @@ let
           ) claimsByHostname;
           describeConflict =
             hostname: claims:
-            "${hostname} claimed by ${lib.concatStringsSep "," (lib.unique (map (claim: claim.label) claims))}";
+            "${hostname} used by ${lib.concatStringsSep ", " (lib.unique (map (claim: claim.label) claims))}";
         in
         if conflicts != { } then
-          throw "provider plan: duplicate virtualHosts detected: ${lib.concatStringsSep "; " (lib.mapAttrsToList describeConflict conflicts)}"
+          throw "The same hostname is assigned to more than one environment: ${lib.concatStringsSep "; " (lib.mapAttrsToList describeConflict conflicts)}."
         else
           evaluatedEnvironments;
 
@@ -305,11 +311,26 @@ let
               nodeForTargets;
         in
         if unknownStatusNodes != [ ] then
-          throw "provider plan: provider.nodeStatus contains nodes missing from provider.nodeSystems: ${lib.concatStringsSep ", " unknownStatusNodes}"
+          throw ''
+            provider.nodeStatus references nodes not present in provider.nodeSystems:
+            ${lib.concatStringsSep ", " unknownStatusNodes}
+
+            Add them to provider.nodeSystems or remove these nodeStatus entries.
+          ''
         else if unknownNodeForTargets != [ ] then
-          throw "provider plan: provider.nodeFor selects nodes missing from provider.nodeSystems: ${lib.concatStringsSep ", " unknownNodeForTargets}"
+          throw ''
+            provider.nodeFor selects nodes not present in provider.nodeSystems:
+            ${lib.concatStringsSep ", " unknownNodeForTargets}
+
+            Add them to provider.nodeSystems or update provider.nodeFor.
+          ''
         else if retiringNodeForTargets != [ ] then
-          throw "provider plan: retiring nodes cannot be selected by provider.nodeFor: ${lib.concatStringsSep ", " retiringNodeForTargets}"
+          throw ''
+            provider.nodeFor cannot select retiring nodes:
+            ${lib.concatStringsSep ", " retiringNodeForTargets}
+
+            Select active nodes instead.
+          ''
         else
           true;
 
@@ -502,7 +523,7 @@ let
                 if builtins.isString env.node && env.node != "" then
                   env.node
                 else
-                  throw "nodeFor/default must be set to a node name for environment ${env.hostenv.userName}";
+                  throw "provider.nodeFor.default must name a node for environment ${env.hostenv.userName}.";
             in
             lib.recursiveUpdate acc {
               environments = acc.environments // {

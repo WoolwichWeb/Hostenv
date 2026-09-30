@@ -29,5 +29,5 @@ main = do
 
 dieWithUsage :: IO a
 dieWithUsage = do
-  hPutStrLn stderr "usage: hostenv-provider-service --config <path>"
+  hPutStrLn stderr "Usage: hostenv-provider-service --config PATH"
   exitFailure

@@ -9,11 +9,11 @@ let
         then inputs.self
         else
           builtins.throw ''
-            ${context}: missing hostenv input.
+            The Hostenv input is missing from ${context}.
 
-            Expected either:
-            - inputs.hostenv (downstream provider/project flakes)
-            - or inputs.self (hostenv itself)
+            Define one of:
+            - inputs.hostenv in a provider or project flake;
+            - inputs.self inside Hostenv itself.
           '';
 
       requireInput = { inputs, name, context ? "hostenv" }:
@@ -35,11 +35,12 @@ let
             hostenvInput.inputs.${name}
           else
             builtins.throw ''
-              ${context}: missing required flake input '${name}'.
+              Required flake input '${name}' is missing from ${context}.
 
-              Looked in:
-              - inputs.${name}
-              - inputs.hostenv.inputs.${name} (or inputs.self.inputs.${name})
+              Hostenv checked:
+              - inputs.${name};
+              - inputs.hostenv.inputs.${name}; and
+              - inputs.self.inputs.${name}.
             '';
     in
     {

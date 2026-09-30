@@ -94,19 +94,19 @@ verifyWebhook secretInfo mHubSig mGitlabToken rawBody = do
   case secretInfo.secretValue of
     Nothing ->
       if secretInfo.secretConfigured && (hasGitHub || hasGitLab)
-        then throwError (errorWithBody err401 (ErrorResponse "webhook secret not configured" Nothing Nothing Nothing Nothing))
+        then throwError (errorWithBody err401 (ErrorResponse "Webhook secret could not be loaded." Nothing Nothing Nothing Nothing))
         else if secretInfo.secretConfigured
-          then throwError (errorWithBody err401 (ErrorResponse "missing webhook signature" Nothing Nothing Nothing Nothing))
+          then throwError (errorWithBody err401 (ErrorResponse "Webhook signature is missing." Nothing Nothing Nothing Nothing))
           else pure ()
     Just secret ->
       case (mHubSig, mGitlabToken) of
         (Nothing, Nothing) ->
-          throwError (errorWithBody err401 (ErrorResponse "missing webhook signature" Nothing Nothing Nothing Nothing))
+          throwError (errorWithBody err401 (ErrorResponse "Webhook signature is missing." Nothing Nothing Nothing Nothing))
         _ -> do
           let githubOk = maybe False (\sigText -> verifyGitHubSignature secret rawBody (TE.encodeUtf8 sigText)) mHubSig
           let gitlabOk = maybe False (\tokText -> verifyGitLabToken secret (TE.encodeUtf8 tokText)) mGitlabToken
           unless (githubOk || gitlabOk) $
-            throwError (errorWithBody err401 (ErrorResponse "invalid webhook signature" Nothing Nothing Nothing Nothing))
+            throwError (errorWithBody err401 (ErrorResponse "Webhook signature is invalid." Nothing Nothing Nothing Nothing))
 
 resolveSecret :: AppConfig -> Text -> ProjectRef -> IO SecretInfo
 resolveSecret cfg hash ref = do
@@ -151,5 +151,5 @@ serverError err =
       let CommandError spec exitCodeRaw stdoutText stderrText = cmdErr
           cmd = renderCommand spec
           exitCode = exitCodeToInt exitCodeRaw
-          response = ErrorResponse "command failed" (Just cmd) exitCode (Just stdoutText) (Just stderrText)
+          response = ErrorResponse "Provider command failed." (Just cmd) exitCode (Just stdoutText) (Just stderrText)
        in errorWithBody err500 response

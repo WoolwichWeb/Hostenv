@@ -394,7 +394,7 @@ in
               ${lockSetup}
 
               if [ ! -d "${cfg.backups.fullDir}" ]; then
-                echo "mysql-backup-incremental: full backup missing; creating full and skipping incremental" >&2
+                echo "Full backup not found; creating one and skipping this incremental backup." >&2
                 # Note: deleting fullDir just in case it's not a directory and/or is corrupted.
                 rm -rf "${cfg.backups.fullDir}" "${cfg.backups.incrementalDir}"
                 mkdir -p "${cfg.backups.fullDir}"
@@ -411,7 +411,7 @@ in
             restoreScript = pkgs.writeShellScriptBin "mysql-backup-restore" ''
               set -euo pipefail
               if [ "$#" -ne 2 ]; then
-                echo "usage: mysql-backup-restore <backup-root> <data-dir>" >&2
+                echo "Usage: mysql-backup-restore BACKUP_ROOT DATA_DIR" >&2
                 exit 2
               fi
 
@@ -419,12 +419,12 @@ in
               data_dir="$2"
 
               if [ -z "$backup_root" ] || [ -z "$data_dir" ] || [ "$data_dir" = "/" ]; then
-                echo "invalid arguments for restore" >&2
+                echo "Backup root and data directory must be non-empty, and the data directory must not be '/'." >&2
                 exit 2
               fi
 
               if [ ! -d "$backup_root/full" ]; then
-                echo "missing full backup at $backup_root/full" >&2
+                echo "Full backup not found at $backup_root/full." >&2
                 exit 1
               fi
 
@@ -564,7 +564,7 @@ in
                   ${lib.concatMapStrings (database: ''
                     # Create initial databases
                     if ! test -e "${cfg.dataDir}/${database.name}"; then
-                        echo "Creating initial database: ${database.name}"
+                        echo "Creating database: ${database.name}"
                         ( echo 'create database `${database.name}`;'
 
                           ${lib.optionalString (database.schema != null) ''
@@ -652,17 +652,17 @@ in
           mysql = {
             script = helpers: ''
               echo >&2
-              echo "$hostenv_emoji  Running mysql on '$hostenv_env_name'" >&2
+              echo "$hostenv_emoji  Running mysql in '$hostenv_env_name'" >&2
               hostenv_ssh_exec mysql "$@"
             '';
             executable = "mysql";
-            description = "Run mysql on the remote hostenv environment.";
+            description = "Run mysql in the selected environment.";
             group = "Database";
             parsing = "passthrough";
             arguments = [
               {
                 name = "arguments";
-                description = "Arguments passed to mysql";
+                description = "Arguments to pass to mysql";
                 variadic = true;
                 completion = [ ];
               }
@@ -672,10 +672,10 @@ in
           mysqldump = {
             script = helpers: ''
                 echo >&2
-                echo "$hostenv_emoji  Running mysqldump on '$hostenv_env_name'" >&2
+                echo "$hostenv_emoji  Running mysqldump in '$hostenv_env_name'" >&2
 
                 if [ "$tty_mode" = "on" ]; then
-                  debug "ignoring --tty-mode='$tty_mode' for mysqldump; using no PTY for a clean stream"
+                  debug "Ignoring --tty-mode='$tty_mode' for mysqldump; using no PTY so the dump remains clean."
                 fi
                 hostenv_ssh_tty="-T"
                 debug "tty_mode=$tty_mode ssh_flag=$hostenv_ssh_tty stdin_is_tty=$([ -t 0 ] && echo yes || echo no)"
@@ -685,13 +685,13 @@ in
               REMOTE
             '';
             executable = "mysqldump";
-            description = "Run mysqldump on the remote hostenv environment, printing the result on stdout (as if it were run locally).";
+            description = "Run mysqldump in the selected environment and write the dump to standard output.";
             group = "Database";
             parsing = "passthrough";
             arguments = [
               {
                 name = "arguments";
-                description = "Arguments passed to mysqldump";
+                description = "Arguments to pass to mysqldump";
                 variadic = true;
                 completion = [ ];
               }

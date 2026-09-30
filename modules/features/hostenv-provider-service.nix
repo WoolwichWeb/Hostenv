@@ -36,7 +36,7 @@ in
     in
     {
       options.services.hostenv-provider = {
-        enable = lib.mkEnableOption "Hostenv provider service (webhooks + admin UI)";
+        enable = lib.mkEnableOption "Hostenv provider service";
 
         source = lib.mkOption {
           type = lib.types.path;
@@ -64,13 +64,13 @@ in
         dataDir = lib.mkOption {
           type = lib.types.str;
           default = "${config.hostenv.dataDir}/hostenv-provider";
-          description = "Working directory for the provider service (uses XDG_DATA_HOME/hostenv-provider).";
+          description = "Working directory used by the provider service.";
         };
 
         listenSocket = lib.mkOption {
           type = lib.types.str;
           default = "${config.hostenv.runtimeDir}/hostenv-provider.sock";
-          description = "Unix socket path the webhook service should bind to.";
+          description = "Unix socket on which the provider service listens.";
         };
 
         webhookSecretFile = lib.mkOption {
@@ -88,55 +88,55 @@ in
         webhookHost = lib.mkOption {
           type = lib.types.str;
           default = config.hostenv.hostname;
-          description = "Hostname whose nginx vhost should proxy /webhook/<hash> to the service socket.";
+          description = "Hostname that serves provider webhooks and the administration interface.";
         };
 
         uiBasePath = lib.mkOption {
           type = lib.types.str;
           default = "/ui";
-          description = "Base path for the admin UI.";
+          description = "URL path for the administration interface.";
         };
 
         uiHost = lib.mkOption {
           type = lib.types.str;
           default = cfg.webhookHost;
-          description = "Hostname used to construct OAuth redirect URLs for the admin UI.";
+          description = "Hostname used for GitLab sign-in redirects.";
         };
 
         uiScheme = lib.mkOption {
           type = lib.types.str;
           default = "https";
-          description = "Scheme used to construct OAuth redirect URLs for the admin UI.";
+          description = "URL scheme used for GitLab sign-in redirects.";
         };
 
         dbUri = lib.mkOption {
           type = lib.types.str;
           default = "host=${config.hostenv.runtimeDir} dbname=hostenv-provider user=${config.hostenv.userName}";
-          description = "PostgreSQL connection string for the provider UI.";
+          description = "PostgreSQL connection string used by the provider service.";
         };
 
         gitlabOAuthSecretsFile = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
-          description = "Path to a secrets file containing GitLab OAuth client_id/client_secret.";
+          description = "Path to a secrets file containing the GitLab client_id and client_secret.";
         };
 
         gitlabHosts = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = [ "gitlab.com" ];
-          description = "Allowed GitLab hosts for OAuth.";
+          description = "GitLab hosts from which users may sign in.";
         };
 
         gitCredentialsFile = lib.mkOption {
           type = lib.types.str;
           default = "${cfg.dataDir}/git-credentials";
-          description = "Path to the git credential store file (generated).";
+          description = "Path to the generated Git credential store.";
         };
 
         gitConfigFile = lib.mkOption {
           type = lib.types.str;
           default = "${cfg.dataDir}/gitconfig";
-          description = "Path to the git config file used to point at the credential store.";
+          description = "Path to the Git configuration file used by the provider service.";
         };
 
         flakeTemplate = lib.mkOption {
@@ -148,7 +148,7 @@ in
         repoSource = lib.mkOption {
           type = lib.types.oneOf [ lib.types.path lib.types.str ];
           default = config.hostenv.root;
-          description = "Path to the provider repo to copy into the dataDir if missing.";
+          description = "Provider repository to copy into dataDir when the working copy is missing.";
         };
 
         flakeRoot = lib.mkOption {
@@ -181,7 +181,7 @@ in
         };
 
         systemd.services.hostenv-provider = {
-          description = "Hostenv provider webhook service";
+          description = "Hostenv provider service";
           wantedBy = [ "default.target" ];
           after = [ "network.target" ];
           restartIfChanged = false;

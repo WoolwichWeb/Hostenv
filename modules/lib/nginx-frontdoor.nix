@@ -13,7 +13,7 @@ let
       sanitizeHeaderValue = label: value:
         if value == null then null else
         if lib.strings.hasInfix "\"" value then
-          builtins.throw "hostenv nginx: ${label} may not contain double quotes"
+          builtins.throw "${label} may not contain double quotes."
         else
           value;
 
@@ -26,7 +26,7 @@ let
             quote =
               if hasDouble && !hasSingle then "'"
               else if hasDouble && hasSingle then
-                builtins.throw "hostenv nginx: ${name} header value may not contain both single and double quotes"
+                builtins.throw "${name} header value may not contain both single and double quotes."
               else
                 "\"";
           in
