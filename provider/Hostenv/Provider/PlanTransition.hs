@@ -118,7 +118,7 @@ loadProviderState statePath = do
             stateRaw <- BL.readFile (T.unpack statePath)
             case A.eitherDecode' stateRaw of
                 Left err ->
-                    error ("hostenv-provider: cannot read " <> T.unpack statePath <> ": " <> err)
+                    error ("Cannot read " <> T.unpack statePath <> ": " <> err)
                 Right value -> pure value
 
 validatePlanDnsSafety ::
@@ -129,7 +129,7 @@ validatePlanDnsSafety ::
 validatePlanDnsSafety ops previousPlan newPlan = do
     let hostenvHostname =
             fromMaybe
-                (error "hostenv-provider: generated plan is missing hostenvHostname")
+                (error "Generated plan is missing hostenvHostname")
                 (lookupText (K.fromString "hostenvHostname") newPlan)
     let inventory = S.fromList (map Dns.normalizeName (planSystemTargetNodes newPlan Nothing))
     let hostnames =
@@ -148,7 +148,7 @@ validatePlanDnsSafety ops previousPlan newPlan = do
             ]
     unless (null lookupFailures) $
         error
-            ( "hostenv-provider: refusing provider plan because Hostenv DNS could not be verified: "
+            ( "Cannot generate the provider plan because DNS could not be checked: "
                 <> T.unpack (T.intercalate "; " lookupFailures)
             )
 
@@ -166,7 +166,7 @@ validatePlanDnsSafety ops previousPlan newPlan = do
 
     unless (null violations) $
         error
-            ( "hostenv-provider: refusing provider plan because Hostenv DNS still points at node(s) missing from provider.nodeSystems: "
+            ( "Cannot remove provider nodes while Hostenv DNS still points to them: "
                 <> T.unpack
                     ( T.intercalate
                         ", "
@@ -174,7 +174,7 @@ validatePlanDnsSafety ops previousPlan newPlan = do
                         | (hostname, nodeName) <- violations
                         ]
                     )
-                <> ". Restore the node to inventory, migrate/retire the environment, and run plan again before changing DNS."
+                <> ".\n\nRestore the node to provider.nodeSystems, move or retire the environment, then run plan again before changing DNS."
             )
 
 validatePendingMigrationHandoffs ::
@@ -185,7 +185,7 @@ validatePendingMigrationHandoffs ::
 validatePendingMigrationHandoffs ops plan inventoryNodes = do
     let hostenvHostname =
             fromMaybe
-                (error "hostenv-provider: generated plan is missing hostenvHostname")
+                (error "Generated plan is missing hostenvHostname")
                 (lookupText (K.fromString "hostenvHostname") plan)
     let deployUser = planDeployUser plan
     let resolveConnection = nodeConnectionFor plan hostenvHostname
@@ -196,7 +196,7 @@ validatePendingMigrationHandoffs ops plan inventoryNodes = do
     let handoffErrors = [err | Left err <- handoffResults]
     unless (null handoffErrors) $
         error
-            ( "hostenv-provider: refusing provider plan because pending migration handoffs could not be verified: "
+            ( "Cannot generate the provider plan because migration recovery state could not be checked: "
                 <> T.unpack (T.intercalate "; " handoffErrors)
             )
     let pendingRemovedSources =
@@ -207,7 +207,7 @@ validatePendingMigrationHandoffs ops plan inventoryNodes = do
             ]
     unless (null pendingRemovedSources) $
         error
-            ( "hostenv-provider: refusing provider plan because pending migration finalization still references node(s) missing from provider.nodeSystems: "
+            ( "Cannot remove provider nodes while migration clean-up still refers to them: "
                 <> T.unpack
                     ( T.intercalate
                         ", "
@@ -220,7 +220,7 @@ validatePendingMigrationHandoffs ops plan inventoryNodes = do
                         | (destinationNode, uid, sourceNode) <- pendingRemovedSources
                         ]
                     )
-                <> ". Keep each source node in inventory until deploy removes its old account and clears the handoff."
+                <> ".\n\nKeep each source node in provider.nodeSystems until deploy removes its old account and finishes migration clean-up."
             )
 
 validatePlanTransition :: Ops -> Text -> Text -> BL.ByteString -> IO ()
@@ -228,7 +228,7 @@ validatePlanTransition ops planPath statePath newPlanRaw = do
     newPlan <-
         case A.eitherDecode' newPlanRaw of
             Left err ->
-                error ("hostenv-provider: generated plan is invalid JSON: " <> err)
+                error ("Generated plan is invalid JSON: " <> err)
             Right value -> pure (value :: KM.KeyMap A.Value)
 
     state <- loadProviderState statePath
@@ -242,9 +242,9 @@ validatePlanTransition ops planPath statePath newPlanRaw = do
                 case A.eitherDecode' previousRaw of
                     Left err -> do
                         ops.printLine
-                            ( "hostenv-provider: warning: existing "
+                            ( "Warning: existing "
                                 <> planPath
-                                <> " is invalid; skipping previous-plan comparison and relying on the DNS safety check ("
+                                <> " is invalid; using DNS checks instead of the previous plan ("
                                 <> T.pack err
                                 <> ")"
                             )
@@ -261,11 +261,11 @@ validatePlanTransition ops planPath statePath newPlanRaw = do
     let validateRemovedNode nodeName status lifecycleOps managedIdentityState = do
             unless (status == "retiring") $
                 error
-                    ( "hostenv-provider: refusing to remove provider node "
+                    ( "Cannot remove provider node "
                         <> T.unpack nodeName
-                        <> " directly from inventory. Mark provider.nodeStatus."
+                        <> " directly.\n\nSet provider.nodeStatus."
                         <> T.unpack nodeName
-                        <> " = \"retiring\", move/retire its environments, deploy the cleanup, then run plan again."
+                        <> " = \"retiring\", move or retire its environments, deploy until clean-up is complete, then run plan again."
                     )
 
             observedResult <- UserLifecycle.readNodeUsers lifecycleOps nodeName
@@ -273,9 +273,9 @@ validatePlanTransition ops planPath statePath newPlanRaw = do
                 case observedResult of
                     Left err ->
                         error
-                            ( "hostenv-provider: refusing to remove retiring node "
+                            ( "Cannot remove retiring node "
                                 <> T.unpack nodeName
-                                <> " because Hostenv could not verify that it is clean: "
+                                <> " because Hostenv could not confirm that it is clean: "
                                 <> T.unpack err
                             )
                     Right (_, users) -> pure users
@@ -290,9 +290,9 @@ validatePlanTransition ops planPath statePath newPlanRaw = do
                 case runtimeResult of
                     Left err ->
                         error
-                            ( "hostenv-provider: refusing to remove retiring node "
+                            ( "Cannot remove retiring node "
                                 <> T.unpack nodeName
-                                <> " because Hostenv could not verify its user runtime state: "
+                                <> " because Hostenv could not check its user runtime state: "
                                 <> T.unpack err
                             )
                     Right (_, users) -> pure users
@@ -314,20 +314,20 @@ validatePlanTransition ops planPath statePath newPlanRaw = do
                         managedIdentityState
             unless (null managedUsers && null uidMismatches && null uidOwnerConflicts) $
                 error
-                    ( "hostenv-provider: refusing to remove retiring node "
+                    ( "Cannot remove retiring node "
                         <> T.unpack nodeName
-                        <> " from inventory because it still contains Hostenv-managed account/runtime state: "
+                        <> " because it still contains Hostenv accounts or runtime state: "
                         <> T.unpack
                             ( T.intercalate
                                 ", "
                                 ( map fst managedUsers
-                                    ++ [ userName <> " (UID drift)" | (userName, _, _) <- uidMismatches ]
+                                    ++ [ userName <> " (UID mismatch)" | (userName, _, _) <- uidMismatches ]
                                     ++ [ userName <> " (reserved UID " <> T.pack (show expectedUid) <> " owned by " <> owner <> ")"
                                        | (userName, expectedUid, owner) <- uidOwnerConflicts
                                        ]
                                 )
                             )
-                        <> ". Deploy migrations/retirements until the node is clean, then run plan again."
+                        <> ".\n\nRun deploy until migrations and retirements have cleaned the node, then run plan again."
                     )
 
     case previousPlan of
@@ -341,7 +341,7 @@ validatePlanTransition ops planPath statePath newPlanRaw = do
 
             unless (null removedAssignments) $
                 error
-                    ( "hostenv-provider: refusing provider plan because environment(s) were assigned to node(s) removed from provider.nodeSystems: "
+                    ( "Cannot remove provider nodes that still have assigned environments: "
                         <> T.unpack
                             ( T.intercalate
                                 ", "
@@ -349,7 +349,7 @@ validatePlanTransition ops planPath statePath newPlanRaw = do
                                 | (envName, nodeName) <- removedAssignments
                                 ]
                             )
-                        <> ". Keep each source node in inventory, move its environments, mark it retiring, deploy the cleanup, then remove it in a later plan."
+                        <> ".\n\nKeep each source node in provider.nodeSystems, move its environments, mark it retiring, deploy until clean-up is complete, then remove it in a later plan."
                     )
 
             unless (null removedNodes) $ do
@@ -359,7 +359,7 @@ validatePlanTransition ops planPath statePath newPlanRaw = do
                 let deployUser = planDeployUser oldPlan
                 let oldHostname =
                         fromMaybe
-                            (error ("hostenv-provider: hostenvHostname missing from existing " <> T.unpack planPath))
+                            (error ("Existing " <> T.unpack planPath <> " is missing hostenvHostname"))
                             (lookupText (K.fromString "hostenvHostname") oldPlan)
                 let resolveOldConnection = nodeConnectionFor oldPlan oldHostname
                 let lifecycleOps = ops.makeUserLifecycleOps deployUser resolveOldConnection

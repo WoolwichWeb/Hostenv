@@ -112,24 +112,24 @@ resolveMigrationSourceNode currentNode userName uid explicitSource observedNodes
                     [] -> Right Nothing
                     sources ->
                         Left
-                            ( "migration source override for "
+                            ( "Migration source override for "
                                 <> userName
-                                <> " names its destination node "
+                                <> " selects its destination node "
                                 <> currentNode
-                                <> ", but the same Hostenv user with UID "
+                                <> ", but the Hostenv account with UID "
                                 <> T.pack (show uid)
-                                <> " is still present on source node(s): "
+                                <> " is still present on source nodes: "
                                 <> T.intercalate ", " sources
-                                <> ". Use --skip-migrations "
+                                <> ".\n\nUse --skip-migrations "
                                 <> userName
-                                <> " only when intentionally deploying without migration."
+                                <> " only if you intend to deploy without migrating its data."
                             )
             | userPresent sourceNode -> Right (Just sourceNode)
             | otherwise ->
                 Left
-                    ( "migration source "
+                    ( "Migration source "
                         <> sourceNode
-                        <> " does not contain Hostenv user "
+                        <> " does not contain the Hostenv account "
                         <> userName
                         <> " with UID "
                         <> T.pack (show uid)
@@ -140,13 +140,13 @@ resolveMigrationSourceNode currentNode userName uid explicitSource observedNodes
                 [sourceNode] -> Right (Just sourceNode)
                 sources ->
                     Left
-                        ( "Hostenv user "
+                        ( "Hostenv account "
                             <> userName
                             <> " with UID "
                             <> T.pack (show uid)
-                            <> " exists on more than one possible migration source: "
+                            <> " exists on more than one possible source node: "
                             <> T.intercalate ", " sources
-                            <> ". Set --migration-source "
+                            <> ".\n\nSet --migration-source "
                             <> userName
                             <> "=<node>."
                         )

@@ -60,7 +60,7 @@ parseMigrationHandoff raw =
         [sourceNode] -> Right (Just (MigrationHandoff sourceNode HandoffQuiesced))
         ["accepted", sourceNode] -> Right (Just (MigrationHandoff sourceNode HandoffAccepted))
         ["quiesced", sourceNode] -> Right (Just (MigrationHandoff sourceNode HandoffQuiesced))
-        _ -> Left ("invalid migration handoff marker: " <> T.strip raw)
+        _ -> Left ("Invalid migration recovery file: " <> T.strip raw)
 
 parseHandoffListing :: Text -> Either Text [(Integer, MigrationHandoff)]
 parseHandoffListing raw =
@@ -69,14 +69,14 @@ parseHandoffListing raw =
     parseLine line =
         let (uidText, payloadWithTab) = T.breakOn "\t" line
          in case TR.decimal uidText of
-                Left _ -> Left ("invalid migration handoff UID in listing: " <> uidText)
+                Left _ -> Left ("Invalid UID in migration recovery listing: " <> uidText)
                 Right (uid, trailing)
-                    | not (T.null trailing) -> Left ("invalid migration handoff UID in listing: " <> uidText)
-                    | T.null payloadWithTab -> Left ("missing migration handoff payload for UID " <> uidText)
+                    | not (T.null trailing) -> Left ("Invalid UID in migration recovery listing: " <> uidText)
+                    | T.null payloadWithTab -> Left ("Missing migration recovery data for UID " <> uidText)
                     | otherwise ->
                         case parseMigrationHandoff (T.drop 1 payloadWithTab) of
                             Left err -> Left err
-                            Right Nothing -> Left ("empty migration handoff payload for UID " <> uidText)
+                            Right Nothing -> Left ("Empty migration recovery data for UID " <> uidText)
                             Right (Just handoff) -> Right (uid, handoff)
 
 listCommand :: Text
@@ -85,18 +85,18 @@ listCommand =
         [ "set -euo pipefail"
         , "marker_dir=" <> shellQuote markerDirectory
         , "if sudo test -L \"$marker_dir\"; then"
-        , "  echo \"migration handoff directory must not be a symlink: $marker_dir\" >&2"
+        , "  echo \"migration recovery directory must not be a symbolic link: $marker_dir\" >&2"
         , "  exit 94"
         , "fi"
         , "if sudo test -e \"$marker_dir\"; then"
         , "  if ! sudo test -d \"$marker_dir\"; then"
-        , "    echo \"migration handoff path is not a directory: $marker_dir\" >&2"
+        , "    echo \"migration recovery path is not a directory: $marker_dir\" >&2"
         , "    exit 94"
         , "  fi"
         , "  for marker in \"$marker_dir\"/*; do"
         , "    sudo test -e \"$marker\" || continue"
         , "    if sudo test -L \"$marker\" || ! sudo test -f \"$marker\"; then"
-        , "      echo \"invalid migration handoff marker: $marker\" >&2"
+        , "      echo \"Invalid migration recovery file: $marker\" >&2"
         , "      exit 94"
         , "    fi"
         , "    uid=${marker##*/}"
@@ -113,12 +113,12 @@ readCommand uid =
             [ "set -euo pipefail"
             , "marker_path=" <> shellQuote path
             , "if sudo test -L \"$marker_path\"; then"
-            , "  echo \"migration handoff marker must not be a symlink: $marker_path\" >&2"
+            , "  echo \"migration recovery file must not be a symbolic link: $marker_path\" >&2"
             , "  exit 94"
             , "fi"
             , "if sudo test -e \"$marker_path\"; then"
             , "  if ! sudo test -f \"$marker_path\"; then"
-            , "    echo \"migration handoff marker is not a regular file: $marker_path\" >&2"
+            , "    echo \"migration recovery path is not a regular file: $marker_path\" >&2"
             , "    exit 94"
             , "  fi"
             , "  sudo cat \"$marker_path\""
@@ -135,7 +135,7 @@ writeAtomicCommand uid handoff =
             , "marker_path=" <> shellQuote path
             , "sudo install -d -m 0700 -o root -g root \"$marker_dir\""
             , "if sudo test -L \"$marker_path\"; then"
-            , "  echo \"migration handoff marker must not be a symlink: $marker_path\" >&2"
+            , "  echo \"migration recovery file must not be a symbolic link: $marker_path\" >&2"
             , "  exit 94"
             , "fi"
             , "tmp=$(sudo mktemp \"$marker_dir/.handoff.XXXXXX\")"

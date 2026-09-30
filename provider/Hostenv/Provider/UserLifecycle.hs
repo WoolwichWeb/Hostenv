@@ -59,7 +59,7 @@ readNodeUsers ops nodeName = do
         ExitFailure exitCode ->
             pure
                 ( Left
-                    ( "failed to read passwd database on "
+                    ( "could not read Unix accounts on "
                         <> nodeName
                         <> " (exit "
                         <> T.pack (show exitCode)
@@ -84,7 +84,7 @@ readNodeRuntimeUsers ops identities nodeName = do
                     , "unit_status=$?"
                     , "set -e"
                     , "if [ \"$unit_status\" -ne 0 ]; then"
-                    , "  echo \"failed to inspect " <> unit <> " (systemctl exit $unit_status)\" >&2"
+                    , "  echo \"could not inspect " <> unit <> " (systemctl exit $unit_status)\" >&2"
                     , "  exit \"$unit_status\""
                     , "fi"
                     , "if [ -z \"$unit_row\" ]; then"
@@ -94,7 +94,7 @@ readNodeRuntimeUsers ops identities nodeName = do
                     , "  case \"$unit_state\" in"
                     , "    active|reloading|activating|deactivating) unit_active=1 ;;"
                     , "    inactive|failed) unit_active=0 ;;"
-                    , "    *) echo \"unexpected ActiveState for " <> unit <> ": $unit_state\" >&2; exit 92 ;;"
+                    , "    *) echo \"unexpected systemd state for " <> unit <> ": $unit_state\" >&2; exit 92 ;;"
                     , "  esac"
                     , "fi"
                     , "if [ -e " <> shellEscape lingerPath <> " ]"
@@ -124,7 +124,7 @@ readNodeRuntimeUsers ops identities nodeName = do
         ExitFailure exitCode ->
             pure
                 ( Left
-                    ( "failed to inspect Hostenv user runtime state on "
+                    ( "could not inspect Hostenv runtime state on "
                         <> nodeName
                         <> " (exit "
                         <> T.pack (show exitCode)
@@ -162,7 +162,7 @@ prepareManagedUserCleanupOnNode ops desiredNodes observedUsers runtimeUsers stat
         then
             pure
                 ( Left
-                    ( "Hostenv-managed user UID mismatch on "
+                    ( "Hostenv account UID mismatch on "
                         <> nodeName
                         <> ": "
                         <> T.intercalate
@@ -188,7 +188,7 @@ prepareManagedUserCleanupOnNode ops desiredNodes observedUsers runtimeUsers stat
                                             | (userName, expectedUid, owner) <- uidOwnerConflicts
                                             ]
                            )
-                        <> ". Refusing system deployment until the account drift is resolved."
+                        <> ".\n\nRestore the expected account UIDs before deploying."
                     )
                 )
         else do
@@ -212,7 +212,7 @@ prepareManagedUserCleanupOnNode ops desiredNodes observedUsers runtimeUsers stat
                                 <> "set +e; unit_row=$(systemctl list-units --all --full --plain --no-legend "
                                 <> shellEscape unit
                                 <> "); unit_status=$?; set -e; "
-                                <> "if [ \"$unit_status\" -ne 0 ]; then echo \"failed to inspect "
+                                <> "if [ \"$unit_status\" -ne 0 ]; then echo \"could not inspect "
                                 <> unit
                                 <> " (systemctl exit $unit_status)\" >&2; exit \"$unit_status\"; fi; "
                                 <> "stop_status=0; "
@@ -223,32 +223,32 @@ prepareManagedUserCleanupOnNode ops desiredNodes observedUsers runtimeUsers stat
                                 <> shellEscape unit
                                 <> " || stop_status=$? ;; "
                                 <> "inactive|failed) ;; "
-                                <> "*) echo \"unexpected ActiveState for "
+                                <> "*) echo \"unexpected systemd state for "
                                 <> unit
                                 <> ": $unit_state\" >&2; exit 92 ;; "
                                 <> "esac; fi; "
                                 <> "set +e; unit_row=$(systemctl list-units --all --full --plain --no-legend "
                                 <> shellEscape unit
                                 <> "); unit_status=$?; set -e; "
-                                <> "if [ \"$unit_status\" -ne 0 ]; then echo \"failed to verify "
+                                <> "if [ \"$unit_status\" -ne 0 ]; then echo \"could not verify "
                                 <> unit
-                                <> " after cleanup (systemctl exit $unit_status)\" >&2; exit \"$unit_status\"; fi; "
+                                <> " after clean-up (systemctl exit $unit_status)\" >&2; exit \"$unit_status\"; fi; "
                                 <> "if [ -n \"$unit_row\" ]; then "
                                 <> "read -r _unit _load unit_state _rest <<< \"$unit_row\"; "
                                 <> "case \"$unit_state\" in "
                                 <> "inactive|failed) ;; "
                                 <> "active|reloading|activating|deactivating) echo \""
                                 <> unit
-                                <> " is still active after cleanup ($unit_state; stop exit $stop_status)\" >&2; exit 90 ;; "
-                                <> "*) echo \"unexpected ActiveState for "
+                                <> " is still active after clean-up ($unit_state; stop exit $stop_status)\" >&2; exit 90 ;; "
+                                <> "*) echo \"unexpected systemd state for "
                                 <> unit
-                                <> " after cleanup: $unit_state\" >&2; exit 92 ;; "
+                                <> " after clean-up: $unit_state\" >&2; exit 92 ;; "
                                 <> "esac; fi; "
                                 <> "if [ -e "
                                 <> shellEscape lingerPath
-                                <> " ]; then echo \"linger remains for "
+                                <> " ]; then echo \"lingering is still enabled for "
                                 <> userName
-                                <> " after cleanup\" >&2; exit 91; fi; "
+                                <> " after clean-up\" >&2; exit 91; fi; "
                                 <> "if ! getent passwd "
                                 <> shellEscape userName
                                 <> " >/dev/null; then "
@@ -258,11 +258,11 @@ prepareManagedUserCleanupOnNode ops desiredNodes observedUsers runtimeUsers stat
                                 <> "sudo systemctl stop \"$runtime_unit\" >/dev/null 2>&1 || true; "
                                 <> "if [ -e "
                                 <> shellEscape runtimeDir
-                                <> " ]; then echo \"runtime directory remains after cleanup: "
+                                <> " ]; then echo \"runtime directory remains after clean-up: "
                                 <> runtimeDir
                                 <> "\" >&2; exit 93; fi; "
                                 <> "fi"
-                    ops.printLine ("hostenv-provider: preparing retirement of Hostenv user " <> userName <> " from " <> nodeName)
+                    ops.printLine ("Preparing to retire Hostenv account " <> userName <> " from " <> nodeName)
                     (code, cleanupOut, cleanupErr) <- ops.runRemoteOutput nodeName ["bash", "-lc", cleanupCmd]
                     when (code /= ExitSuccess) $ do
                         let detail =
@@ -271,7 +271,7 @@ prepareManagedUserCleanupOnNode ops desiredNodes observedUsers runtimeUsers stat
                                         then cleanupOut
                                         else cleanupErr
                         ops.printErrLine
-                            ( "hostenv-provider: error: cleanup command failed for "
+                            ( "Could not clean up "
                                 <> userName
                                 <> " on "
                                 <> nodeName
@@ -308,7 +308,7 @@ rollbackManagedUserCleanupOnNode ops nodeName users =
                     <> shellEscape unit
                     <> " >/dev/null 2>&1 || true; "
                     <> "fi"
-        ops.printLine ("hostenv-provider: restoring Hostenv user manager after failed system deployment: " <> userName <> " on " <> nodeName)
+        ops.printLine ("Restoring Hostenv services after the system deployment failed: " <> userName <> " on " <> nodeName)
         _ <- ops.runRemote nodeName ["bash", "-lc", rollbackCmd]
         pure ()
 
@@ -329,7 +329,7 @@ managedUserIsQuiescedOnNode ops userName uid nodeName = do
                 , "unit_status=$?"
                 , "set -e"
                 , "if [ \"$unit_status\" -ne 0 ]; then"
-                , "  echo \"failed to inspect " <> unit <> " (systemctl exit $unit_status)\" >&2"
+                , "  echo \"could not inspect " <> unit <> " (systemctl exit $unit_status)\" >&2"
                 , "  exit \"$unit_status\""
                 , "fi"
                 , "if [ -z \"$unit_row\" ]; then"
@@ -339,7 +339,7 @@ managedUserIsQuiescedOnNode ops userName uid nodeName = do
                 , "  case \"$unit_state\" in"
                 , "    inactive|failed) printf 'quiesced\\n' ;;"
                 , "    active|reloading|activating|deactivating) printf 'active\\n' ;;"
-                , "    *) echo \"unexpected ActiveState for " <> unit <> ": $unit_state\" >&2; exit 92 ;;"
+                , "    *) echo \"unexpected systemd state for " <> unit <> ": $unit_state\" >&2; exit 92 ;;"
                 , "  esac"
                 , "fi"
                 ]
@@ -347,7 +347,7 @@ managedUserIsQuiescedOnNode ops userName uid nodeName = do
     case code of
         ExitFailure exitCode ->
             error
-                ( "failed to inspect Hostenv user manager for "
+                ( "could not inspect Hostenv services for "
                     <> T.unpack userName
                     <> " on "
                     <> T.unpack nodeName
@@ -362,7 +362,7 @@ managedUserIsQuiescedOnNode ops userName uid nodeName = do
                 "active" -> pure False
                 other ->
                     error
-                        ( "unexpected Hostenv user-manager probe result for "
+                        ( "Unexpected Hostenv service-state result for "
                             <> T.unpack userName
                             <> " on "
                             <> T.unpack nodeName
@@ -381,7 +381,7 @@ readMigrationHandoff ops userName uid destinationNode = do
     case MigrationHandoff.parseMigrationHandoff raw of
         Left err ->
             error
-                ( "invalid migration handoff state for "
+                ( "Invalid migration recovery state for "
                     <> T.unpack userName
                     <> ": "
                     <> T.unpack err
@@ -398,7 +398,7 @@ readNodeMigrationHandoffs ops nodeName = do
         ExitFailure exitCode ->
             pure
                 ( Left
-                    ( "failed to inspect migration handoffs on "
+                    ( "could not inspect migration recovery state on "
                         <> nodeName
                         <> " (exit "
                         <> T.pack (show exitCode)
@@ -411,7 +411,7 @@ readNodeMigrationHandoffs ops nodeName = do
                 case MigrationHandoff.parseHandoffListing out of
                     Left parseErr ->
                         Left
-                            ( "invalid migration handoff state on "
+                            ( "Invalid migration recovery state on "
                                 <> nodeName
                                 <> ": "
                                 <> parseErr
@@ -428,7 +428,10 @@ writeMigrationHandoff ::
     IO ()
 writeMigrationHandoff ops userName uid destinationNode sourceNode phase = do
     let handoff = MigrationHandoff.MigrationHandoff sourceNode phase
-    let phaseName = MigrationHandoff.phaseText phase
+    let phaseDescription =
+            case phase of
+                MigrationHandoff.HandoffAccepted -> "destination accepted"
+                MigrationHandoff.HandoffQuiesced -> "source stopped"
     result <-
         ops.runRemote
             destinationNode
@@ -439,20 +442,21 @@ writeMigrationHandoff ops userName uid destinationNode sourceNode phase = do
     case result of
         ExitSuccess ->
             ops.printLine
-                ( "hostenv-provider: recorded migration handoff "
-                    <> phaseName
-                    <> " for "
+                ( "Saved migration progress for "
                     <> userName
                     <> " from "
                     <> sourceNode
+                    <> " ("
+                    <> phaseDescription
+                    <> ")"
                 )
         ExitFailure code ->
             error
-                ( "failed to record migration handoff "
-                    <> T.unpack phaseName
-                    <> " for "
+                ( "could not save migration progress for "
                     <> T.unpack userName
-                    <> " (exit "
+                    <> " ("
+                    <> T.unpack phaseDescription
+                    <> "; exit "
                     <> show code
                     <> ")"
                 )
@@ -514,7 +518,7 @@ clearMigrationHandoffOnNode ops userName uid nodeName = do
         ExitSuccess -> pure ()
         ExitFailure code ->
             error
-                ( "failed to clear migration handoff marker for "
+                ( "could not clear migration recovery state for "
                     <> T.unpack userName
                     <> " on "
                     <> T.unpack nodeName

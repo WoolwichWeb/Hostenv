@@ -125,7 +125,7 @@ in
                 let eval = builtins.tryEval (builtins.toJSON config.exportedEnvironments);
                 in eval.success;
               message = ''
-                config.exportedEnvironments must be JSON-serializable.
+                config.exportedEnvironments must be JSON-serialisable.
               '';
             }
             {

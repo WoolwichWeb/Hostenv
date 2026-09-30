@@ -102,7 +102,7 @@ projectForHash hash raw = do
   case uniqueMatches of
     [] -> Left "webhook hash not found in plan.json"
     [ref] -> Right ref
-    _ -> Left "webhook hash maps to multiple projects"
+    _ -> Left "The webhook URL matches more than one project."
   where
     extractHostenv (Object envObj) = do
       hostenvObj <- lookupObj (K.fromString "hostenv") envObj
@@ -124,7 +124,7 @@ projectHashFor org project raw = do
         , envProject == project
         ]
   case chooseCandidate matches of
-    Nothing -> Left "project not found in plan.json"
+    Nothing -> Left "The project is not present in generated/plan.json. Check that it defines at least one enabled environment."
     Just candidate -> Right candidate.candidateHash
   where
     extractCandidate (Object envObj) = do
@@ -168,12 +168,12 @@ decodePlanRoot raw =
   case A.eitherDecode' raw of
     Left err -> Left (T.pack err)
     Right (Object root) -> Right root
-    Right _ -> Left "plan.json root is not an object"
+    Right _ -> Left "generated/plan.json must contain a JSON object."
 
 decodeEnvironmentsFromRoot :: KM.KeyMap Value -> Either Text (KM.KeyMap Value)
 decodeEnvironmentsFromRoot root =
   case lookupObj (K.fromString "environments") root of
-    Nothing -> Left "plan.json missing environments object"
+    Nothing -> Left "generated/plan.json is missing the environments object."
     Just envs -> Right envs
 
 renderProjectInputs :: [(Text, Text)] -> Text
@@ -190,7 +190,7 @@ renderFlakeTemplate template inputBlock =
   let marker = "{{HOSTENV_PROJECT_INPUTS}}"
    in if T.isInfixOf marker template
         then Right (T.replace marker inputBlock template)
-        else Left "flake template missing {{HOSTENV_PROJECT_INPUTS}} marker"
+        else Left "Flake template is missing the {{HOSTENV_PROJECT_INPUTS}} marker."
 
 renderGitCredentials :: [(Text, Text)] -> Text
 renderGitCredentials entries =
@@ -220,7 +220,7 @@ readGitlabSecrets path = do
   let lookupKey keys = listToMaybe [ v | (k, v) <- kvs, k `elem` keys ]
   case (lookupKey ["client_id", "GITLAB_CLIENT_ID"], lookupKey ["client_secret", "GITLAB_CLIENT_SECRET"]) of
     (Just cid, Just secret) -> pure (GitlabSecrets cid secret)
-    _ -> die "GitLab secrets file missing client_id/client_secret"
+    _ -> die "GitLab sign-in secrets file must contain client_id and client_secret."
   where
     parseLine line =
       let trimmed = T.strip line
@@ -348,9 +348,9 @@ runWebhookWith runner loadPlan cfg ref = do
                       pure
                         ( Left
                             ( WebhookPlanError
-                                ( "automatic webhook deployment cannot safely remove environment(s): "
+                                ( "Webhook deployment cannot safely remove environments: "
                                     <> T.intercalate ", " removedNames
-                                    <> ". Run `nix run .#hostenv-provider -- deploy` from the provider repository to reconcile live placement."
+                                    <> ".\n\nRun `nix run .#hostenv-provider -- deploy` from the provider repository so Hostenv can reconcile the live nodes."
                                 )
                             )
                         )

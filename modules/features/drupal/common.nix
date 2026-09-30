@@ -88,7 +88,7 @@ in
               assertion = lib.elem migrateBackupName (
                 config.services.restic.backups.${migrateBackupName}.tags or [ ]
               );
-              message = "services.restic.backups.drupal-migrate.tags must include \"drupal-migrate\" so migrations can locate snapshots";
+              message = "services.restic.backups.drupal-migrate.tags must include \"drupal-migrate\" so Hostenv can find migration snapshots";
             }
           );
 
@@ -221,7 +221,7 @@ in
           drush = {
             script = helpers: ''
               echo >&2
-              echo "$hostenv_emoji  Running drush on '$hostenv_env_name' " >&2
+              echo "$hostenv_emoji  Running Drush in '$hostenv_env_name'" >&2
 
               case "$force" in
                 1)
@@ -239,14 +239,14 @@ in
 
               hostenv_ssh_exec "''${remote_drush[@]}" "$@"
             '';
-            description = "Run Drush on the remote Drupal";
+            description = "Run Drush in the selected Drupal environment.";
             executable = "drush";
             group = "Drupal";
             parsing = "passthrough";
             arguments = [
               {
                 name = "arguments";
-                description = "Arguments passed to Drush";
+                description = "Arguments to pass to Drush";
                 variadic = true;
                 completion = [ ];
               }
@@ -291,12 +291,12 @@ in
 
             if [ "$db_initialized" -eq 0 ] && [ ! -f "$restore_marker" ]; then
               if [ ! -f "$restore_plan" ]; then
-                echo "hostenv: restore plan not found; skipping Drupal restore"
+                echo "No migration restore plan found; skipping the Drupal restore."
               else
-                echo "hostenv: attempting Drupal restore"
+                echo "Restoring the Drupal database and files."
                 restore_snapshot="$(${pkgs.jq}/bin/jq -r '.snapshots["'"$restore_key"'"] // empty' "$restore_plan")"
                 if [ -z "$restore_snapshot" ]; then
-                  echo "hostenv: restore plan missing snapshot id for $restore_key" >&2
+                  echo "Migration restore plan has no snapshot for $restore_key." >&2
                   exit 1
                 fi
 
@@ -310,7 +310,7 @@ in
                 ${config.systemd.package}/bin/systemctl --user stop mysql.service || true
 
                 if ! "$restic_migrate" restore "$restore_snapshot" --target "$restore_tmp"; then
-                  echo "hostenv: restic restore failed" >&2
+                  echo "Restic restore failed" >&2
                   rm -rf "$restore_tmp"
                   exit 1
                 fi
@@ -319,7 +319,7 @@ in
                 if ! ${config.services.mysql.backups.scripts.restore}/bin/mysql-backup-restore \
                   "$restore_state_dir" \
                   "${config.services.mysql.dataDir}"; then
-                  echo "hostenv: mysql restore failed" >&2
+                  echo "MariaDB restore failed" >&2
                   rm -rf "$restore_tmp"
                   exit 1
                 fi
@@ -329,7 +329,7 @@ in
                   rm -rf "${cfg.filesDir}"
                   mkdir -p "${cfg.filesDir}"
                   if ! cp -a "$restore_files_dir/." "${cfg.filesDir}/"; then
-                    echo "hostenv: failed to restore Drupal files directory" >&2
+                    echo "Could not restore the Drupal public files." >&2
                     rm -rf "$restore_tmp"
                     exit 1
                   fi
@@ -340,7 +340,7 @@ in
                   rm -rf "${cfg.privateFilesDir}"
                   mkdir -p "${cfg.privateFilesDir}"
                   if ! cp -a "$restore_private_dir/." "${cfg.privateFilesDir}/"; then
-                    echo "hostenv: failed to restore Drupal private files directory" >&2
+                    echo "Could not restore the Drupal private files." >&2
                     rm -rf "$restore_tmp"
                     exit 1
                   fi
@@ -352,7 +352,7 @@ in
                   sleep 1
                 done
                 if [ ! -S "$mysql_runtime_dir/mysql.sock" ]; then
-                  echo "hostenv: mysql did not start after restore" >&2
+                  echo "MariaDB did not start after the restore" >&2
                   rm -rf "$restore_tmp"
                   exit 1
                 fi

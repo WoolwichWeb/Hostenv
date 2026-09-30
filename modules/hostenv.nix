@@ -486,7 +486,7 @@ let
                               apply =
                                 value:
                                 if value != null && lib.strings.hasInfix "\"" value then
-                                  throw "virtualHosts.<host>.security.csp may not contain double quotes"
+                                  throw "virtualHosts.<host>.security.csp may not contain double quotes."
                                 else
                                   value;
                             };
@@ -519,7 +519,7 @@ let
                               apply =
                                 value:
                                 if value != null && lib.strings.hasInfix "'" value then
-                                  throw "virtualHosts.<host>.security.reportTo may not contain single quotes"
+                                  throw "virtualHosts.<host>.security.reportTo may not contain single quotes."
                                 else
                                   value;
                             };
@@ -810,12 +810,10 @@ let
                 inputs.pog.overlays.default
               else
                 throw ''
-                  The hostenv CLI requires the Pog library but is not available.
+                  The Hostenv CLI cannot be built because the Pog input does not provide overlays.default. This is an internal Hostenv configuration error.
 
-                  See if this issue has been reported at:
+                  Report it at:
                   https://gitlab.com/woolwichweb/hostenv/-/boards#/
-
-                  If it has not, please report the issue and we will look into it.
                 '';
           in
           [ pogOver ];
@@ -915,9 +913,9 @@ let
           project = discoverProject modules;
         in
         if !builtins.isString environmentName then
-          throw "makeHostenv: environmentName must be a string"
+          throw "Environment name must be a string."
         else if !(builtins.hasAttr environmentName project.environments) then
-          throw "makeHostenv: environment '${environmentName}' is not defined by the project"
+          throw "Environment '${environmentName}' is not defined by the project."
         else
           evalHostenv (
             modules

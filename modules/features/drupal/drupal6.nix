@@ -43,7 +43,7 @@ in
 
         // config.services.drupal.databaseName
         if (!file_exists(${phpSingleQuoted mysqlSocket})) {
-          throw new Exception('Socket file at ${mysqlSocket} does not exist');
+          throw new Exception('MariaDB socket not found at ${mysqlSocket}.');
         }
         $db_url = ${phpSingleQuoted "mysqli://${config.hostenv.userName}@localhost/${cfg.databaseName}"};
         $db_prefix = ${phpSingleQuoted cfg.drupal6.databasePrefix};
@@ -66,8 +66,7 @@ in
         if (file_exists('${hostenvSettingsFile}')) {
           include '${hostenvSettingsFile}';
         } else {
-          echo('Could not find settings file');
-          throw new Exception('Could not find settings file: "${hostenvSettingsFile}"');
+          throw new Exception('Drupal settings file not found: "${hostenvSettingsFile}"');
         }
         // HOSTENV_SETTINGS_INCLUDE_END
       '';
@@ -128,7 +127,7 @@ in
         if cfg.drupal6.drushPackage != null then
           cfg.drupal6.drushPackage
         else
-          builtins.throw "services.drupal.majorVersion = 6 requires services.drupal.drupal6.drushPackage because this nixpkgs does not provide pkgs.drush8 or pkgs.drush";
+          builtins.throw "services.drupal.majorVersion = 6 requires services.drupal.drupal6.drushPackage because this nixpkgs version does not provide pkgs.drush8 or pkgs.drush.";
 
       drush =
         let
@@ -337,7 +336,7 @@ in
             | grep -qx "1"; then
             ${drush}/bin/drush updatedb -y
           else
-            echo "hostenv: Drupal 6 database is not initialized yet; skipping drush updatedb" >&2
+            echo "Drupal 6 database is not initialised; skipping 'drush updatedb'" >&2
           fi
         '';
 

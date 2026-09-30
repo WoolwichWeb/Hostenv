@@ -51,7 +51,7 @@ in
         if [ -n "''${HOSTENV_PROVIDER_HTTP_PORT:-}" ]; then
           socat TCP-LISTEN:"$HOSTENV_PROVIDER_HTTP_PORT",fork,reuseaddr UNIX-CONNECT:"$listen_socket" &
           socat_pid=$!
-          echo "hostenv-provider-service-dev: proxying http://localhost:$HOSTENV_PROVIDER_HTTP_PORT -> unix:$listen_socket" >&2
+          echo "Proxying http://localhost:$HOSTENV_PROVIDER_HTTP_PORT to Unix socket $listen_socket" >&2
         fi
 
         # The lack of parameters here is temporary, and will be resolved once
@@ -65,7 +65,7 @@ in
         apps.hostenv-provider-service = {
           type = "app";
           program = "${servicePkg}/bin/hostenv-provider-service";
-          meta.description = "Hostenv provider service (webhooks + admin UI) app";
+          meta.description = "Hostenv provider service development app";
         };
         hostenv.haskell.devPackages = packageNames;
         devshells.default.devshell.packages = [ servicePkg servicePkgDev ];

@@ -125,8 +125,8 @@ in
 
         secret_file=${lib.escapeShellArg secretFile}
         if [ ! -r "$secret_file" ]; then
-          echo "hostenv: Laravel requires a readable secret environment file at $secret_file" >&2
-          echo "hostenv: configure the provider SOPS key 'laravel_env' for this environment, project, or organisation" >&2
+          echo "⚠️ Laravel cannot start because its secret file is missing or unreadable: $secret_file" >&2
+          echo "ℹ️ Configure the 'laravel_env' provider secret for this environment, project, or organisation." >&2
           exit 1
         fi
 
@@ -337,11 +337,11 @@ in
         if [ "$db_initialized" -eq 0 ] && [ ! -f "$restore_marker" ] && [ -f "$restore_plan" ]; then
           restore_snapshot="$(${pkgs.jq}/bin/jq -r '.snapshots["'"$restore_key"'"] // empty' "$restore_plan")"
           if [ -z "$restore_snapshot" ]; then
-            echo "hostenv: restore plan missing snapshot id for $restore_key" >&2
+            echo "Migration restore plan has no snapshot for $restore_key." >&2
             exit 1
           fi
 
-          echo "hostenv: restoring Laravel database and storage"
+          echo "Restoring the Laravel database and storage."
           restore_tmp="$(mktemp -d)"
           restic_migrate="${
             config.services.restic.wrapperScripts.${migrateBackupName}
@@ -353,7 +353,7 @@ in
           ${config.systemd.package}/bin/systemctl --user stop mysql.service || true
 
           if ! "$restic_migrate" restore "$restore_snapshot" --target "$restore_tmp"; then
-            echo "hostenv: restic restore failed" >&2
+            echo "Restic restore failed" >&2
             rm -rf "$restore_tmp"
             exit 1
           fi
@@ -362,7 +362,7 @@ in
           if ! ${config.services.mysql.backups.scripts.restore}/bin/mysql-backup-restore \
             "$restore_state_dir" \
             "${config.services.mysql.dataDir}"; then
-            echo "hostenv: MariaDB restore failed" >&2
+            echo "MariaDB restore failed" >&2
             rm -rf "$restore_tmp"
             exit 1
           fi
@@ -372,7 +372,7 @@ in
             rm -rf ${lib.escapeShellArg cfg.storageDir}
             mkdir -p ${lib.escapeShellArg cfg.storageDir}
             if ! cp -a "$restore_storage_dir/." ${lib.escapeShellArg cfg.storageDir}/; then
-              echo "hostenv: Laravel storage restore failed" >&2
+              echo "Laravel storage restore failed" >&2
               rm -rf "$restore_tmp"
               exit 1
             fi
@@ -382,7 +382,7 @@ in
           touch "$restore_marker"
           rm -rf "$restore_tmp"
         elif [ "$db_initialized" -eq 0 ] && [ ! -f "$restore_plan" ]; then
-          echo "hostenv: restore plan not found; starting Laravel with an empty database"
+          echo "No migration restore plan found; starting Laravel with an empty database."
         fi
 
         if [ -f "$restore_plan" ]; then
@@ -629,7 +629,7 @@ in
         hostenv.cli.commands.artisan = {
           script = helpers: ''
             echo >&2
-            echo "$hostenv_emoji  Running Artisan on '$hostenv_env_name'" >&2
+            echo "$hostenv_emoji  Running Artisan in '$hostenv_env_name'" >&2
 
             remote_artisan=(artisan)
             if [ "$force" = 1 ]; then
@@ -638,14 +638,14 @@ in
 
             hostenv_ssh_exec "''${remote_artisan[@]}" "$@"
           '';
-          description = "Run Artisan on the remote Laravel environment.";
+          description = "Run Artisan in the selected Laravel environment.";
           executable = "artisan";
           group = "Laravel";
           parsing = "passthrough";
           arguments = [
             {
               name = "arguments";
-              description = "Arguments passed to Artisan";
+              description = "Arguments to pass to Artisan";
               variadic = true;
               completion = [ ];
             }
@@ -656,8 +656,8 @@ in
           (lib.mkOrder 1 ''
             laravel_secret_file=${lib.escapeShellArg secretFile}
             if [ ! -r "$laravel_secret_file" ]; then
-              echo "hostenv: Laravel activation requires a readable secret file at $laravel_secret_file" >&2
-              echo "hostenv: configure the provider SOPS key 'laravel_env' for this environment, project, or organisation" >&2
+              echo "⚠️ Laravel cannot start because its secret file is missing or unreadable: $laravel_secret_file" >&2
+              echo "ℹ️ Configure the 'laravel_env' provider secret for this environment, project, or organisation." >&2
               exit 1
             fi
           '')
@@ -696,7 +696,7 @@ in
               sleep 1
             done
             if [ ! -S "$mysql_sock" ]; then
-              echo "hostenv: MariaDB did not create $mysql_sock" >&2
+              echo "MariaDB did not create its socket at $mysql_sock" >&2
               exit 1
             fi
 
@@ -706,11 +706,11 @@ in
               # unconditionally also repairs the case where a stale socket was
               # left behind while the service itself is inactive.
               if ! ${config.systemd.package}/bin/systemctl --user start redis.service; then
-                echo "hostenv: failed to start Valkey redis.service" >&2
+                echo "Could not start Valkey (redis.service)." >&2
                 exit 1
               fi
               if [ ! -S "$redis_sock" ]; then
-                echo "hostenv: Valkey reported ready without creating $redis_sock" >&2
+                echo "Valkey started without creating its socket at $redis_sock" >&2
                 exit 1
               fi
             ''}

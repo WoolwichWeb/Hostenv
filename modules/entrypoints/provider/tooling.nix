@@ -13,7 +13,7 @@ let
   hostenvInput = hostenvInputs.requireInput {
     inherit inputs;
     name = "hostenv";
-    context = "provider tooling";
+    context = "the provider tooling configuration";
   };
   providerRoot = hostenvInput.outPath + "/provider";
 in

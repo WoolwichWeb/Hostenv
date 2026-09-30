@@ -342,7 +342,8 @@ in
           ## nginx activation script.
     
           if [ ! -n "$XDG_CONFIG_HOME" ]; then
-            echo '$XDG_CONFIG_HOME is not set, cannot continue'
+            echo '⚠️ XDG_CONFIG_HOME is not set.' >&2
+            echo 'ℹ️ Set it before enabling nginx reloads.' >&2
             exit 1
           fi
     
@@ -355,7 +356,8 @@ in
               rm "$XDG_CONFIG_HOME"/nginx.conf
             else
               # Otherwise the file exists, but is not a symlink.
-              echo "Couldn't unlink old 'nginx.conf' at '$XDG_CONFIG_HOME/nginx.conf'. Please check and delete it manually, then try again."
+              echo "⚠️ Could not remove '$XDG_CONFIG_HOME/nginx.conf'." >&2
+              echo "ℹ️ Delete it manually, then try again." >&2
               exit 1
             fi
           fi

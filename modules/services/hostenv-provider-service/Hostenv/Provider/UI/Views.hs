@@ -12,7 +12,6 @@ module Hostenv.Provider.UI.Views
   ) where
 
 import Data.List (sortOn)
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Lucid
@@ -24,13 +23,13 @@ import Hostenv.Provider.Gitlab (GitlabProject(..))
 
 loginPage :: AppConfig -> Maybe Text -> Html ()
 loginPage cfg mMsg =
-  page cfg "Hostenv Provider" $ do
+  page cfg "Hostenv provider" $ do
     maybe mempty alertBox mMsg
-    h1_ "Hostenv Provider"
+    h1_ "Hostenv provider"
     case cfg.appGitlabSecrets of
-      Nothing -> p_ "GitLab OAuth is not configured for this provider."
+      Nothing -> p_ "GitLab sign-in is not configured for this provider."
       Just _ -> do
-        p_ "Sign in with GitLab to manage projects."
+        p_ "Sign in with GitLab to manage provider projects."
         loginButtons
   where
     AppConfig { appGitlabHosts = hosts } = cfg
@@ -49,7 +48,7 @@ accessDeniedPage :: AppConfig -> Html ()
 accessDeniedPage cfg =
   page cfg "Access denied" $ do
     h1_ "Access denied"
-    p_ "This account does not have the admin role."
+    p_ "Your account does not have administrator access to this provider."
     a_ [class_ "btn subtle", href_ (uiPath cfg "/logout")] "Sign out"
 
 indexPage :: AppConfig -> SessionInfo -> [ProjectRow] -> Html ()
@@ -69,16 +68,15 @@ indexPage cfg sess projects =
 projectListHtml :: [ProjectRow] -> Html ()
 projectListHtml projects =
   if null projects
-    then p_ "No projects added yet."
+    then p_ "No projects have been added."
     else
       let rows = mconcat (map renderProject (sortOn (\ProjectRow { projectFlakeInput = input } -> input) projects))
        in table_ $ do
             thead_ $
               tr_ $ do
-                th_ "Input"
-                th_ "Repo"
-                th_ "Host"
-                th_ "Webhook hash"
+                th_ "Flake input"
+                th_ "Repository"
+                th_ "GitLab host"
             tbody_ rows
   where
     renderProject :: ProjectRow -> Html ()
@@ -87,13 +85,11 @@ projectListHtml projects =
             { projectFlakeInput = flakeInput
             , projectRepoPath = repoPath
             , projectGitHost = gitHost
-            , projectHash = mHash
             } = p
        in tr_ $ do
             td_ $ code_ (toHtml flakeInput)
             td_ (toHtml repoPath)
             td_ (toHtml gitHost)
-            td_ $ code_ (toHtml (fromMaybe "" mHash))
 
 addProjectPage :: AppConfig -> SessionInfo -> [GitlabProject] -> Html ()
 addProjectPage cfg sess repos =
@@ -101,14 +97,15 @@ addProjectPage cfg sess repos =
     div_ [class_ "header"] $ do
       h1_ "Add project"
       div_ [class_ "actions"] $
-        a_ [class_ "btn subtle", href_ (uiPath cfg "/")] "Back"
+        a_ [class_ "btn subtle", href_ (uiPath cfg "/")] "Back to projects"
+    p_ "Choose a GitLab repository. Leave the organisation and project fields blank to use the repository path."
     form_ [method_ "post", class_ "card"] $ do
       input_ [type_ "hidden", name_ "csrf", value_ csrfToken]
       label_ "Repository"
       select_ [name_ "repo_id"] (mconcat (map renderRepoOption repos))
-      label_ "Organisation"
-      input_ [type_ "text", name_ "org", placeholder_ "org"]
-      label_ "Project"
+      label_ "Organisation (optional)"
+      input_ [type_ "text", name_ "org", placeholder_ "organisation"]
+      label_ "Project name (optional)"
       input_ [type_ "text", name_ "project", placeholder_ "project"]
       button_ [class_ "btn", type_ "submit"] "Add project"
   where
@@ -120,16 +117,17 @@ addProjectPage cfg sess repos =
 
 successPage :: AppConfig -> Text -> Html ()
 successPage cfg msg =
-  page cfg "Success" $ do
+  page cfg "Project added" $ do
     h1_ "Project added"
     p_ (toHtml msg)
     a_ [class_ "btn", href_ (uiPath cfg "/")] "Back to projects"
 
 errorPage :: AppConfig -> Text -> Html ()
 errorPage cfg msg =
-  page cfg "Error" $ do
+  page cfg "Something went wrong" $ do
+    h1_ "Something went wrong"
     alertBox msg
-    a_ [class_ "btn subtle", href_ (uiPath cfg "/")] "Back"
+    a_ [class_ "btn subtle", href_ (uiPath cfg "/")] "Back to projects"
 
 alertBox :: Text -> Html ()
 alertBox msg =

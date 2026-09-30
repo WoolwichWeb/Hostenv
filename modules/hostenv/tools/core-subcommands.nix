@@ -17,13 +17,13 @@
           script = helpers: ''
             exec ssh $hostenv_ssh_tty "$hostenv_user"@"$hostenv_host" "$@"
           '';
-          description = "Connect to the remote hostenv environment over SSH.";
+          description = "Open an SSH session in the selected environment.";
           group = "Remote access";
           parsing = "passthrough";
           arguments = [
             {
               name = "arguments";
-              description = "Arguments passed to ssh";
+              description = "Arguments to pass to ssh";
               variadic = true;
               completion = [ ];
             }
@@ -34,13 +34,13 @@
           script = helpers: ''
             hostenv_ssh_exec journalctl --user -xe "$@"
           '';
-          description = "View remote application logs.";
+          description = "Show application logs for the selected environment.";
           group = "Remote access";
           parsing = "passthrough";
           arguments = [
             {
               name = "arguments";
-              description = "Arguments passed to journalctl";
+              description = "Arguments to pass to journalctl";
               variadic = true;
               completion = [ ];
             }
@@ -64,13 +64,13 @@
                 gum confirm $default --affirmative="Deploy" --negative="Cancel" "$deploy_msg" || exit 67
                 unset deploy_msg
               else
-                debug "--force detected, skipping confirmation"
+                debug "--force is set; skipping confirmation"
               fi
 
               debug 'mkdir -p /home/'"$hostenv_user"'/code/project'
 
               ${spinner {
-                title = "Preparing remote directory for project code...";
+                title = "Preparing the remote project directory...";
                 variant = "prepare";
                 showError = true;
                 command = ''
@@ -81,7 +81,7 @@
               project_root="$(git rev-parse --show-toplevel)"
               debug "rsync to $hostenv_user@$hostenv_host:/home/$hostenv_user/code/project/"
               ${spinner {
-                title = "Deploying project code...";
+                title = "Uploading project code...";
                 variant = "upload";
                 showError = true;
                 command = ''
@@ -91,7 +91,7 @@
               }}
 
               # Remote build (with FOD auto-fix).
-              debug "ignoring hostenv_ssh_tty='$hostenv_ssh_tty' while building and activating remote. Using '-T'"
+              debug "Ignoring hostenv_ssh_tty='$hostenv_ssh_tty' while building and activating the remote environment; using '-T'."
               ${spinner {
                 title = "Building $currentBranch...";
                 variant = "build";
@@ -130,12 +130,12 @@
                                   if [ -f "$target" ]; then
                                     sed -i "s|\"$specified_hash\"|\"$got_hash\"|" "$target"
                                   else
-                                    echo "ERROR: $target not found." >&2
+                                    echo "$target was not found on the remote host." >&2
                                     exit 1
                                   fi
 
                                   if [ "$tries" -ge 10 ]; then
-                                    echo "ERROR: Too many FOD fix attempts (>=10). Bailing." >&2
+                                    echo "Could not update fixed-output hashes after 10 attempts." >&2
                                     exit 1
                                   fi
                                   continue
@@ -157,7 +157,7 @@
                 title = "Updating local hostenv.nix...";
                 variant = "sync";
                 finish = "sleep";
-                successTitle = "✅ Deploy complete";
+                successTitle = "✅ Deployment complete";
                 showError = true;
                 command = ''
                   rsync -az \
@@ -168,8 +168,8 @@
 
             '';
           description = ''
-            Deploy your local codebase to the remote hostenv environment.
-            Caution: Another developer could clobber your deployment if this is not used with care.'';
+            Deploy the current branch to the selected environment.
+            A later deployment by another developer can replace it.'';
           group = "Deployment";
         };
 
@@ -177,7 +177,7 @@
           script = helpers: ''
             jq <<< "$hostenv_environment"
           '';
-          description = "Print hostenv environment information as JSON (defaults to your current environment).";
+          description = "Print information about the selected environment as JSON.";
           group = "Environment information";
         };
 
@@ -185,7 +185,7 @@
           script = helpers: ''
             jq <<< ${lib.escapeShellArg (builtins.toJSON config.exportedEnvironments)}
           '';
-          description = "Print hostenv environment information as JSON (for all environments).";
+          description = "Print information about all configured environments as JSON.";
           group = "Environment information";
         };
 
@@ -205,7 +205,7 @@
                 '';
               }}
             '';
-          description = "Download files from hostenv environment. Downloads to 'files/'. See also: files-up.";
+          description = "Download public and private files from the selected environment into 'files/'.";
           group = "File transfer";
         };
 
@@ -225,7 +225,7 @@
                 '';
               }}
             '';
-          description = "Upload files to hostenv environment from 'files/'. See also: files-dump.";
+          description = "Upload public and private files from 'files/' to the selected environment.";
           group = "File transfer";
         };
       };

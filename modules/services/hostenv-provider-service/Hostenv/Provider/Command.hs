@@ -37,7 +37,7 @@ runCommandOrDie cfg spec = do
   case res of
     Right _ -> pure ()
     Left err -> do
-      hPutStrLn stderr ("hostenv-provider-service: " <> T.unpack (renderCommand err.errSpec))
+      hPutStrLn stderr ("hostenv-provider-service: command failed: " <> T.unpack (renderCommand err.errSpec))
       hPutStrLn stderr (T.unpack err.errStderr)
       exitFailure
 
@@ -46,12 +46,22 @@ renderCommand spec = T.unwords (spec.cmdName : spec.cmdArgs)
 
 commandErrorText :: CommandError -> T.Text
 commandErrorText cmdErr =
-  T.unlines
-    [ "Command failed: " <> renderCommand cmdErr.errSpec
-    , "Exit: " <> T.pack (show cmdErr.errExit)
-    , "stdout:\n" <> cmdErr.errStdout
-    , "stderr:\n" <> cmdErr.errStderr
-    ]
+  let stdoutText = T.strip cmdErr.errStdout
+      stderrText = T.strip cmdErr.errStderr
+      exitStatus =
+        case cmdErr.errExit of
+          ExitSuccess -> "0"
+          ExitFailure code -> T.pack (show code)
+      details
+        | not (T.null stderrText) = ["Error output:\n" <> stderrText]
+        | not (T.null stdoutText) = ["Output:\n" <> stdoutText]
+        | otherwise = []
+   in T.unlines
+        ( [ "Command failed: " <> renderCommand cmdErr.errSpec
+          , "Exit status: " <> exitStatus
+          ]
+            <> details
+        )
 
 exitCodeToInt :: ExitCode -> Maybe Int
 exitCodeToInt ExitSuccess = Just 0

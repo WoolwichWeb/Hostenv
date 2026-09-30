@@ -42,7 +42,7 @@ addProjectFlow cfg sess repoId orgInput projectInput = withDb cfg $ \conn -> do
   let SessionInfo { sessionUser = User { userId = userIdVal } } = sess
   tokenRows <- query conn "SELECT git_host, token FROM gitlab_tokens WHERE user_id = ? AND project_id IS NULL ORDER BY created_at DESC LIMIT 1" (Only userIdVal)
   case tokenRows of
-    [] -> pure (Left "Missing GitLab token for user")
+    [] -> pure (Left "No GitLab access token is available. Sign out, then sign in again.")
     ((host, token):_) -> do
       projectInfo <- fetchGitlabProject cfg host token repoId
       case projectInfo of
@@ -54,7 +54,7 @@ addProjectFlow cfg sess repoId orgInput projectInput = withDb cfg $ \conn -> do
           let org = if T.strip orgCandidate == "" then sanitizeName defaultOrg else sanitizeName orgCandidate
           let proj = if T.strip projCandidate == "" then sanitizeName defaultProject else sanitizeName projCandidate
           if org == "" || proj == ""
-            then pure (Left "Organisation and project names must be non-empty")
+            then pure (Left "Hostenv could not determine a valid organisation and project name. Enter both values and try again.")
             else do
               let flakeInput = org <> "__" <> proj
               [projectRow] <- query conn
@@ -88,7 +88,7 @@ addProjectFlow cfg sess repoId orgInput projectInput = withDb cfg $ \conn -> do
                                   maybeWriteSecret cfg projHash org proj secret
                                   let AppConfig { appWebhookHost = webhookHost } = cfg
                                   let hookUrl = "https://" <> webhookHost <> "/webhook/" <> projHash
-                                  pure (Right ("Webhook configured at " <> hookUrl))
+                                  pure (Right ("GitLab webhook configured at " <> hookUrl))
 
 ensureWebhook :: AppConfig -> Connection -> Text -> Text -> Int64 -> ProjectRow -> Text -> IO (Either Text (Text, Maybe Int64))
 ensureWebhook cfg conn host token repoId projectRow projHash = do
@@ -120,7 +120,7 @@ regenerateFlake cfg projects = do
   let templatePath = resolvePath cfg flakeTemplate
   exists <- doesFileExist templatePath
   if not exists
-    then pure (Left ("flake template not found: " <> T.pack templatePath))
+    then pure (Left ("Flake template not found: " <> T.pack templatePath <> ". Check the provider-service configuration."))
     else do
       templateText <- T.pack <$> readFile templatePath
       let inputs = [ (input, projectInputUrl p) | p@ProjectRow { projectFlakeInput = input } <- projects ]

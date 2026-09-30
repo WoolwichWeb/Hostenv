@@ -116,8 +116,7 @@ in
               if (file_exists('${hostenvSettingsFile}')) {
                 include '${hostenvSettingsFile}';
               } else {
-                echo('Could not find settings file');
-                throw new Exception('Could not find settings file: "${hostenvSettingsFile}"');
+                throw new Exception('Drupal settings file not found: "${hostenvSettingsFile}"');
               }
               // HOSTENV_SETTINGS_INCLUDE_END
             '';
@@ -203,7 +202,7 @@ in
           # Guard that ensures the database server is accessible.
           (lib.mkBefore ''
             if (!file_exists('${config.hostenv.runtimeDir}/mysql.sock')) {
-              throw new Exception('Socket file at \'${config.hostenv.runtimeDir}/mysql.sock\' does not exist');
+              throw new Exception('MariaDB socket not found at \'${config.hostenv.runtimeDir}/mysql.sock\'.');
             }
           '')
 
@@ -285,19 +284,19 @@ in
               RS
                   rsync -az --delete "$hostenv_user@$hostenv_host:$dest/" ../config/sync/
                   ssh -q "$hostenv_user"@"$hostenv_host" "$cleanup_command" || true
-                  green "🗂️  Config exported from '$hostenv_env_name'"
+                  green "🗂️  Configuration exported from '$hostenv_env_name'"
                 else
                   ssh -q "$hostenv_user"@"$hostenv_host" "$cleanup_command" || true
-                  die "Config export failed" 1
+                  die "Drupal configuration export failed." 1
                 fi
             '';
-            description = "Get a config export from the remote Drupal environment and copy it to your local 'config/sync' directory.";
+            description = "Export Drupal configuration from the selected environment into local 'config/sync/'.";
             group = "Drupal";
             parsing = "passthrough";
             arguments = [
               {
                 name = "arguments";
-                description = "Arguments passed to drush cex";
+                description = "Arguments to pass to 'drush cex'";
                 variadic = true;
                 completion = [ ];
               }
@@ -327,7 +326,7 @@ in
             | grep -qx "1"; then
             ${drush}/bin/drush updatedb --cache-clear --yes
           else
-            echo "hostenv: Drupal database is not initialized yet; skipping drush updatedb" >&2
+            echo "Drupal database is not initialised; skipping 'drush updatedb'" >&2
           fi
         '';
 

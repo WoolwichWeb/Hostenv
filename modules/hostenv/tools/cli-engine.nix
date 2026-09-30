@@ -23,9 +23,9 @@
 
       defaultEnvironmentDescription =
         if config.defaultEnvironment == null then
-          "Target environment (defaults to the current branch)"
+          "Environment to use (defaults to the current branch)"
         else
-          "Target environment (defaults to the current branch or '${config.defaultEnvironment}')";
+          "Environment to use (defaults to the current branch, or '${config.defaultEnvironment}' when no branch is available)";
 
       rootPersistentFlags = [
         {
@@ -44,7 +44,7 @@
         {
           name = "tty-mode";
           short = "";
-          description = "TTY mode for remote commands";
+          description = "TTY handling for remote commands";
           argument = "MODE";
           default = "auto";
           completion = ttyModeCandidates;
@@ -71,13 +71,13 @@
               checkedCommand =
                 if unsafeTokens != [ ] then
                   throw ''
-                    hostenv: `${cliProgramName} ${builtins.concatStringsSep " " rawCommandPath}` uses shell-unsafe command names or aliases: ${builtins.concatStringsSep ", " (map builtins.toJSON unsafeTokens)}
+                    `${cliProgramName} ${builtins.concatStringsSep " " rawCommandPath}` contains invalid command names or aliases: ${builtins.concatStringsSep ", " (map builtins.toJSON unsafeTokens)}
 
                     Command names and aliases may contain only letters, numbers, dots, underscores, plus signs, and hyphens.
                   ''
                 else if flagCollisions != { } then
                   throw ''
-                    hostenv: flags collide in `${cliProgramName} ${builtins.concatStringsSep " " rawCommandPath}` after Pog converts their names to Bash variables:
+                    These flags in `${cliProgramName} ${builtins.concatStringsSep " " rawCommandPath}` map to the same shell variable:
                     ${lib.concatStringsSep "\n" (
                       lib.mapAttrsToList (
                         variable: flags:
@@ -87,7 +87,6 @@
                       ) flagCollisions
                     )}
 
-                    Pog replaces hyphens with underscores when it creates Bash variable names.
                     Rename one flag from each line above.
                   ''
                 else
@@ -131,12 +130,11 @@
           collected
         else
           throw ''
-            hostenv: command paths collide after Pog converts them to Bash function names:
+            These command paths map to the same shell function:
             ${lib.concatMapStringsSep "\n" (
               paths: "  - ${builtins.concatStringsSep " and " (map showPath paths)}"
             ) (builtins.attrValues collisions)}
 
-            Pog replaces hyphens with underscores and uses two underscores between path segments.
             Rename one command from each line above.
           '';
 
@@ -153,9 +151,9 @@
           collisions = builtins.filter (name: builtins.elem name reservedNames) names;
         in
         if builtins.length names != builtins.length (lib.unique names) then
-          throw "hostenv: command executable names must be unique"
+          throw "Command executable names must be unique."
         else if collisions != [ ] then
-          throw "hostenv: command executable names are reserved by the CLI: ${builtins.concatStringsSep ", " collisions}"
+          throw "These executable names are reserved by the Hostenv CLI: ${builtins.concatStringsSep ", " collisions}."
         else
           wrappers;
 
@@ -170,9 +168,9 @@
           result.value
         else
           throw ''
-            hostenv: config.exportedEnvironments must be JSON-serializable.
+            config.exportedEnvironments must be JSON-serialisable.
 
-            Non-JSON data should be stored elsewhere (e.g. config.hostenv.*).
+            Store non-JSON data elsewhere, for example under config.hostenv.*.
           '';
 
       # These are static Carapace completion records. No Hostenv process or jq
@@ -235,7 +233,7 @@
               case "$hostenv_ssh_tty" in
                 -tt) ssh -tt "$hostenv_user@$hostenv_host" ;;
                 -T) ssh -T "$hostenv_user@$hostenv_host" ;;
-                *) die "unexpected SSH TTY flag: '$hostenv_ssh_tty'" 2 ;;
+                *) die "Unexpected SSH TTY flag: '$hostenv_ssh_tty'." 2 ;;
               esac
               return
             fi
@@ -244,7 +242,7 @@
             case "$hostenv_ssh_tty" in
               -tt) ssh -tt "$hostenv_user@$hostenv_host" "$remote_command" ;;
               -T) ssh -T "$hostenv_user@$hostenv_host" "$remote_command" ;;
-              *) die "unexpected SSH TTY flag: '$hostenv_ssh_tty'" 2 ;;
+              *) die "Unexpected SSH TTY flag: '$hostenv_ssh_tty'." 2 ;;
             esac
           }
           hostenv_ssh_exec() {
@@ -252,7 +250,7 @@
               case "$hostenv_ssh_tty" in
                 -tt) exec ssh -tt "$hostenv_user@$hostenv_host" ;;
                 -T) exec ssh -T "$hostenv_user@$hostenv_host" ;;
-                *) die "unexpected SSH TTY flag: '$hostenv_ssh_tty'" 2 ;;
+                *) die "Unexpected SSH TTY flag: '$hostenv_ssh_tty'." 2 ;;
               esac
             fi
             local remote_command
@@ -260,7 +258,7 @@
             case "$hostenv_ssh_tty" in
               -tt) exec ssh -tt "$hostenv_user@$hostenv_host" "$remote_command" ;;
               -T) exec ssh -T "$hostenv_user@$hostenv_host" "$remote_command" ;;
-              *) die "unexpected SSH TTY flag: '$hostenv_ssh_tty'" 2 ;;
+              *) die "Unexpected SSH TTY flag: '$hostenv_ssh_tty'." 2 ;;
             esac
           }
           set -o pipefail
@@ -279,7 +277,7 @@
           hostenv_environment_or_null() { jq -c --arg e "$1" '.[$e] // null' <<< ${lib.escapeShellArg environmentsJson}; }
           hostenv_environment="$(hostenv_environment_or_null "$hostenv_env_name")"
           if ${var.empty "hostenv_environment"} || [ "$hostenv_environment" = "null" ]; then
-            die "Unknown environment: $hostenv_env_name" 2
+            die "Environment '$hostenv_env_name' is not configured. Run 'hostenv environments' to list available environments." 2
           fi
 
           hostenv_user="$(jq -r '.hostenv.userName' <<< "$hostenv_environment")"
@@ -305,7 +303,7 @@
               hostenv_ssh_tty="-T"
               ;;
             *)
-              die "invalid --tty-mode value: '$tty_mode' (use: auto|on|off)" 2
+              die "Invalid value for --tty-mode: '$tty_mode'. Use auto, on, or off." 2
               ;;
           esac
           debug "tty_mode=$tty_mode ssh_flag=$hostenv_ssh_tty stdin_is_tty=$([ -t 0 ] && echo yes || echo no) stdout_is_tty=$([ -t 1 ] && echo yes || echo no)"
@@ -318,15 +316,15 @@
           [global]
           hide_env_diff = true
           EOF
-            bold "Note: Created a direnv config file at: '$hostenv_direnv_config'"
-            green "You may change the settings there and hostenv will not overwrite them"
-            echo
+            bold "Created a direnv configuration file at '$hostenv_direnv_config'." >&2
+            green "Hostenv will not overwrite this file." >&2
+            echo >&2
           fi
 
           banner() {
             echo
             cat <<BANNER | boxes -d whirly
-          $hostenv_emoji  Working in hostenv environment: "$hostenv_env_name" ($hostenv_type)
+          $hostenv_emoji  Environment: "$hostenv_env_name" ($hostenv_type)
 
           Commands: ${
             builtins.concatStringsSep ", " (map (wrapper: wrapper.name) standaloneWrappers ++ [ "hostenv" ])
@@ -395,7 +393,7 @@
       # Pog generates the parser, help, and completion files from this tree.
       hostenvCli = pog {
         name = cliProgramName;
-        description = "Interact with your hosting environments.";
+        description = "Manage your Hostenv environments.";
         version = "0.2.0";
         commands = lib.mapAttrsToList (toPogCommand [ ]) commands;
         persistentFlags = rootPersistentFlags;

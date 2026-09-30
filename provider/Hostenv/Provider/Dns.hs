@@ -85,13 +85,13 @@ renderLookupFailure = \case
 
 renderQueryFailureReason :: DnsQueryFailureReason -> Text
 renderQueryFailureReason = \case
-    DnsQueryExecutionFailure message -> "could not execute dig (" <> message <> ")"
+    DnsQueryExecutionFailure message -> "could not run dig (" <> message <> ")"
     DnsQueryExitFailure code stderrText ->
         "dig exited "
             <> T.pack (show code)
             <> if T.null stderrText then "" else " (" <> stderrText <> ")"
     DnsQueryResponseFailure status -> "DNS server returned " <> status
-    DnsQueryStatusMissing -> "dig returned no parseable DNS status"
+    DnsQueryStatusMissing -> "dig returned a response without a DNS status"
 
 {- | Cache successful DNS infrastructure discovery for the duration of a
 command. Failed discovery is deliberately not cached so a later observation

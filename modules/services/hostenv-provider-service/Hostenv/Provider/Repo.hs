@@ -39,7 +39,7 @@ ensureProviderRepo cfg = do
           let srcContents = repoSource </> "."
           runCommandOrDie cfg (CommandSpec "cp" ["-a", "-n", T.pack srcContents, T.pack dataDir] dataDir)
         else do
-          hPutStrLn stderr "hostenv-provider-service: repoSource not found"
+          hPutStrLn stderr ("hostenv-provider-service: provider repository source not found: " <> repoSource)
           exitFailure
   hasState <- doesFileExist statePath
   if hasState

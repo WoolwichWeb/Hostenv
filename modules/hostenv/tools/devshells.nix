@@ -59,14 +59,16 @@
                         : # OK
                       else
                         printf '%s\n\n%s\n' \
-                  "⚠️  Cannot load hostenv — '$gitRef' is not a hostenv environment" \
-                  "ℹ️  Add 'environments.$gitRef.enable = true;' to your hostenv.nix if you would like to make it a hostenv environment."
+                          "⚠️ Hostenv is not configured for branch '$gitRef'." \
+                          "ℹ️ To use this branch, add 'environments.$gitRef.enable = true;' to hostenv.nix." >&2
                       fi
                     else
                       if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-                        echo "⚠️  Cannot load hostenv — git is in detached HEAD state"
+                        echo "⚠️ Hostenv cannot select an environment because Git is in detached HEAD state." >&2
+                        echo "ℹ️ Check out a configured branch." >&2
                       else
-                        echo "⚠️  Cannot load hostenv — this is not a git repository"
+                        echo "⚠️ Hostenv cannot select an environment because this directory is not a Git repository." >&2
+                        echo "ℹ️ Run the development shell from the project repository." >&2
                       fi
                     fi
                 '';

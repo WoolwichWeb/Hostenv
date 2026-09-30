@@ -498,8 +498,8 @@ let
     builtins.any (
       assertion: assertion.assertion == false && lib.strings.hasInfix messageNeedle assertion.message
     ) (systemConfig.config.assertions or [ ]);
-  reservedProviderDeployOk = hasAssertionMessage "provider.deploy is reserved for provider-service node agent wiring" systemDeployReserved;
-  reservedServiceResolutionOk = hasAssertionMessage "provider.serviceResolution is reserved for provider-service secret wiring" systemServiceResolutionReserved;
+  reservedProviderDeployOk = hasAssertionMessage "provider.deploy is not supported yet" systemDeployReserved;
+  reservedServiceResolutionOk = hasAssertionMessage "provider.serviceResolution is not supported yet" systemServiceResolutionReserved;
   missingCacheSettingsOk =
     hasAssertionMessage "provider.cache.url must be configured when provider.cache.enable is true" systemCacheMissing
     && hasAssertionMessage "provider.cache.publicKey must be configured when provider.cache.enable is true" systemCacheMissing;

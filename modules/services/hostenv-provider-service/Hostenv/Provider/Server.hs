@@ -39,7 +39,7 @@ runServer cfg = do
   let AppConfig { appListenSocket = listenSocket } = cfg
   webhookLock <- newMVar ()
   sock <- openUnixSocket listenSocket
-  let settings = setBeforeMainLoop (putStrLn "hostenv-provider-service: listening") defaultSettings
+  let settings = setBeforeMainLoop (putStrLn ("hostenv-provider-service: listening on " <> listenSocket)) defaultSettings
   runSettingsSocket settings sock (app webhookLock cfg)
 
 app :: MVar () -> AppConfig -> Application

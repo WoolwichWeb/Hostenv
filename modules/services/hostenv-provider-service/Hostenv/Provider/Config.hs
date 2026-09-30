@@ -130,15 +130,15 @@ readProviderConfig :: FilePath -> IO ProviderConfigFile
 readProviderConfig path = do
   exists <- doesFileExist path
   if not exists
-    then dieWith ("provider config file not found: " <> path)
+    then dieWith ("Configuration file not found: " <> path)
     else do
       bytes <- BL.readFile path
       case A.eitherDecode' bytes of
-        Left err -> dieWith ("failed to parse provider config file " <> path <> ": " <> err)
+        Left err -> dieWith ("Could not read provider configuration file " <> path <> ": " <> err)
         Right cfg -> pure cfg
 
 
 dieWith :: String -> IO a
 dieWith msg = do
-  hPutStrLn stderr msg
+  hPutStrLn stderr ("hostenv-provider-service: " <> msg)
   exitFailure

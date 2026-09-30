@@ -82,7 +82,7 @@
                     );
                   default = null;
                   description = ''
-                    Options to pass to rclone to control its behavior.
+                    Options to pass to rclone to control its behaviour.
                     See <https://rclone.org/docs/#options> for
                     available options. When specifying option names, strip the
                     leading `--`. To set a flag such as
@@ -341,8 +341,8 @@
                   default = true;
                   description = ''
                     Whether to generate and add a script to the system path, that has the same environment variables set
-                    as the systemd service. This can be used to e.g. mount snapshots or perform other opterations, without
-                    having to manually specify most options.
+                    as the systemd service. Use it to mount snapshots or perform other operations without
+                    having to specify most options manually.
                   '';
                 };
     
@@ -438,7 +438,11 @@
                       else
                         # Without an environmentFile we need exactly one repo source.
                         repoSourceCount == 1;
-                  message = "services.restic.backups.${name}: specify exactly one repository source (repository or repositoryFile); environmentFile may accompany at most one of them.";
+                  message = ''
+                    services.restic.backups.${name}: set either repository or repositoryFile, not both.
+
+                    If environmentFile supplies the repository, neither is required.
+                  '';
                 }
                 {
                   assertion =
@@ -447,11 +451,11 @@
                       commandBackup = backup.command != [ ];
                     in
                       !(fileBackup && commandBackup);
-                  message = "services.restic.backups.${name}: cannot do both a command backup and a file backup at the same time.";
+                  message = "services.restic.backups.${name}: configure either command or file paths (paths or dynamicFilesFrom), not both.";
                 }
                 {
                   assertion = (backup.passwordFile != null) || (backup.environmentFile != null);
-                  message = "services.restic.backups.${name}: passwordFile or environmentFile must be set";
+                  message = "services.restic.backups.${name}: set passwordFile or environmentFile.";
                 }
               ])
               cfg.backups

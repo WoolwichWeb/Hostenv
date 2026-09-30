@@ -174,11 +174,11 @@ in
         assertions = [
           {
             assertion = !deployHasSettings;
-            message = "provider.deploy is reserved for provider-service node agent wiring and is not supported by provider-common yet.";
+            message = "provider.deploy is not supported yet. Leave provider.deploy at its default settings.";
           }
           {
             assertion = serviceResolutionCfg == null;
-            message = "provider.serviceResolution is reserved for provider-service secret wiring and is not supported by provider-common yet.";
+            message = "provider.serviceResolution is not supported yet. Leave provider.serviceResolution unset.";
           }
           {
             assertion = (!cacheCfg.enable) || (cacheCfg.url != null && cacheCfg.url != "");

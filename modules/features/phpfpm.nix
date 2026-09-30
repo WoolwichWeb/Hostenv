@@ -65,13 +65,13 @@
           ''
     
     
-            🔎 If your version of PHP is supported by this project:
-            https://github.com/fossar/nix-phps
-            Add ‘phps.url = "github:fossar/nix-phps";’ to your Nix Flake's inputs and try again.
+            If nix-phps supports this PHP version, add
+            'phps.url = "github:fossar/nix-phps";'
+            to the inputs in flake.nix, then try again.
           ''
         else
           "";
-      phpsPackage = cfg_: phps.packages.${pkgs.stdenv.system}."php${version cfg_}" or (throw ("PHP version ${cfg_.phpVersion} is not available" + phpVersionError cfg_));
+      phpsPackage = cfg_: phps.packages.${pkgs.stdenv.system}."php${version cfg_}" or (throw ("PHP version ${cfg_.phpVersion} is not available." + phpVersionError cfg_));
       nixpkgsPackageExists = cfg_: (builtins.tryEval (toString pkgs."php${version cfg_}")).success;
       customPhpPackage = cfg_: if ((builtins.hasAttr "php${version cfg_}" pkgs) && nixpkgsPackageExists cfg_) then pkgs."php${version cfg_}" else phpsPackage cfg_;
     
