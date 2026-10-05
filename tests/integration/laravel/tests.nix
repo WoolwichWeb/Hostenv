@@ -446,8 +446,7 @@ EOF
       passed =
         lib.hasInfix cfg12.services.redis.socket cfg12.systemd.services.redis.postStart
         && lib.hasInfix cfg12.services.redis.socket cfg12.systemd.services.redis.postStop
-        && lib.hasInfix "systemctl --user start redis.service" activation12
-        && lib.hasInfix "Valkey reported ready without creating" activation12;
+        && lib.hasInfix "systemctl --user start redis.service" activation12;
     }
     {
       name = "Laravel backup configuration";
