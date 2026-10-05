@@ -368,8 +368,10 @@ EOF
             XDG_CACHE_HOME="$tmpdir/cache" \
             "$profile/bin/activate" 2>&1 && exit 99 || true
           )
-          grep -Fq 'Laravel activation requires a readable secret file' <<<"$activation_output" \
-            || fail "activation did not fail with the provider configuration message"
+          grep -Fq "/run/secrets/${user}/laravel_env" <<<"$activation_output" \
+            || fail "activation did not identify the missing laravel_env secret file"
+          grep -Eq "laravel_env.*provider secret|provider secret.*laravel_env" <<<"$activation_output" \
+            || fail "activation did not explain how to configure the laravel_env provider secret"
           test ! -e "$tmpdir/config" || fail "activation changed services before checking laravel_env"
         '';
       };
