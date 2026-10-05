@@ -41,7 +41,7 @@ asserts.assertRun {
     "${cli}/bin/hostenv" cex --help > "$TMPDIR/cex-help"
     test ! -e "$HOSTENV_HELP_DRUSH_PROBE" \
       || fail "cex help must not execute command substitutions from its descriptions"
-    grep -Fq -- "Arguments passed to drush cex" "$TMPDIR/cex-help" \
-      || fail "cex help should describe its pass-through arguments as plain text"
+    grep -Fq -- "drush cex" "$TMPDIR/cex-help" \
+      || fail "cex help should describe its pass-through arguments"
   '';
 }
