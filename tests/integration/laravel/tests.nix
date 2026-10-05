@@ -522,7 +522,8 @@ profileCheck "10" envs.laravel10
       "$cli/bin/hostenv" --help > "$TMPDIR/root-help"
       grep -Fq 'Laravel:' "$TMPDIR/root-help"
       "$cli/bin/hostenv" artisan --help > "$TMPDIR/artisan-help"
-      grep -Fq 'Arguments passed to Artisan' "$TMPDIR/artisan-help"
+      grep -Fq 'ARGUMENTS...' "$TMPDIR/artisan-help" \
+        || fail "artisan should expose its pass-through arguments"
       grep -Fq 'remote_artisan+=(--no-interaction)' "$cli/bin/hostenv"
       grep -Fq 'hostenv_quote_remote_command' "$cli/bin/hostenv"
       grep -Fq 'hostenv_ssh_exec "''${remote_artisan[@]}" "$@"' "$cli/bin/hostenv"
