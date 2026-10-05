@@ -98,6 +98,10 @@ let
           grep -Fq 'syntax is ok' <<<"$nginx_output" || fail "nginx syntax check failed"
 
           grep -Fq 'clear_env = no' "$fpm_conf" || fail "PHP-FPM still clears inherited variables"
+          grep -Fq 'error_log = /proc/self/fd/2' "$fpm_conf" \
+            || fail "PHP-FPM main errors are not routed to the service stderr"
+          grep -Fq 'php_admin_value[error_log] = /proc/self/fd/2' "$fpm_conf" \
+            || fail "PHP errors are not routed to the worker stderr"
           grep -Fq 'env[PATH] = $HOSTENV_PHPFPM_PATH' "$fpm_conf" \
             || fail "PHP-FPM does not import the merged application PATH"
           grep -Fq '${pkgs.hello}/bin' "$fpm_unit" \
@@ -164,6 +168,8 @@ let
           # the runtime behavior that EnvironmentFile=laravel_env must not undo.
           cat > "$app_copy/public/hostenv-path-test.php" <<'PHP'
 <?php
+file_put_contents('php://stderr', "hostenv php-fpm stderr test\n");
+error_log("hostenv php error_log test");
 $output = [];
 $status = 0;
 exec('hello', $output, $status);
@@ -176,9 +182,7 @@ PHP
           mkdir -p "$provider_path"
           fpm_test_conf="$tmpdir/phpfpm-test.conf"
           fpm_test_socket="$tmpdir/phpfpm-test.sock"
-          fpm_test_log="$tmpdir/phpfpm-test.log"
           sed \
-            -e "s|^error_log = .*|error_log = $fpm_test_log|" \
             -e "s|^listen = .*|listen = $fpm_test_socket|" \
             "$fpm_conf" > "$fpm_test_conf"
           fpm_package=$(readlink -f "$profile/etc/php-fpm.d/${serviceName}-php")
@@ -210,7 +214,6 @@ PHP
             ${pkgs.fcgi}/bin/cgi-fcgi -bind -connect "$fpm_test_socket"
           ); then
             cat "$tmpdir/phpfpm-test.stdout" >&2
-            cat "$fpm_test_log" >&2 2>/dev/null || true
             fail "FastCGI request to PHP-FPM path test failed"
           fi
           grep -Fq 'status=0' <<<"$fpm_response" \
@@ -220,6 +223,26 @@ PHP
           if ! grep -Fq "$provider_path" <<<"$fpm_response"; then
             printf '%s\n' "$fpm_response" >&2
             fail "PHP-FPM discarded PATH entries supplied by laravel_env"
+          fi
+
+          # PHP-FPM must carry both application stderr (Laravel's default
+          # LOG_CHANNEL) and PHP's own error_log() through the FPM main log to
+          # the service stderr. This is what makes both visible to
+          # journalctl --user for the environment.
+          for _ in $(seq 1 50); do
+            if grep -Fq 'hostenv php-fpm stderr test' "$tmpdir/phpfpm-test.stdout" \
+              && grep -Fq 'hostenv php error_log test' "$tmpdir/phpfpm-test.stdout"; then
+              break
+            fi
+            sleep 0.1
+          done
+          if ! grep -Fq 'hostenv php-fpm stderr test' "$tmpdir/phpfpm-test.stdout"; then
+            cat "$tmpdir/phpfpm-test.stdout" >&2
+            fail "PHP-FPM worker stderr did not reach the service stderr"
+          fi
+          if ! grep -Fq 'hostenv php error_log test' "$tmpdir/phpfpm-test.stdout"; then
+            cat "$tmpdir/phpfpm-test.stdout" >&2
+            fail "PHP error_log() did not reach the service stderr"
           fi
 
           # Exercise the generated nginx and PHP-FPM configuration together.
