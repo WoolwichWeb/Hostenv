@@ -430,10 +430,7 @@
         ];
     
         services.phpfpm.settings = {
-          # Send PHP-FPM's main log to the service's standard error. systemd records
-          # standard error in the user journal, so PHP-FPM errors and worker output
-          # captured by catch_workers_output are available through journalctl --user.
-          error_log = lib.mkDefault "/proc/self/fd/2";
+          error_log = lib.mkDefault "syslog";
           daemonize = lib.mkDefault false;
         };
     
