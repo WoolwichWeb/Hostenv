@@ -323,7 +323,7 @@
 
           banner() {
             echo
-            cat <<BANNER | boxes -d whirly
+            cat <<BANNER | boxes -n UTF-8 -d whirly
           $hostenv_emoji  Environment: "$hostenv_env_name" ($hostenv_type)
 
           Commands: ${
