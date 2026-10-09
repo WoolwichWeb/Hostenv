@@ -28,6 +28,8 @@ let
   ] "main";
 
   backups = env.config.services.restic.backups;
+  phpErrorLog =
+    env.config.services.phpfpm.pools.${env.config.services.php-app.codebase.name}.settings."php_admin_value[error_log]";
   hasMigrate = backups ? "php-app-migrate" && (backups."php-app-migrate".timerConfig or "") == null;
   hasMarker = lib.strings.hasInfix "HOSTENV_RESTORE_PHP_APP_BEGIN" env.config.activate;
   hasRestorePlanPath = lib.strings.hasInfix "${env.config.hostenv.runtimeDir}/restore/plan.json" env.config.activate;
@@ -36,6 +38,8 @@ let
 
 in
 {
+  php-app-error-log-syslog = asserts.assertTrue "php-app-error-log-syslog" (phpErrorLog == "syslog")
+    "php-app should send PHP errors to syslog";
   php-app-migrate-backup = asserts.assertTrue "php-app-migrate-backup" hasMigrate
     "php-app should define a migrate restic backup without a timer";
   php-app-restore-marker = asserts.assertTrue "php-app-restore-marker" hasMarker

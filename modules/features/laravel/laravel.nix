@@ -31,7 +31,7 @@ in
         APP_ENV = env.type;
         APP_DEBUG = if env.type == "production" then "false" else "true";
         APP_URL = canonicalUri;
-        LOG_CHANNEL = "stderr";
+        LOG_CHANNEL = "syslog";
         DB_CONNECTION = "mysql";
         DB_HOST = "localhost";
         DB_PORT = "3306";
@@ -527,7 +527,7 @@ in
               "pm.max_spare_servers" = lib.mkDefault 8;
               "pm.start_servers" = lib.mkDefault 4;
               "pm.max_requests" = lib.mkDefault 500;
-              "php_admin_value[error_log]" = "stderr";
+              "php_admin_value[error_log]" = "syslog";
               "php_admin_flag[log_errors]" = true;
               catch_workers_output = true;
             };

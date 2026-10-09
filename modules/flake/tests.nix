@@ -40,6 +40,12 @@ in
               hostenvNixosModule = cfgTop.flake.modules.nixos.hostenv-top-level;
             };
 
+            laravel-syslog-vm-test = import ../../tests/integration/laravel/logging-vm-test.nix {
+              inherit pkgs;
+              env = envs.laravel11;
+              hostenvNixosModule = cfgTop.flake.modules.nixos.hostenv-top-level;
+            };
+
             # This is intentionally a package rather than a normal flake check:
             # it boots a controller plus two provider VMs and exercises the
             # destructive migration boundary through the real provider CLI.

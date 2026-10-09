@@ -60,7 +60,7 @@ let
           grep -Fq 'APP_ENV="production"' "$app/.env" || fail "production APP_ENV default is missing"
           grep -Fq 'APP_DEBUG="false"' "$app/.env" || fail "production APP_DEBUG default is missing"
           grep -Fq 'APP_URL="https://${env.config.environments.main.canonicalHost}"' "$app/.env" || fail "canonical APP_URL is missing"
-          grep -Fq 'LOG_CHANNEL="stderr"' "$app/.env" || fail "stderr logging default is missing"
+          grep -Fq 'LOG_CHANNEL="syslog"' "$app/.env" || fail "syslog logging default is missing"
           grep -Fq 'DB_SOCKET="${env.config.hostenv.runtimeDir}/mysql.sock"' "$app/.env" \
             || fail "MariaDB socket default is missing"
           grep -Fq 'HOSTENV_FIXTURE="non-secret"' "$app/.env" \
@@ -97,6 +97,8 @@ let
           nginx_output=$("$profile/bin/nginx" -e "$tmpdir/error.log" -t -c "$nginx_conf" -p "$tmpdir" 2>&1 || true)
           grep -Fq 'syntax is ok' <<<"$nginx_output" || fail "nginx syntax check failed"
 
+          grep -Fq 'php_admin_value[error_log] = syslog' "$fpm_conf" \
+            || fail "PHP errors are not routed to syslog"
           grep -Fq 'clear_env = no' "$fpm_conf" || fail "PHP-FPM still clears inherited variables"
           grep -Fq 'env[PATH] = $HOSTENV_PHPFPM_PATH' "$fpm_conf" \
             || fail "PHP-FPM does not import the merged application PATH"
