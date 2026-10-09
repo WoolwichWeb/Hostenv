@@ -112,6 +112,9 @@ let
         phpConf="$profile/etc/php-fpm.d"
         test -d "$phpConf" || { echo "missing $phpConf"; exit 1; }
         compgen -G "$phpConf/*.ini" >/dev/null || { echo "no ini files in $phpConf"; exit 1; }
+        grep -Fq 'php_admin_value[error_log] = syslog' \
+          "$phpConf/${env.config.services.drupal.codebase.name}.conf" \
+          || { echo "PHP errors are not routed to syslog"; exit 1; }
       '';
     };
   };
