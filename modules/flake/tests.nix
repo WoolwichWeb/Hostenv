@@ -40,6 +40,12 @@ in
               hostenvNixosModule = cfgTop.flake.modules.nixos.hostenv-top-level;
             };
 
+            gotenberg-vm-test = import ../../tests/integration/gotenberg/vm-test.nix {
+              inherit pkgs;
+              environments = [ envs.gotenbergA envs.gotenbergB envs.gotenbergWithoutNetworkNamespace ];
+              hostenvNixosModule = cfgTop.flake.modules.nixos.hostenv-top-level;
+            };
+
             laravel-syslog-vm-test = import ../../tests/integration/laravel/logging-vm-test.nix {
               inherit pkgs;
               env = envs.laravel11;

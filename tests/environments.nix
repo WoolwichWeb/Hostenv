@@ -188,6 +188,49 @@ in
     environmentName = "dev";
   };
 
+  gotenbergA = makeHostenv [
+    ({ ... }: {
+      hostenv = {
+        organisation = "test";
+        project = "gotenberg-a";
+        root = pkgs.emptyDirectory;
+        hostenvHostname = "hosting.test";
+      };
+      services.gotenberg.enable = true;
+      environments.main.enable = true;
+    })
+  ] "main";
+
+  gotenbergB = makeHostenv [
+    ({ ... }: {
+      hostenv = {
+        organisation = "test";
+        project = "gotenberg-b";
+        root = pkgs.emptyDirectory;
+        hostenvHostname = "hosting.test";
+      };
+      services.gotenberg.enable = true;
+      environments.main.enable = true;
+    })
+  ] "main";
+
+  # A service that cannot obtain a private namespace must refuse to start,
+  # rather than expose its TCP listener on the host network.
+  gotenbergWithoutNetworkNamespace = makeHostenv [
+    ({ lib, ... }: {
+      hostenv = {
+        organisation = "test";
+        project = "gotenberg-unisolated";
+        root = pkgs.emptyDirectory;
+        hostenvHostname = "hosting.test";
+      };
+      services.gotenberg.enable = true;
+      # Deny clone/unshare at service runtime to exercise failed isolation.
+      systemd.services.gotenberg.serviceConfig.RestrictNamespaces = true;
+      environments.main.enable = true;
+    })
+  ] "main";
+
   laravelSecretExclusion = makeHostenv [
     ({ ... }: {
       hostenv = {
