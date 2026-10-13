@@ -22,6 +22,98 @@ let
     \f0\fs24 Hostenv LibreOffice PDF test\par
     }
   '';
+
+  # Test-only client: the application and the listener share a private
+  # network namespace. The listener forwards TCP to Gotenberg's Unix socket.
+  reverseProxyClient = pkgs.writeShellApplication {
+    name = "gotenberg-reverse-proxy-client-test";
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.curl
+      pkgs.gnugrep
+      pkgs.iproute2
+      pkgs.util-linux
+    ];
+    text = ''
+      if [ "$#" -ne 2 ]; then
+        echo "Expected Gotenberg socket and test state directory." >&2
+        exit 1
+      fi
+      socket=$1
+      state=$2
+      mkdir -p "$state"
+      printf '%s\n' "$BASHPID" > "$state/pid"
+      readlink /proc/self/ns/net > "$state/namespace"
+
+      # The normal systemd socket manager would bind outside this namespace.
+      # Use its test utility to open port 3000 *inside* the namespace instead.
+      setsid ${pkgs.systemd}/bin/systemd-socket-activate \
+        --listen=127.0.0.1:3000 \
+        ${pkgs.systemd}/lib/systemd/systemd-socket-proxyd "$socket" \
+        > "$state/proxy.log" 2>&1 &
+      listener_pid=$!
+      printf '%s\n' "$listener_pid" > "$state/listener.pid"
+      # Stop both the listener and its socket-activated child.
+      trap 'kill -TERM -- "-$listener_pid" 2>/dev/null || true; wait "$listener_pid" 2>/dev/null || true' EXIT
+
+      ready=0
+      for _ in {1..100}; do
+        if ss -H -ltn 'sport = :3000' | grep -Fq '127.0.0.1:3000'; then
+          ready=1
+          break
+        fi
+        if ! kill -0 "$listener_pid" 2>/dev/null; then
+          cat "$state/proxy.log" >&2
+          exit 1
+        fi
+        sleep 0.1
+      done
+      if [ "$ready" -ne 1 ]; then
+        echo "Client proxy did not start listening." >&2
+        cat "$state/proxy.log" >&2
+        exit 1
+      fi
+      touch "$state/ready"
+
+      # Let the VM inspect both client namespaces before sending requests.
+      for _ in {1..300}; do
+        if [ -e "$state/go" ]; then break; fi
+        sleep 0.1
+      done
+      if [ ! -e "$state/go" ]; then
+        echo "Client test did not receive the go signal." >&2
+        exit 1
+      fi
+
+      # No --unix-socket option: this is ordinary HTTP over loopback TCP.
+      curl --noproxy '*' --fail --silent --show-error \
+        --connect-timeout 3 --max-time 30 \
+        http://127.0.0.1:3000/health > "$state/health"
+      curl --noproxy '*' --fail --silent --show-error \
+        --connect-timeout 3 --max-time 120 \
+        -F 'files=@${libreofficeFixture};filename=document.rtf;type=application/rtf' \
+        http://127.0.0.1:3000/forms/libreoffice/convert \
+        -o "$state/document.pdf"
+      touch "$state/done"
+
+      for _ in {1..300}; do
+        if [ -e "$state/stop" ]; then exit 0; fi
+        sleep 0.1
+      done
+      echo "Client test did not receive the stop signal." >&2
+      exit 1
+    '';
+  };
+
+  reverseProxyNamespace = pkgs.writeShellApplication {
+    name = "gotenberg-reverse-proxy-isolate-test";
+    runtimeInputs = [ pkgs.iproute2 pkgs.util-linux ];
+    text = ''
+      ip link set lo up
+      exec setpriv --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
+        ${pkgs.lib.getExe reverseProxyClient} "$@"
+    '';
+  };
 in
 pkgs.testers.runNixOSTest {
   name = "gotenberg-private-socket";
@@ -42,6 +134,7 @@ pkgs.testers.runNixOSTest {
       pkgs.curl
       pkgs.procps
       pkgs.util-linux
+      reverseProxyNamespace
     ];
 
     virtualisation = {
@@ -247,6 +340,102 @@ pkgs.testers.runNixOSTest {
         machine.fail(
             "${pkgs.curl}/bin/curl --fail --connect-timeout 2 http://127.0.0.1:3000/health"
         )
+
+    with subtest("isolated clients reach Gotenberg over localhost TCP"):
+        # Run two clients simultaneously. Each has its own loopback:3000
+        # listener, forwarding to its own environment's Gotenberg socket.
+        states = []
+        for env in [a, b]:
+            state = "/run/user/" + str(env[1]) + "/gotenberg-reverse-proxy-test"
+            states.append(state)
+            machine.succeed(
+                "(" + as_user(
+                    env,
+                    "${pkgs.util-linux}/bin/unshare "
+                    "--user --map-current-user --keep-caps --net "
+                    "${pkgs.lib.getExe reverseProxyNamespace} " +
+                    env[3] + " " + state
+                ) + ") > /tmp/gotenberg-client-" + str(env[1]) +
+                ".log 2>&1 </dev/null &"
+            )
+
+        for state in states:
+            machine.wait_for_file(state + "/ready", timeout=timedelta(seconds=30))
+
+        host_namespace = network_namespace("1")
+        _, _, _, gotenberg_a_namespace = service_processes(a)
+        _, _, _, gotenberg_b_namespace = service_processes(b)
+        client_namespaces = []
+        listener_pids = []
+        for env, state in zip([a, b], states):
+            namespace = machine.succeed("cat " + state + "/namespace").strip()
+            pid = machine.succeed("cat " + state + "/pid").strip()
+            listener_pid = machine.succeed("cat " + state + "/listener.pid").strip()
+            listener_pids.append(listener_pid)
+            client_namespaces.append(namespace)
+            assert network_namespace(pid) == namespace
+            assert network_namespace(listener_pid) == namespace
+
+            # Both the test application and its TCP listener are ordinary
+            # tenant processes with no remaining capabilities.
+            for process in [pid, listener_pid]:
+                status = machine.succeed("cat /proc/" + process + "/status")
+                uids = [
+                    line.split()[1] for line in status.splitlines()
+                    if line.startswith("Uid:")
+                ]
+                assert uids == [str(env[1])], (process, status)
+                for name in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]:
+                    values = [
+                        line.partition(":")[2].strip()
+                        for line in status.splitlines()
+                        if line.startswith(name + ":")
+                    ]
+                    assert values == ["0000000000000000"], (process, name, status)
+
+            devices = machine.succeed("cat /proc/" + pid + "/net/dev")
+            interfaces = {
+                row.partition(":")[0].strip()
+                for row in devices.splitlines()[2:]
+                if ":" in row
+            }
+            assert interfaces == {"lo"}, (pid, interfaces)
+
+        assert len(set([
+            host_namespace, gotenberg_a_namespace, gotenberg_b_namespace,
+            *client_namespaces
+        ])) == 5
+
+        # Both clients are listening on port 3000, yet the host cannot
+        # reach either listener (or Gotenberg's own private listener).
+        machine.fail(
+            "${pkgs.curl}/bin/curl --noproxy '*' --fail "
+            "--connect-timeout 2 http://127.0.0.1:3000/health"
+        )
+
+        for state in states:
+            machine.succeed("touch " + state + "/go")
+        for state in states:
+            machine.wait_for_file(state + "/done", timeout=timedelta(seconds=120))
+            machine.succeed("test -f " + state + "/health")
+            machine.succeed(
+                "head -c 5 " + state + "/document.pdf | grep -q '%PDF-'"
+            )
+            machine.succeed(
+                "${pkgs.poppler-utils}/bin/pdftotext " +
+                state + "/document.pdf - | grep -Fq 'Hostenv LibreOffice PDF test'"
+            )
+
+        machine.fail(
+            "${pkgs.curl}/bin/curl --noproxy '*' --fail "
+            "--connect-timeout 2 http://127.0.0.1:3000/health"
+        )
+        for state in states:
+            machine.succeed("touch " + state + "/stop")
+        for pid in listener_pids:
+            machine.wait_until_succeeds(
+                "test ! -e /proc/" + pid, timeout=timedelta(seconds=30)
+            )
 
     with subtest("Chromium processes remain isolated during PDF conversion"):
         _, _, _, private_namespace = service_processes(a)
