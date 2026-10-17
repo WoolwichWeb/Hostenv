@@ -1,0 +1,39 @@
+cabal-version: 3.0
+name: hostenv-runtime
+version: 0.1.0.0
+synopsis: Small commands run by Hostenv-managed systems
+license: GPL-3.0-or-later
+build-type: Simple
+
+library
+  hs-source-dirs: src
+  exposed-modules:
+    Hostenv.System.Acme
+    Hostenv.System.Error
+    Hostenv.System.Lock
+  build-depends:
+    base >=4.16 && <5,
+    aeson,
+    bytestring,
+    containers,
+    directory,
+    filepath,
+    process,
+    text,
+    transformers,
+    turtle,
+    unix
+  default-language: GHC2021
+  default-extensions: OverloadedStrings, ScopedTypeVariables
+  ghc-options: -Wall
+
+executable hostenv-system
+  main-is: hostenv-system.hs
+  hs-source-dirs: app
+  build-depends:
+    base,
+    hostenv-runtime
+  default-language: GHC2021
+  -- The ACME supervisor must run signal handlers while waitForProcess waits.
+  -- Without the threaded RTS, the wait can block signal forwarding entirely.
+  ghc-options: -Wall -threaded

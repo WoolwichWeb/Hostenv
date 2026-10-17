@@ -2245,14 +2245,43 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                             deployGuard res args
                             pure (envName, res)
 
-            let reconcileDnsAfterDeployment envInfo =
-                    ensureEnvironmentDns
-                        deployDnsCache
-                        mCfTokenOverride
-                        mCfZoneOverride
-                        plan
-                        envInfo
-                        (M.findWithDefault [] envInfo.userName dnsItemsByUser)
+            let retryCertificateOrders envInfo = do
+                    let hosts =
+                            S.toList . S.fromList $
+                                [ item.diDiscoveryHost
+                                | item <- M.findWithDefault [] envInfo.userName dnsItemsByUser
+                                , item.diTlsEnabled
+                                ]
+                    if null hosts
+                        then pure (Right ())
+                        else do
+                            let target = mkSshTarget deployUser (resolveNodeConnection envInfo.node)
+                            attempt <- tryAny $
+                                runRemoteOutput target
+                                    ([ "sudo", "-n", "/run/current-system/sw/bin/hostenv-acme-deploy", "retry", "--" ] ++ hosts)
+                            pure $ case attempt of
+                                Left err -> Left ("could not request certificates: " <> T.pack (displayException err))
+                                Right (ExitSuccess, _, _) -> Right ()
+                                Right (code, out, err) ->
+                                    Left
+                                        ( "could not request certificates ("
+                                            <> T.pack (show code)
+                                            <> "): "
+                                            <> T.strip (out <> "\n" <> err)
+                                        )
+
+            let reconcileDnsAfterDeployment envInfo = do
+                    dnsResult <-
+                        ensureEnvironmentDns
+                            deployDnsCache
+                            mCfTokenOverride
+                            mCfZoneOverride
+                            plan
+                            envInfo
+                            (M.findWithDefault [] envInfo.userName dnsItemsByUser)
+                    case dnsResult of
+                        Left err -> pure (Left err)
+                        Right () -> retryCertificateOrders envInfo
 
             let waitForTrustedHttps envInfo = do
                     let tlsTargets =
@@ -2385,11 +2414,11 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                         Right () -> pure (envResult, True, verificationFailure)
                                                         Left err -> do
                                                             printProviderErrLine
-                                                                ( "DNS reconciliation failed for "
+                                                                ( "DNS or certificate setup failed for "
                                                                     <> envName
                                                                     <> " after deployment: "
                                                                     <> err
-                                                                    <> ". Update DNS if necessary and rerun deploy."
+                                                                    <> ". Fix the reported problem and rerun deploy."
                                                                 )
                                                             pure ((envName, ExitFailure 1), False, verificationFailure)
 
@@ -2517,7 +2546,9 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                                                             )
                                                                                                         )
                                                                                                 else do
-                                                                                                    httpsResult <- waitForTrustedHttps envInfo
+                                                                                                    httpsResult <- retryCertificateOrders envInfo >>= \case
+                                                                                                        Left err -> pure (Left err)
+                                                                                                        Right () -> waitForTrustedHttps envInfo
                                                                                                     pure $
                                                                                                         case httpsResult of
                                                                                                             Right () -> Nothing
