@@ -202,33 +202,20 @@ still working on improvements to Provider support.
 
 6. **Deploy**
 
-   `generated/plan.json` always describes the desired end state, and deploy
-   applies that configuration directly. Current nixpkgs generates baseline
-   self-signed certificates before nginx starts and performs the real ACME order
-   separately, so a Let's Encrypt validation failure does not need a weaker
-   Hostenv staging configuration.
-
-   Hostenv therefore treats any failed system deployment as a real deployment
-   failure. For fresh and same-node environments, DNS is reconciled after the
-   destination has deployed. During a migration, Hostenv deploys and verifies
-   the destination, quiesces the source, changes DNS, waits for a publicly
-   trusted HTTPS certificate on TLS-enabled vhosts, and only then removes the
-   source account.
-
-   Run the provider deployment transaction:
-
    ```bash
    nix run .#hostenv-provider -- deploy
    ```
 
-   Use `--node <node>` for a node-local deployment only when no cross-node
-   migration is involved. Cross-node migrations must run unfiltered so Hostenv
-   can keep destination staging, source quiescence, DNS cutover, TLS activation,
-   and source cleanup in one resumable operation.
+   Hostenv deploys the configuration in `generated/plan.json`. It then updates
+   managed DNS records and requests HTTPS certificates where needed.
 
-   The generated flake remains available for debugging and inspection, but
-   invoking deploy-rs directly bypasses Hostenv's DNS/TLS and migration safety
-   ordering and is not the normal deployment workflow.
+   When moving an environment between servers, Hostenv checks the destination
+   and waits for trusted HTTPS before removing the source. Run a full deployment
+   for migrations; use `--node <node>` only when no environments are moving
+   between servers.
+
+   Do not invoke deploy-rs directly for normal deployments. It bypasses
+   Hostenv's DNS and migration checks.
 
 ---
 

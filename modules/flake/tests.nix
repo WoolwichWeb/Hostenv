@@ -28,12 +28,28 @@ in
             environmentName = "main";
           };
 
-          checks = import ../../tests {
+          checks = (import ../../tests {
             inherit pkgs envs makeHostenv inputs;
             documentationEnabled = false;
+          }) // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            provider-acme-process-tests = import ../../tests/unit/acme-deployment.nix {
+              inherit pkgs;
+              runtime = (cfgTop.flake.lib.hostenv.packagesFor pkgs).hostenv-runtime;
+            };
+            provider-acme-cli = import ../../tests/unit/provider-acme-cli.nix {
+              inherit pkgs;
+            };
           };
 
           packages = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            provider-acme-vm-test = import ../../tests/integration/provider-acme-vm.nix {
+              inherit pkgs;
+              inherit (inputs) deploy-rs;
+              acmeModule = cfgTop.flake.modules.nixos.provider-acme;
+              hostenvTopLevelModule = cfgTop.flake.modules.nixos.hostenv-top-level;
+              guardAcmeActivation = cfgTop.flake.lib.provider.guardAcmeActivation;
+            };
+
             drupal6-vm-test = import ../../tests/integration/drupal6/vm-test.nix {
               inherit pkgs;
               env = envs.drupal6;

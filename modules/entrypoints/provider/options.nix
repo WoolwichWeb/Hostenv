@@ -3,11 +3,14 @@ let
   inherit (lib) mkOption types;
   providerNixosModules = [
     config.flake.modules.nixos.provider-common
+    config.flake.modules.nixos.provider-acme
     config.flake.modules.nixos.hostenv-top-level
     config.flake.modules.nixos.nginx-tuning
     config.flake.modules.nixos.monitoring
   ];
   libHostenv = config.flake.lib.hostenv;
+  # The provider deployment function also has a 'config' argument (its plan).
+  flakeConfig = config;
   providerServiceDeprecationNote =
     " Temporary compatibility option while deploy-rs provider tooling remains in use; will be deprecated once provider-service is complete.";
 
@@ -348,7 +351,10 @@ let
               system = {
                 sshUser = config.deployUser or "deploy";
                 user = "root";
-                path = deploy-rs.lib.${remoteSystem}.activate.nixos nodes.${node};
+                path = flakeConfig.flake.lib.provider.guardAcmeActivation
+                  nodes.${node}.pkgs
+                  nodes.${node}.config.system.build.hostenvAcmeDeployment
+                  (deploy-rs.lib.${remoteSystem}.activate.nixos nodes.${node});
               };
             } // builtins.mapAttrs
               (name: environment: {
