@@ -10,7 +10,7 @@ import qualified Data.ByteString as BS
 import Data.Bits ((.&.))
 import Data.Char (isAscii, isAlphaNum, isSpace)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.List (find, isPrefixOf, stripSuffix)
+import Data.List (find, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Foreign.C.Error (eEXIST, eSRCH, getErrno, throwErrno, throwErrnoIfMinus1Retry)
@@ -105,7 +105,7 @@ validatePaths settings = do
 
 validate :: Settings -> IO ()
 validate settings = do
-  unless (maybe False validName (stripSuffix ".service" (owner settings))) $
+  unless (maybe False (validName . T.unpack) (T.stripSuffix ".service" (T.pack (owner settings)))) $
     invalid "invalid owning unit name"
   unless (validName (endpointName settings)) $
     invalid "invalid endpoint name"
