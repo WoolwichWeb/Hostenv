@@ -292,7 +292,7 @@ while True:
             ('nsenter path', {'nsenter': 'nsenter'}, 'helper executable paths must be absolute'),
             ('setpriv path', {'setpriv': 'setpriv'}, 'helper executable paths must be absolute'),
             ('proxy path', {'proxy': 'proxy'}, 'helper executable paths must be absolute'),
-            ('NUL in helper path', {'proxy': '/bin/\\u0000bad'}, 'helper executable paths must be absolute'),
+            ('NUL in helper path', {'proxy': '/bin/' + chr(0) + 'bad'}, 'helper executable paths must be absolute'),
         ]
         for description, changes, message in cases:
             with self.subTest(description=description):
