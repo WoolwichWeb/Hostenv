@@ -355,6 +355,10 @@ in
             "acme-prod.hosting.test": {
               "enableLetsEncrypt": true,
               "forceSSL": true
+            },
+            "www.example.test": {
+              "enableLetsEncrypt": true,
+              "forceSSL": true
             }
           }
         }
@@ -535,6 +539,16 @@ in
     set -euo pipefail
     args=" $* "
 
+    # External vanity domains may resolve through Cloudflare and must never
+    # enter the direct-origin DNS convergence checks, including on migration.
+    case "$args" in
+      *"www.example.test"*)
+        printf 'UNEXPECTED_VANITY_DNS\n' >> "$EVENT_LOG"
+        printf 'unexpected vanity-domain DNS lookup: %s\n' "$args" >&2
+        exit 88
+        ;;
+    esac
+
     if [ "''${DNS_NS_FAIL:-0}" = 1 ]       && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq ' NS '; then
       printf ';; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 1\n'
       exit 0
@@ -641,6 +655,12 @@ in
     if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq -- '--head' \
       && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'https://acme-prod.hosting.test/'; then
       printf 'HTTPS_READY acme-prod\n' >> "$EVENT_LOG"
+      exit 0
+    fi
+
+    if printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq -- '--head' \
+      && printf '%s\n' "$args" | ${pkgs.gnugrep}/bin/grep -Fq 'https://www.example.test/'; then
+      printf 'HTTPS_READY_VANITY acme-prod\n' >> "$EVENT_LOG"
       exit 0
     fi
 
@@ -969,6 +989,8 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq 'ROLLBACK acme-prod' "$eventLog"
+      ! ${pkgs.gnugrep}/bin/grep -Fq 'UNEXPECTED_VANITY_DNS' "$eventLog"
+      ${pkgs.gnugrep}/bin/grep -Fq 'HTTPS_READY_VANITY acme-prod' "$eventLog"
       dest_system_line="$(${pkgs.gnugrep}/bin/grep -n -F '#"new-node"."system"' "$eventLog" | head -n1 | cut -d: -f1)"
       dest_env_line="$(${pkgs.gnugrep}/bin/grep -n -F '#"new-node"."acme-prod"' "$eventLog" | head -n1 | cut -d: -f1)"
       accepted_line="$(${pkgs.gnugrep}/bin/grep -n -F 'HANDOFF_ACCEPTED acme-prod' "$eventLog" | head -n1 | cut -d: -f1)"

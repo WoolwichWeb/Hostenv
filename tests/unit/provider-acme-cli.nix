@@ -46,7 +46,8 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
       "node": "new-node",
       "migrations": [],
       "virtualHosts": {
-        "fresh-prod.hosting.test": {"enableLetsEncrypt": true, "forceSSL": true}
+        "fresh-prod.hosting.test": {"enableLetsEncrypt": true, "forceSSL": true},
+        "www.example.test": {"enableLetsEncrypt": true, "forceSSL": true}
       }
     }}
   }
@@ -80,7 +81,7 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
       printf 'fresh-prod:x:3000:100::/home/fresh-prod:/bin/sh\n'
     fi
   elif grep -Fq hostenv-acme-deploy <<< "$script"; then
-    grep -Fq "'retry' '--' 'fresh-prod.hosting.test'" <<< "$script"
+    grep -Fq "'retry' '--' 'fresh-prod.hosting.test' 'www.example.test'" <<< "$script"
     test -e "$DNS_STATE_DIR/ready"
     echo CERTIFICATE >> "$EVENT_LOG"
     exit "$ACME_FAIL"
@@ -94,6 +95,9 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
   printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n'
   if [[ "$args" == *' hosting.test NS '* ]]; then
     printf 'hosting.test. 60 IN NS ns1.hosting.test.\n'
+  elif [[ "$args" == *'www.example.test'* ]]; then
+    echo "A vanity-domain DNS query was made" >&2
+    exit 88
   elif [[ "$args" == *'fresh-prod.hosting.test'* && "$args" == *' CNAME'* ]] \
       && [ -e "$DNS_STATE_DIR/ready" ]; then
     printf 'fresh-prod.hosting.test. 60 IN CNAME new-node.hosting.test.\n'
@@ -105,7 +109,18 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
   set -euo pipefail
   case " $* " in
     *'/zones/zone/dns_records?per_page=1000&name='*)
-      printf '{"success":true,"result":[]}\n'
+      if [ "''${PROXIED_MANAGED:-0}" = 1 ]; then
+        printf '{"success":true,"result":[{"id":"existing","type":"CNAME","name":"fresh-prod.hosting.test","content":"old-node.hosting.test","proxied":true}]}\n'
+      else
+        printf '{"success":true,"result":[]}\n'
+      fi
+      ;;
+    *'-X PUT '*'dns_records/existing'*)
+      # Existing Hostenv-controlled records must be returned to DNS-only.
+      grep -Fq '"proxied":false' <<< "$*"
+      touch "$DNS_STATE_DIR/ready"
+      echo DNS >> "$EVENT_LOG"
+      printf '{"success":true,"errors":[]}\n'
       ;;
     *'-X POST '*'zones/zone/dns_records'*)
       if [ "$DNS_FAIL" = 1 ]; then
@@ -129,7 +144,7 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
     cp "$TMPDIR/plan.json" generated/plan.json
     rm -f "$DNS_STATE_DIR/ready"
     : > "$EVENT_LOG"
-    export SYSTEM_FAIL=0 ACME_FAIL=0 DNS_FAIL=0 EXISTING_DEST=0
+    export SYSTEM_FAIL=0 ACME_FAIL=0 DNS_FAIL=0 EXISTING_DEST=0 PROXIED_MANAGED=0
   }
   run_deploy() {
     ${cli.unwrapped}/bin/hostenv-provider deploy --remote-build --skip-verification \
@@ -150,6 +165,15 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
     test "$(cat "$EVENT_LOG")" = "$(printf 'SYSTEM\nENVIRONMENT\nDNS\nCERTIFICATE')"
     assert_unchanged
   done
+
+  # Existing Hostenv-managed records must be set to DNS-only. Vanity domains
+  # are never queried or changed, and their certificates are still requested.
+  current_test="correct existing proxied Hostenv DNS record"
+  reset_case
+  export PROXIED_MANAGED=1
+  run_deploy || { cat "$TMPDIR/deploy.log" >&2; exit 1; }
+  test "$(cat "$EVENT_LOG")" = "$(printf 'SYSTEM\nENVIRONMENT\nDNS\nCERTIFICATE')"
+  assert_unchanged
 
   current_test="DNS reconciliation failure"
   reset_case
@@ -194,6 +218,8 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
   jq '
     .environments["fresh-prod"].virtualHosts["fresh-prod.hosting.test"].enableLetsEncrypt = false |
     .environments["fresh-prod"].virtualHosts["fresh-prod.hosting.test"].forceSSL = false |
+    .environments["fresh-prod"].virtualHosts["www.example.test"].enableLetsEncrypt = false |
+    .environments["fresh-prod"].virtualHosts["www.example.test"].forceSSL = false |
     .nodes["new-node"].services.nginx.virtualHosts["fresh-prod.hosting.test"].enableACME = false |
     .nodes["new-node"].services.nginx.virtualHosts["fresh-prod.hosting.test"].forceSSL = false
   ' generated/plan.json > "$TMPDIR/plain-plan.json"

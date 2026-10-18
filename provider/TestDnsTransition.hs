@@ -31,6 +31,11 @@ main = do
                 ]
     let items = collectDnsItems "hosting.test" envs
     assertTrue (length items == 2) "collect every environment vhost"
+    let managedItems = filter (isHostenvManagedDnsItem "hosting.test") items
+    assertTrue (map (.diDiscoveryHost) managedItems == ["acme-prod.hosting.test"]) "only managed hostnames are reconciled"
+    assertTrue (not (isHostenvManagedDnsItem "hosting.test" (DnsItem "www.hosting.test.evil" "new-node.hosting.test" False))) "reject lookalike domains"
+    assertTrue (isHostenvManagedDnsItem "HOSTING.TEST." (DnsItem "WWW.Hosting.Test." "new-node.hosting.test" False)) "normalise managed hostnames"
+    assertTrue (not (isHostenvManagedDnsItem "" (DnsItem "www.example.test" "new-node.hosting.test" False))) "empty provider domain cannot manage DNS"
     assertTrue (all ((== "new-node.hosting.test") . (.diExpectedHost)) items) "target destination node hostname"
     assertTrue
         ( [item.diDiscoveryHost | item <- items, item.diTlsEnabled]

@@ -7,6 +7,7 @@ module Hostenv.Provider.DnsTransition
     ( DnsItem (..)
     , authoritativeDnsTargetConverged
     , collectDnsItems
+    , isHostenvManagedDnsItem
     ) where
 
 import Data.Aeson qualified as A
@@ -43,6 +44,15 @@ authoritativeDnsTargetConverged expectedHost expectedAddresses answersByNameserv
       where
         cnameSet = S.fromList (map normalizeDnsName cnames)
         addressSet = S.fromList (map normalizeDnsName addresses)
+
+-- Only the provider's own DNS namespace can be reconciled from public DNS.
+-- An external hostname may be routed through a CDN which hides its origin.
+isHostenvManagedDnsItem :: Text -> DnsItem -> Bool
+isHostenvManagedDnsItem hostenvHostname item =
+    let domain = normalizeDnsName hostenvHostname
+        hostname = normalizeDnsName item.diDiscoveryHost
+     in not (T.null domain)
+            && (hostname == domain || ("." <> domain) `T.isSuffixOf` hostname)
 
 normalizeDnsName :: Text -> Text
 normalizeDnsName =

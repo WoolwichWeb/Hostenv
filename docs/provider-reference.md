@@ -69,15 +69,15 @@ nix run .#hostenv-provider -- deploy --dry-run
 
 The `generated/` directory contains three files with different purposes:
 
-- `generated/state.json` contains durable environment identity and hostname reservations. **Commit this file to version control. Do not reset it to `{}` as a troubleshooting step.**
-- `generated/plan.json` describes the desired provider inventory and environment placement. It is generated output rather than persistent state. Keeping a valid previous copy gives Hostenv an additional safety check when nodes are removed, but the file can be regenerated.
-- `generated/flake.nix` is generated from the current provider and project configuration.
+- `generated/state.json` contains durable environment identity and hostname reservations. **Commit this file to version control.**
+- `generated/plan.json` describes the desired provider inventory and environment placement. It is generated output rather than persistent state. Keeping a valid previous copy gives Hostenv an additional safety check when nodes are removed, but the file can be regenerated. You may choose to commit this file to version control, but doing so is optional.
+- `generated/flake.nix` is generated from the current provider and project configuration. You may choose to commit this file to version control, but doing so is optional.
 
 A normal deployment may update DNS, move environments between nodes, verify applications, and remove obsolete environment accounts as part of the same operation.
 
 ## Moving an environment to another node
 
-Change `provider.nodeFor` so that the environment type is assigned to the new node. Then run `plan` and an unfiltered `deploy`.
+Change `provider.nodeFor` so that the environment type is assigned to the new node. Then run `plan` and `deploy`.
 
 For example:
 
@@ -93,7 +93,7 @@ Run migrations with an unfiltered deployment:
 nix run .#hostenv-provider -- deploy
 ```
 
-Do not use `--node` for a move that involves another node. Hostenv rejects a node-filtered deployment when the migration requires a source outside the selected node.
+Hint: Do not use `--node` for a move that involves another node.
 
 If more than one possible source is found, specify the source explicitly:
 
@@ -101,7 +101,7 @@ If more than one possible source is found, specify the source explicitly:
 nix run .#hostenv-provider -- deploy --migration-source ENVIRONMENT=NODE
 ```
 
-If a migration stops before it finishes, correct the reported problem and run the unfiltered `deploy` command again. Migration progress is designed to be resumed safely.
+If a migration stops before it finishes, correct the reported problem and run the `deploy` command again. Migrations are designed to be resumed safely.
 
 ## Retiring or removing a node
 
@@ -126,13 +126,31 @@ Hostenv performs additional checks before allowing a node to disappear from the 
 
 ## DNS and HTTPS during deployment
 
-DNS reconciliation is part of `deploy`; there is no separate DNS deployment command.
+Hostenv expects vanity domain names to point to environment subdomains, which in turn point to server subdomains, which are `A` or `AAAA` records pointing to the IP address of the server handling the request.
+
+To visualise:
+
+```
+www.example.com  ← the customer's vanity domain (CNAME record)
+|
+|- Cloudflare proxy
+   |
+   |- environment-name-c123abc.hostenv-hosting-company.com ← environment hostname on hostenv (CNAME record)
+   |
+   |- server01.hostenv-hosting-company.com ← hostenv server handling the request (A or AAAA record)
+```
+
+This allows Hostenv to repoint `environment-name-c123abc.hostenv-hosting-company.com` to a different server, and to change the IP addresses of individual servers easily (or switch between IPv4 or IPv6).
+
+If Cloudflare credentials are configured, Hostenv can update required Hostenv-managed DNS records automatically. Otherwise, it stops at a safe point and tells you what DNS change is required. Make the change, then rerun `deploy`. For the time being, Hostenv-managed records are DNS-only: if an existing record is proxied by Cloudflare, Hostenv updates it to disable proxying. If Cloudflare proxying is needed for a provider's hostenv environments, our advice is to add that Cloudflare proxying to customers' vanity domains instead. We expect to improve support for proxying Hostenv-managed hostnames in the future.
+
+DNS reconciliation for Hostenv-managed hostnames is part of `deploy`. Vanity domains not managed by Hostenv are not changed or checked when performing DNS resolution.
+
+Hint: Hostenv-managed hostnames are your provider's subdomains that point to your customers' environments. That is, any subdomain of your provider's `hostenvHostname` is a Hostenv-managed hostname.
 
 For a new environment, or an environment staying on the same node, Hostenv deploys the desired configuration before changing DNS.
 
-For a migration, Hostenv first deploys and verifies the destination, then stops the source environment before moving DNS. The old source account is removed only after DNS points to the destination and, if Let's Encrypt is enabled, the destination presents a publicly trusted certificate.
-
-If Cloudflare credentials are configured, Hostenv can update the required records automatically. Otherwise, it stops at a safe point and tells you what DNS change is required. Make the change, then rerun `deploy`.
+For a migration, Hostenv first deploys and verifies the destination, then stops the source environment before moving DNS. The old source account is removed only after Hostenv-managed DNS points to the destination and, if Let's Encrypt is enabled, the destination presents a publicly trusted certificate.
 
 After DNS has moved during a migration, Hostenv may wait for up to 20 minutes for a trusted HTTPS certificate to become available. If DNS or certificate verification fails, Hostenv keeps the old source rather than removing it prematurely. Fix the reported problem and rerun `deploy`.
 
