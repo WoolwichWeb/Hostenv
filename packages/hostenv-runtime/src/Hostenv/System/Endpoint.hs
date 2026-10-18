@@ -10,7 +10,7 @@ import qualified Data.ByteString as BS
 import Data.Bits ((.&.))
 import Data.Char (isAscii, isAlphaNum, isSpace)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.List (find, isPrefixOf)
+import Data.List (find, isPrefixOf, stripPrefix)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Foreign.C.Error (eEXIST, eSRCH, getErrno, throwErrno, throwErrnoIfMinus1Retry)
@@ -52,11 +52,18 @@ foreign import ccall safe "hostenv_endpoint_pidfd_exited"
 foreign import ccall unsafe "hostenv_endpoint_pidfd_signal"
   c_pidfdSignal :: CInt -> CInt -> IO CInt
 
+-- Parsed once when reading the manifest; prepare needs components rather
+-- than having to split and inspect the socket path again.
+data SocketLocation = SocketLocation
+  { runtimeComponents :: [FilePath]
+  , socketDirectories :: [FilePath]
+  , socketFilename :: FilePath
+  } deriving (Show)
+
 data Settings = Settings
   { owner :: String
-  , endpointName :: String
-  , runtimeDir :: FilePath
   , socketPath :: FilePath
+  , socketLocation :: SocketLocation
   , descriptor :: String
   , port :: Int
   , systemctl :: FilePath
@@ -64,14 +71,6 @@ data Settings = Settings
   , setpriv :: FilePath
   , proxy :: FilePath
   } deriving (Show)
-
-instance FromJSON Settings where
-  parseJSON = withObject "Hostenv endpoint manifest" $ \obj ->
-    Settings <$> obj .: "owner" <*> obj .: "name"
-      <*> obj .: "runtime_dir" <*> obj .: "socket"
-      <*> obj .: "descriptor" <*> obj .: "port"
-      <*> obj .: "systemctl" <*> obj .: "nsenter"
-      <*> obj .: "setpriv" <*> obj .: "proxy"
 
 invalid :: String -> IO a
 invalid = ioError . userError
@@ -85,6 +84,10 @@ validName value =
     asciiAlphaNum c = isAscii c && isAlphaNum c
     safeChar c = asciiAlphaNum c || c `elem` ("_.-" :: String)
 
+validExecutablePath :: FilePath -> Bool
+validExecutablePath ('/' : rest) = '\NUL' `notElem` rest
+validExecutablePath _ = False
+
 absoluteParts :: FilePath -> Either String [String]
 absoluteParts path =
   case T.splitOn "/" (T.pack path) of
@@ -93,43 +96,70 @@ absoluteParts path =
           Right (map T.unpack parts)
     _ -> Left "socket and runtime paths must be absolute, normalised and contain safe components"
 
-validatePaths :: Settings -> Either String ([String], [String])
-validatePaths settings = do
-  root <- absoluteParts (runtimeDir settings)
-  socket <- absoluteParts (socketPath settings)
-  unless (root `isPrefixOf` socket && length socket > length root) $
-    Left "the export must be inside the environment's runtime directory"
-  unless (length (socketPath settings) < 108) $
-    Left "the Unix socket path must be at most 107 bytes"
-  pure (root, drop (length root) socket)
+parseSocketLocation :: FilePath -> FilePath -> Either String SocketLocation
+parseSocketLocation runtime path = do
+  root <- absoluteParts runtime
+  socket <- absoluteParts path
+  relative <- maybe (Left "the export must be inside the environment's runtime directory")
+                    Right (stripPrefix root socket)
+  case reverse relative of
+    filename : directories -> do
+      -- absoluteParts admits only ASCII, so characters and bytes agree here.
+      unless (length path < 108) $
+        Left "the Unix socket path must be at most 107 bytes"
+      pure SocketLocation
+        { runtimeComponents = root
+        , socketDirectories = reverse directories
+        , socketFilename = filename
+        }
+    [] -> Left "the export must be inside the environment's runtime directory"
 
-validate :: Settings -> IO ()
-validate settings = do
-  unless (maybe False (validName . T.unpack) (T.stripSuffix ".service" (T.pack (owner settings)))) $
-    invalid "invalid owning unit name"
-  unless (validName (endpointName settings)) $
-    invalid "invalid endpoint name"
-  unless (not (null (descriptor settings)) &&
-          length (descriptor settings) <= 255 &&
-          all (\c -> isAscii c && (isAlphaNum c || c `elem` ("_.-" :: String)))
-              (descriptor settings)) $
-    invalid "invalid activation descriptor name"
-  unless (port settings >= 1 && port settings <= 65535) $
-    invalid "the private TCP port must be between 1 and 65535"
-  either invalid (const (pure ())) (validatePaths settings)
-  let validExecutablePath ('/' : rest) = '\NUL' `notElem` rest
-      validExecutablePath _ = False
-  mapM_ (\path -> unless (validExecutablePath path) $
-           invalid "helper executable paths must be absolute")
-    [systemctl settings, nsenter settings, setpriv settings, proxy settings]
+instance FromJSON Settings where
+  parseJSON = withObject "Hostenv endpoint manifest" $ \obj -> do
+    ownerName <- obj .: "owner"
+    name <- obj .: "name"
+    runtime <- obj .: "runtime_dir"
+    path <- obj .: "socket"
+    descriptorName <- obj .: "descriptor"
+    privatePort <- obj .: "port"
+    systemctlPath <- obj .: "systemctl"
+    nsenterPath <- obj .: "nsenter"
+    setprivPath <- obj .: "setpriv"
+    proxyPath <- obj .: "proxy"
+
+    unless (maybe False (validName . T.unpack)
+              (T.stripSuffix ".service" (T.pack ownerName))) $
+      fail "invalid owning unit name"
+    unless (validName name) $
+      fail "invalid endpoint name"
+    unless (not (null descriptorName) && length descriptorName <= 255 &&
+            all (\c -> isAscii c && (isAlphaNum c || c `elem` ("_.-" :: String)))
+                descriptorName) $
+      fail "invalid activation descriptor name"
+    unless (privatePort >= 1 && privatePort <= 65535) $
+      fail "the private TCP port must be between 1 and 65535"
+    location <- either fail pure (parseSocketLocation runtime path)
+    unless (all validExecutablePath
+              [systemctlPath, nsenterPath, setprivPath, proxyPath]) $
+      fail "helper executable paths must be absolute"
+
+    pure Settings
+      { owner = ownerName
+      , socketPath = path
+      , socketLocation = location
+      , descriptor = descriptorName
+      , port = privatePort
+      , systemctl = systemctlPath
+      , nsenter = nsenterPath
+      , setpriv = setprivPath
+      , proxy = proxyPath
+      }
 
 loadSettings :: FilePath -> IO Settings
 loadSettings manifest = do
   bytes <- BS.readFile manifest
-  settings <- either (invalid . ("invalid endpoint manifest: " ++)) pure
-                (A.eitherDecodeStrict' bytes)
-  validate settings
-  pure settings
+  either (invalid . ("invalid endpoint manifest: " ++)) pure
+    (A.eitherDecodeStrict' bytes)
 
 openDirectory :: Fd -> FilePath -> IO Fd
 openDirectory (Fd parent) name = withCString name $ \raw ->
@@ -170,12 +200,12 @@ withEndpointDirectories current (part : rest) action = do
 
 prepare :: Settings -> IO ()
 prepare settings = do
-  (root, relative) <- either invalid pure (validatePaths settings)
+  let location = socketLocation settings
   bracket (openDirectory (Fd (-100)) "/") closeFd $ \top ->
-    withDirectories top root $ \runtime -> do
+    withDirectories top (runtimeComponents location) $ \runtime -> do
       requirePrivate "the environment runtime directory must be owned by its user and private (mode 0700 or 2700)" runtime
-      withEndpointDirectories runtime (init relative) $ \parent ->
-        withCString (last relative) $ \name -> do
+      withEndpointDirectories runtime (socketDirectories location) $ \parent ->
+        withCString (socketFilename location) $ \name -> do
           let Fd raw = parent
           result <- c_objectExists raw name
           case result of
