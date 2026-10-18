@@ -148,14 +148,21 @@ while True:
 
     def test_paths_reject_escape_and_length(self):
         manifest, data = self.manifest(os.getpid())
-        for root, path in [('/run/test', '/run/test/../outside.sock'),
-                           ('relative', '/run/a'),
-                           ('/run/test', '/run/testing/foo.sock'),
-                           ('/run/test', '/run/test/' + 'a'*108)]:
-            manifest.write_text(json.dumps(dict(data, runtime_dir=root, socket=path)))
-            result = self.run_tenant([RUNTIME, 'endpoint', 'prepare', str(manifest)])
-            self.assertNotEqual(result.returncode, 0, (root, path))
-        manifest.write_text(json.dumps(data))
+        cases = [
+            ('traversal', '/run/test', '/run/test/../outside.sock', 'must be absolute, normalised'),
+            ('relative root', 'relative', '/run/a', 'must be absolute, normalised'),
+            ('unnormalised root', '/run/../test', '/run/test/foo.sock', 'must be absolute, normalised'),
+            ('sibling path', '/run/test', '/run/testing/foo.sock', 'must be inside'),
+            ('runtime directory itself', '/run/test', '/run/test', 'must be inside'),
+            ('path too long', '/run/test', '/run/test/' + 'a'*108, 'at most 107 bytes'),
+        ]
+        for description, root, path, message in cases:
+            with self.subTest(description=description):
+                manifest.write_text(json.dumps(dict(data, runtime_dir=root, socket=path)))
+                result = self.run_tenant([RUNTIME, 'endpoint', 'prepare', str(manifest)])
+                self.assertNotEqual(result.returncode, 0, (root, path))
+                self.assertIn('invalid endpoint manifest:', result.stderr)
+                self.assertIn(message, result.stderr)
 
     def test_prepare_accepts_provider_setgid_runtime_directory(self):
         # The provider's tmpfiles rule uses mode 2700 for this directory.
@@ -272,12 +279,39 @@ while True:
         self.assertNotEqual(proxy.wait(timeout=3), 0)
         self.assertIn('not the declared Unix stream listener', self.read_logs())
 
+    def test_invalid_manifest_fields_are_refused(self):
+        manifest, data = self.manifest(os.getpid())
+        cases = [
+            ('owner template', {'owner': 'fixture@.service'}, 'invalid owning unit name'),
+            ('owner suffix', {'owner': 'fixture'}, 'invalid owning unit name'),
+            ('endpoint path', {'name': '../escape'}, 'invalid endpoint name'),
+            ('empty descriptor', {'descriptor': ''}, 'invalid activation descriptor name'),
+            ('long descriptor', {'descriptor': 'a' * 256}, 'invalid activation descriptor name'),
+            ('descriptor characters', {'descriptor': 'bad name'}, 'invalid activation descriptor name'),
+            ('systemctl path', {'systemctl': 'systemctl'}, 'helper executable paths must be absolute'),
+            ('nsenter path', {'nsenter': 'nsenter'}, 'helper executable paths must be absolute'),
+            ('setpriv path', {'setpriv': 'setpriv'}, 'helper executable paths must be absolute'),
+            ('proxy path', {'proxy': 'proxy'}, 'helper executable paths must be absolute'),
+            ('NUL in helper path', {'proxy': '/bin/\\u0000bad'}, 'helper executable paths must be absolute'),
+        ]
+        for description, changes, message in cases:
+            with self.subTest(description=description):
+                manifest.write_text(json.dumps(dict(data, **changes)))
+                result = self.run_tenant([RUNTIME, 'endpoint', 'prepare', str(manifest)])
+                self.assertNotEqual(result.returncode, 0, changes)
+                self.assertIn('invalid endpoint manifest:', result.stderr)
+                self.assertIn(message, result.stderr)
+
     def test_invalid_manifest_port_is_refused(self):
         manifest, data = self.manifest(os.getpid())
         for port in (0, 65536, True, '3000'):
-            manifest.write_text(json.dumps(dict(data, port=port)))
-            result = self.run_tenant([RUNTIME, 'endpoint', 'prepare', str(manifest)])
-            self.assertNotEqual(result.returncode, 0, port)
+            with self.subTest(port=port):
+                manifest.write_text(json.dumps(dict(data, port=port)))
+                result = self.run_tenant([RUNTIME, 'endpoint', 'prepare', str(manifest)])
+                self.assertNotEqual(result.returncode, 0, port)
+                self.assertIn('invalid endpoint manifest:', result.stderr)
+                if type(port) is int:
+                    self.assertIn('the private TCP port must be between 1 and 65535', result.stderr)
 
 
 if __name__ == '__main__':
