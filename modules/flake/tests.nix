@@ -43,6 +43,52 @@ in
                 exit 1
               fi
               grep -q "Cannot export endpoint" out.log
+
+              write_manifest() {
+                cat > manifest.json <<EOF
+              {"owner":"$1","name":"$2","runtime_dir":"$3","socket":"$4","descriptor":"$5","port":$6,"systemctl":"$7","nsenter":"/bin/true","setpriv":"/bin/true","proxy":"/bin/true"}
+              EOF
+              }
+
+              expect_rejected() {
+                if hostenv-system endpoint prepare manifest.json >out.log 2>&1; then
+                  echo "Endpoint runtime unexpectedly accepted a manifest: $1" >&2
+                  exit 1
+                fi
+                if ! grep -Fq 'invalid endpoint manifest:' out.log ||
+                   ! grep -Fq "$1" out.log; then
+                  cat out.log >&2
+                  exit 1
+                fi
+              }
+
+              mkdir -m 0700 "$TMPDIR/runtime"
+              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001 /bin/true
+              hostenv-system endpoint prepare manifest.json
+              test -d "$TMPDIR/runtime/fixture"
+              test ! -e "$TMPDIR/runtime/fixture/api.sock"
+
+              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime" hostenv-api 3001 /bin/true
+              expect_rejected "the export must be inside the environment's runtime directory"
+              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime-other/fixture/api.sock" hostenv-api 3001 /bin/true
+              expect_rejected "the export must be inside the environment's runtime directory"
+              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/../escape.sock" hostenv-api 3001 /bin/true
+              expect_rejected "socket and runtime paths must be absolute, normalised and contain safe components"
+              long_segment=$(printf '%0108d' 0 | tr 0 a)
+              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/$long_segment.sock" hostenv-api 3001 /bin/true
+              expect_rejected "the Unix socket path must be at most 107 bytes"
+
+              write_manifest 'fixture@.service' api "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001 /bin/true
+              expect_rejected "invalid owning unit name"
+              write_manifest fixture.service 'bad/name' "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001 /bin/true
+              expect_rejected "invalid endpoint name"
+              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" 'bad descriptor' 3001 /bin/true
+              expect_rejected "invalid activation descriptor name"
+              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 0 /bin/true
+              expect_rejected "the private TCP port must be between 1 and 65535"
+              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001 relative-systemctl
+              expect_rejected "helper executable paths must be absolute"
+
               touch "$out"
             '';
             provider-acme-process-tests = import ../../tests/unit/acme-deployment.nix {
