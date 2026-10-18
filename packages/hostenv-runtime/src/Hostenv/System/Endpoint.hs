@@ -117,9 +117,10 @@ validate settings = do
   unless (port settings >= 1 && port settings <= 65535) $
     invalid "the private TCP port must be between 1 and 65535"
   either invalid (const (pure ())) (validatePaths settings)
-  mapM_ (\path -> unless (not (null path) && head path == '/' &&
-                   not ('\NUL' `elem` path)) $
-                   invalid "helper executable paths must be absolute")
+  let validExecutablePath ('/' : rest) = '\NUL' `notElem` rest
+      validExecutablePath _ = False
+  mapM_ (\path -> unless (validExecutablePath path) $
+           invalid "helper executable paths must be absolute")
     [systemctl settings, nsenter settings, setpriv settings, proxy settings]
 
 loadSettings :: FilePath -> IO Settings
@@ -229,16 +230,16 @@ ownerState settings = do
     Nothing -> invalid "timed out querying the owning service"
     Just (ExitFailure _, _, details) -> invalid ("cannot query owner state: " ++ details)
     Just (ExitSuccess, output, _) ->
-      pure (Map.fromList [ (key, tail value)
+      pure (Map.fromList [ (key, contents)
                           | line <- lines output,
                             let (key, value) = break (== '=') line,
-                            not (null value)])
+                            '=' : contents <- [value]])
 
 requireOwnerUid :: ProcessID -> IO ()
 requireOwnerUid pid = do
   status <- readFile ("/proc/" ++ show pid ++ "/status")
   let uidLine = find ("Uid:" `isPrefixOf`) (lines status)
-      uids = uidLine >>= traverse (readMaybe :: String -> Maybe Integer) . tail . words
+      uids = uidLine >>= traverse (readMaybe :: String -> Maybe Integer) . drop 1 . words
   expected <- fromIntegral <$> getEffectiveUserID
   unless (uids == Just (replicate 4 expected)) $
     invalid "the owning process does not belong to this environment user"
@@ -369,12 +370,14 @@ startProxy settings descriptors = do
 joined :: IORef Bool -> Settings -> [Fd] -> IO ExitCode
 joined interrupted settings handles = do
   let raw = map (\(Fd fd) -> fd) handles
-  unless (length handles == 4 && length (filter (> 3) raw) == 4 &&
-          length (Map.fromList [(fd, ()) | fd <- raw]) == 4) $
-    invalid "invalid private namespace handles"
+  (ownerFd, userFd, netFd, hostFd) <-
+    case handles of
+      [ownerFd, userFd, netFd, hostFd]
+        | all (> 3) raw && length (Map.fromList [(fd, ()) | fd <- raw]) == 4 ->
+            pure (ownerFd, userFd, netFd, hostFd)
+      _ -> invalid "invalid private namespace handles"
   validateActivation settings
   requireCapabilitiesDropped
-  let [ownerFd, userFd, netFd, hostFd] = handles
   bracket (openNamespace "/proc/self/ns/net") closeFd $ \currentNet -> do
     expected <- sameNamespace currentNet netFd
     host <- sameNamespace hostFd netFd
