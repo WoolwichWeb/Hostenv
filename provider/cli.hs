@@ -37,6 +37,7 @@ import Hostenv.Provider.DnsBackoff (backoffDelays)
 import Hostenv.Provider.DnsTransition (
     DnsItem (..),
     collectDnsItems,
+    isHostenvManagedDnsItem,
  )
 import Hostenv.Provider.SigningTarget (deployProfilePathInstallableAt)
 import Hostenv.Provider.TlsReadiness qualified as TlsReadiness
@@ -1983,12 +1984,13 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
             dnsStateRows <-
                 forM envInfosFiltered $ \envInfo -> do
                     let items = environmentDnsItems hostenvHostname envs envInfo
+                    let managedItems = filter (isHostenvManagedDnsItem hostenvHostname) items
                     -- Preflight is informational and happens before deployment.
                     -- A failed observation is not evidence that DNS is wrong,
                     -- but it is also not "ready": carry it forward so the
                     -- reconciliation step can either repair it via Cloudflare or
                     -- return the typed lookup failure.
-                    dnsChecks <- checkDnsItems deployDnsCache preflightDnsObservation items
+                    dnsChecks <- checkDnsItems deployDnsCache preflightDnsObservation managedItems
                     let mismatched =
                             [ item
                             | (item, Right False) <- dnsChecks
@@ -2033,6 +2035,9 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                         )
                     pure (envInfo.userName, items)
             let dnsItemsByUser = M.fromList dnsStateRows
+            -- Keep all virtual hosts for certificate handling, but reconcile
+            -- only hostnames under the provider's Hostenv DNS namespace.
+            let managedDnsItemsByUser = M.map (filter (isHostenvManagedDnsItem hostenvHostname)) dnsItemsByUser
 
             migrationHandoffStates <-
                 forM migrations $ \migration@(envInfo, prevNode) -> do
@@ -2278,7 +2283,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                             mCfZoneOverride
                             plan
                             envInfo
-                            (M.findWithDefault [] envInfo.userName dnsItemsByUser)
+                            (M.findWithDefault [] envInfo.userName managedDnsItemsByUser)
                     case dnsResult of
                         Left err -> pure (Left err)
                         Right () -> retryCertificateOrders envInfo
@@ -2514,7 +2519,7 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                                     )
                                                                                 )
                                                                         Just envInfo -> do
-                                                                            let allItems = M.findWithDefault [] userName dnsItemsByUser
+                                                                            let managedItems = M.findWithDefault [] userName managedDnsItemsByUser
                                                                             result <-
                                                                                 ensureEnvironmentDns
                                                                                     deployDnsCache
@@ -2522,11 +2527,11 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                                                     mCfZoneOverride
                                                                                     plan
                                                                                     envInfo
-                                                                                    allItems
+                                                                                    managedItems
                                                                             case result of
                                                                                 Left err -> pure (Just (userName <> ": " <> err))
                                                                                 Right () -> do
-                                                                                    waitForAuthoritativeDnsPropagation deployDnsCache allItems >>= \case
+                                                                                    waitForAuthoritativeDnsPropagation deployDnsCache managedItems >>= \case
                                                                                         Left dnsFailure ->
                                                                                             pure
                                                                                                 ( Just
