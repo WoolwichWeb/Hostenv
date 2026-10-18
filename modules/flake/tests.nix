@@ -32,6 +32,19 @@ in
             inherit pkgs envs makeHostenv inputs;
             documentationEnabled = false;
           }) // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            endpoint-contracts = import ../../tests/integration/endpoints/contracts.nix {
+              inherit pkgs makeHostenv;
+            };
+            endpoint-runtime-cli = pkgs.runCommand "endpoint-runtime-cli" {
+              nativeBuildInputs = [ (cfgTop.flake.lib.hostenv.packagesFor pkgs).hostenv-runtime ];
+            } ''
+              if hostenv-system endpoint prepare /nonexistent-manifest.json >out.log 2>&1; then
+                echo "Endpoint runtime unexpectedly accepted missing manifest" >&2
+                exit 1
+              fi
+              grep -q "Cannot export endpoint" out.log
+              touch "$out"
+            '';
             provider-acme-process-tests = import ../../tests/unit/acme-deployment.nix {
               inherit pkgs;
               runtime = (cfgTop.flake.lib.hostenv.packagesFor pkgs).hostenv-runtime;
@@ -53,6 +66,11 @@ in
             drupal6-vm-test = import ../../tests/integration/drupal6/vm-test.nix {
               inherit pkgs;
               env = envs.drupal6;
+              hostenvNixosModule = cfgTop.flake.modules.nixos.hostenv-top-level;
+            };
+
+            endpoints-vm-test = import ../../tests/integration/endpoints/vm-test.nix {
+              inherit pkgs makeHostenv;
               hostenvNixosModule = cfgTop.flake.modules.nixos.hostenv-top-level;
             };
 
