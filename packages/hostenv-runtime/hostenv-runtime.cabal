@@ -9,8 +9,10 @@ library
   hs-source-dirs: src
   exposed-modules:
     Hostenv.System.Acme
+    Hostenv.System.Endpoint
     Hostenv.System.Error
     Hostenv.System.Lock
+  c-sources: cbits/endpoint_linux.c
   build-depends:
     base >=4.16 && <5,
     aeson,
