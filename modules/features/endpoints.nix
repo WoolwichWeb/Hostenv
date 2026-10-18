@@ -7,11 +7,9 @@ in
     { config, lib, pkgs, ... }:
     let
       runtimeDir = config.hostenv.runtimeDir;
+      # Service and endpoint names also become Unix socket path components.
+      # Their naming contract is stricter than systemd's unit-name rules.
       safeName = name: builtins.match "[A-Za-z0-9][A-Za-z0-9_.-]*" name != null;
-      validRoot =
-        lib.hasPrefix "/" runtimeDir
-        && builtins.all (part: part != "" && part != "." && part != ".." && safeName part)
-          (lib.tail (lib.splitString "/" runtimeDir));
 
       socketPath = service: endpoint:
         let
@@ -20,9 +18,7 @@ in
           else
             "${runtimeDir}/${service}/${endpoint}.sock";
         in
-        if !validRoot then
-          throw "Hostenv endpoints require an absolute runtime directory with safe path components."
-        else if !(safeName service && safeName endpoint) then
+        if !(safeName service && safeName endpoint) then
           throw "Endpoint ${service}.${endpoint}: service and endpoint names must be safe path components; templates are not supported."
         else if builtins.stringLength path >= 108 then
           throw "Endpoint ${service}.${endpoint}: its Unix socket path exceeds 107 bytes: ${path}"
