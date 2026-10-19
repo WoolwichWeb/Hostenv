@@ -77,7 +77,7 @@ in
               write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime-other/fixture/api.sock" hostenv-api 3001 /bin/true
               expect_rejected "the export must be inside the environment's runtime directory"
               write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/../escape.sock" hostenv-api 3001 /bin/true
-              expect_rejected "socket and runtime paths must be absolute, normalised and contain safe components"
+              expect_rejected "socket and runtime paths must be absolute, normalised and contain no NUL bytes"
               long_segment=$(printf '%0108d' 0 | tr 0 a)
               write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/$long_segment.sock" hostenv-api 3001 /bin/true
               expect_rejected "the Unix socket path must be at most 107 bytes"
