@@ -74,7 +74,11 @@ in
             version = cfg.codebase.version;
             src = lib.cleanSourceWith {
               src = config.hostenv.root;
-              filter = path: type: baseNameOf path == "composer.json" || baseNameOf path == "composer.lock";
+              filter =
+                path: type:
+                baseNameOf path == "composer.json"
+                || baseNameOf path == "composer.lock"
+                || baseNameOf path == "patches.lock.json";
             };
             composerLock = config.hostenv.root + /composer.lock;
             vendorHash = cfg.composer.dependencyHash;
