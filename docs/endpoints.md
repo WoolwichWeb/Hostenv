@@ -1,6 +1,6 @@
 # Private TCP endpoint exports
 
-This is the first implementation increment of the service-connection requirements in MR 52. It is not the complete Laravel networking feature. Keep the infrastructure MR in draft until the full NixOS tests pass on its current head and the lifecycle has been reviewed.
+This implements the serving-side endpoint requirements tracked in MR 52. The consumer-side connection API and Laravel integration remain separate work.
 
 ## Module-author interface
 
@@ -30,7 +30,7 @@ Each endpoint has a Unix socket unit and a separate forwarding unit. A connectio
 
 A named activation descriptor identifies the expected Unix listener. Its type, path and owning process are checked. The application does not receive this descriptor. Separate forwarding units avoid assumptions about descriptor order across several endpoints.
 
-The monitor supervises only its proxy child. An owner exit releases the old namespace; a later connection can start a new generation. Helper cleanup uses pidfds, a five-second termination period and bounded escalation. It never signals the application. The generated forwarding service uses `KillMode=mixed`, so systemd first signals the monitor, which can terminate and reap its proxy before exiting successfully. If cleanup fails, systemd still has whole-cgroup SIGKILL escalation. This avoids treating a normal stop as an unexpected proxy failure. Unit ordering is designed to let an owner stop before its adapters so that normal draining can retain connections; the VM test verifies the unit order, and the next VM run must verify clean shutdown status.
+The monitor supervises only its proxy child. An owner exit releases the old namespace; a later connection can start a new generation. Helper cleanup uses pidfds, a five-second termination period and bounded escalation. It never signals the application. The generated forwarding service uses `KillMode=mixed`, so systemd first signals the monitor, which can terminate and reap its proxy before exiting successfully. If cleanup fails, systemd still has whole-cgroup SIGKILL escalation. This avoids treating a normal stop as an unexpected proxy failure. Unit ordering lets the owner stop before its adapters so that normal draining can retain connections. The VM test covers unit ordering and clean shutdown.
 
 The default endpoint retains `<service>.socket`; other generated units have deterministic names derived from the service/endpoint pair. Existing conflicting declarations fail instead of being overwritten.
 
