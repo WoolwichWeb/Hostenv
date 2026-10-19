@@ -15,7 +15,7 @@ The application and its descendants can use `127.0.0.1` inside their private nam
 
 ## Supported commands
 
-The initial implementation accepts one ordinary `ExecStart` command beginning with an absolute executable path. It preserves the command's systemd argument parsing, the main process identity, service type, working directory, environment and readiness notifications. Unsupported executable prefixes (such as `-` or `@`) and multiple `ExecStart` commands are rejected during evaluation.
+The initial implementation accepts one ordinary `ExecStart` command beginning with an absolute executable path. It preserves the command's systemd argument parsing, the main process identity, service type, working directory, environment and readiness notifications. Unsupported executable prefixes (such as `-` or `@`) and multiple `ExecStart` commands, including semicolon-separated commands, are rejected during evaluation.
 
 Only the **main `ExecStart` process** is placed in the private namespace. systemd control commands such as `ExecStartPre`, `ExecStartPost`, `ExecReload` and `ExecStop` retain their normal execution context. Do not use those hooks for application work that must be isolated. Extending network policy to every execution path, including outbound access and DNS, belongs to the later service-connections work in MR 52.
 

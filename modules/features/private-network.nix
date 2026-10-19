@@ -12,8 +12,10 @@
         # A single ordinary ExecStart may be prefixed without changing how
         # systemd parses its arguments. Prefix flags (@, -, +, ! and :) and
         # multiple commands have different semantics and need explicit support.
+        # Semicolons can separate commands inside an ExecStart directive.
         supported = builtins.isString command
-          && builtins.match "/[^[:space:]]+([[:space:]]+.*)?" command != null;
+          && builtins.match "/[^[:space:]]+([[:space:]]+.*)?" command != null
+          && builtins.match ".*;.*" command == null;
 
         enter = pkgs.writeShellScript "hostenv-private-network-enter" ''
           set -e

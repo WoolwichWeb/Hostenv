@@ -210,10 +210,7 @@ pkgs.testers.runNixOSTest {
             assert machine.succeed(
                 control(env, "show -P NoNewPrivileges isolated-probe.service")
             ).strip() == "yes"
-
-    with subtest("namespace setup failure does not launch an isolated service"):
-        machine.fail(control(a, "start isolated-probe-blocked.service"))
-        machine.fail("test -e " + quote(a["runtime"] + "/blocked-probe-state/loopback"))
+            machine.succeed(control(env, "stop isolated-probe.service"))
 
     with subtest("owner readiness and reload retain the real main process"):
         before = main_pid(a, "example.service")
@@ -285,5 +282,9 @@ pkgs.testers.runNixOSTest {
         machine.succeed(control(a, "reset-failed " + ep["socketUnit"]))
         machine.succeed(control(a, "start " + ep["socketUnit"]))
         ready(a, "api", 3001)
+
+    with subtest("namespace setup failure does not launch an isolated service"):
+        machine.fail(control(a, "start isolated-probe-blocked.service"))
+        machine.fail("test -e " + quote(a["runtime"] + "/blocked-probe-state/loopback"))
   '';
 }

@@ -66,6 +66,10 @@ let
     })
     (fails {
       hostenv.network.isolated = true;
+      serviceConfig.ExecStart = "${command} ; ${pkgs.coreutils}/bin/true";
+    })
+    (fails {
+      hostenv.network.isolated = true;
       serviceConfig = { ExecStart = command; NoNewPrivileges = false; };
     })
   ];
