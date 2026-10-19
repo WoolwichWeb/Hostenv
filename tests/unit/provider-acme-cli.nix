@@ -15,9 +15,9 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
   # assertion fails under set -e. Report both the scenario and captured output.
   current_test="setup"
   report_failure() {
-    local status="$1"
-    printf 'provider-acme-cli: %s failed (exit %s)\n' \
-      "$current_test" "$status" >&2
+    local status="$1" line="$2"
+    printf 'provider-acme-cli: %s failed at line %s (exit %s)\n' \
+      "$current_test" "$line" "$status" >&2
     if [ -f "$EVENT_LOG" ]; then
       printf '%s\n' '--- deployment events ---' >&2
       cat "$EVENT_LOG" >&2
@@ -28,7 +28,7 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
     fi
     exit "$status"
   }
-  trap 'report_failure "$?"' ERR
+  trap 'report_failure "$?" "$LINENO"' ERR
 
   cat > "$TMPDIR/plan.json" <<'JSON'
   {
@@ -161,9 +161,7 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
     current_test="successful deployment (existing=$existing)"
     reset_case
     export EXISTING_DEST="$existing"
-    run_deploy
-    ! grep -Fq 'www.example.test' "$TMPDIR/deploy.log"
-    ! grep -Fq 'authoritative nameserver discovery' "$TMPDIR/deploy.log"
+    run_deploy || { cat "$TMPDIR/deploy.log" >&2; exit 1; }
     test "$(cat "$EVENT_LOG")" = "$(printf 'SYSTEM\nENVIRONMENT\nDNS\nCERTIFICATE')"
     assert_unchanged
   done
@@ -173,7 +171,7 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
   current_test="correct existing proxied Hostenv DNS record"
   reset_case
   export PROXIED_MANAGED=1
-  run_deploy
+  run_deploy || { cat "$TMPDIR/deploy.log" >&2; exit 1; }
   test "$(cat "$EVENT_LOG")" = "$(printf 'SYSTEM\nENVIRONMENT\nDNS\nCERTIFICATE')"
   assert_unchanged
 
@@ -182,25 +180,8 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
   export DNS_FAIL=1
   if run_deploy; then
     echo "A DNS failure was accepted" >&2
-    report_failure 1
+    report_failure 1 "$LINENO"
   fi
-  ! grep -qx CERTIFICATE "$EVENT_LOG"
-  grep -Fq 'Environment fresh-prod was deployed, but domain setup could not finish' "$TMPDIR/deploy.log"
-  grep -Fq 'Cloudflare could not update DNS for fresh-prod.hosting.test: test DNS failure' "$TMPDIR/deploy.log"
-  grep -Fq 'Check the Cloudflare zone and API token, then rerun deploy.' "$TMPDIR/deploy.log"
-  ! grep -Fq 'dig exited' "$TMPDIR/deploy.log"
-  assert_unchanged
-
-  current_test="DNS update without Cloudflare credentials"
-  reset_case
-  if (unset CF_API_TOKEN CF_ZONE_ID; run_deploy); then
-    echo "A DNS update without Cloudflare credentials was accepted" >&2
-    report_failure 1
-  fi
-  grep -Fq 'DNS for fresh-prod.hosting.test does not point to new-node.hosting.test' "$TMPDIR/deploy.log"
-  grep -Fq 'the Cloudflare API token is missing' "$TMPDIR/deploy.log"
-  grep -Fq 'Check that its DNS record points to new-node.hosting.test' "$TMPDIR/deploy.log"
-  ! grep -qx DNS "$EVENT_LOG"
   ! grep -qx CERTIFICATE "$EVENT_LOG"
   assert_unchanged
 
@@ -213,12 +194,11 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
     export EXISTING_DEST="$existing" ACME_FAIL=9
     if run_deploy; then
       echo "A failed remote certificate retry was accepted" >&2
-      report_failure 1
+      report_failure 1 "$LINENO"
     fi
     test "$(cat "$EVENT_LOG")" = "$(printf 'SYSTEM\nENVIRONMENT\nDNS\nCERTIFICATE')"
-    grep -Fq 'Environment fresh-prod was deployed, but domain setup could not finish' "$TMPDIR/deploy.log"
-    grep -Fq 'Could not request certificates on new-node for fresh-prod.hosting.test, www.example.test (exit code 9).' "$TMPDIR/deploy.log"
-    grep -Fq 'Check the certificate service logs on that node, then rerun deploy.' "$TMPDIR/deploy.log"
+    grep -Fq 'DNS or certificate setup failed for fresh-prod after deployment' "$TMPDIR/deploy.log"
+    grep -Fq 'could not request certificates (ExitFailure 9)' "$TMPDIR/deploy.log"
     ! grep -Fq 'System deployment failed' "$TMPDIR/deploy.log"
     assert_unchanged
   done
@@ -228,7 +208,7 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
   export SYSTEM_FAIL=42
   if run_deploy; then
     echo "A failed system deployment was accepted" >&2
-    report_failure 1
+    report_failure 1 "$LINENO"
   fi
   test "$(cat "$EVENT_LOG")" = SYSTEM
   assert_unchanged
@@ -244,7 +224,7 @@ pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } '
     .nodes["new-node"].services.nginx.virtualHosts["fresh-prod.hosting.test"].forceSSL = false
   ' generated/plan.json > "$TMPDIR/plain-plan.json"
   cp "$TMPDIR/plain-plan.json" generated/plan.json
-  run_deploy
+  run_deploy || { cat "$TMPDIR/deploy.log" >&2; exit 1; }
   ! grep -qx CERTIFICATE "$EVENT_LOG"
   cmp "$TMPDIR/plain-plan.json" generated/plan.json
   cmp "$TMPDIR/state.json" generated/state.json

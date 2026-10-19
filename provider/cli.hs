@@ -401,8 +401,8 @@ formatCFError cfErr =
 cfWriteFailureReason :: CFWrite -> Text
 cfWriteFailureReason resp =
     if null resp.wErrors
-        then "Cloudflare rejected the update without explaining why"
-        else T.intercalate "; " (map formatCFError resp.wErrors)
+        then "Cloudflare API reported success=false with no error details"
+        else "Cloudflare API reported success=false: " <> T.intercalate "; " (map formatCFError resp.wErrors)
 
 data CFZoneInfo = CFZoneInfo {zName :: Text}
 instance A.FromJSON CFZoneInfo where
@@ -586,16 +586,16 @@ uniqueDnsItems =
 
 classifyUpsertEligibility :: Maybe Text -> Maybe Text -> Maybe Text -> Text -> DnsUpsertEligibility
 classifyUpsertEligibility mToken mZoneId mZoneName vhName
-    | isNothing mToken = UpsertIneligible "the Cloudflare API token is missing"
-    | isNothing mZoneId = UpsertIneligible "the Cloudflare zone ID is missing"
-    | isNothing mZoneName = UpsertIneligible "the Cloudflare zone could not be verified"
+    | isNothing mToken = UpsertIneligible "Cloudflare token was not provided"
+    | isNothing mZoneId = UpsertIneligible "Cloudflare zone was not provided"
+    | isNothing mZoneName = UpsertIneligible "could not determine the Cloudflare zone name"
     | otherwise =
         case mZoneName of
             Just zoneName ->
                 if isSubdomainOf vhName zoneName
                     then UpsertEligible
-                    else UpsertIneligible ("the domain is outside the configured Cloudflare zone " <> zoneName)
-            Nothing -> UpsertIneligible "the Cloudflare zone could not be verified"
+                    else UpsertIneligible ("host is outside Cloudflare zone " <> zoneName)
+            Nothing -> UpsertIneligible "could not determine the Cloudflare zone name"
 
 waitForDnsPropagationBy ::
     IO (DnsItem -> IO (Either Dns.DnsLookupFailure Bool)) ->
@@ -633,14 +633,11 @@ waitForDnsPropagationBy newPhaseCheck items =
     go resolved unresolved [] =
         pure (Right (S.fromList (map dnsKey resolved), unresolved))
     go resolved unresolved (delaySec : restDelays) = do
-        let remaining = length unresolved
         printProviderLine
-            ( "DNS is still updating for "
-                <> T.pack (show remaining)
-                <> (if remaining == 1 then " hostname" else " hostnames")
-                <> ". Checking again in "
+            ( "Waiting "
                 <> T.pack (show delaySec)
-                <> " seconds."
+                <> "s before rechecking DNS propagation; unresolved hostnames: "
+                <> T.pack (show (length unresolved))
             )
         threadDelay (delaySec * 1000000)
         partitionByDns unresolved >>= \case
@@ -745,9 +742,8 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                 Left err ->
                     pure
                         ( Left
-                            ( "Hostenv could not read its Cloudflare settings: "
+                            ( "automatic DNS update could not be prepared: "
                                 <> T.pack (displayException err)
-                                <> ". Check the configured token file and zone, then rerun deploy."
                             )
                         )
                 Right (mToken, mZone, mZoneName) -> do
@@ -757,22 +753,35 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                                 UpsertIneligible reason ->
                                     pure
                                         ( Left
-                                            ( "DNS for "
-                                                <> item.diDiscoveryHost
-                                                <> ( case lookupFailure of
-                                                        Nothing -> " does not point to " <> item.diExpectedHost <> ". "
-                                                        Just _ -> " could not be checked. "
-                                                   )
-                                                <> "Hostenv cannot update it automatically ("
-                                                <> reason
-                                                <> "). Check that its DNS record points to "
-                                                <> item.diExpectedHost
-                                                <> ", or correct your Cloudflare settings, then rerun deploy."
+                                            ( case lookupFailure of
+                                                Nothing ->
+                                                    item.diDiscoveryHost
+                                                        <> " must point to "
+                                                        <> item.diExpectedHost
+                                                        <> " (automatic DNS update unavailable: "
+                                                        <> reason
+                                                        <> ")"
+                                                Just dnsFailure ->
+                                                    "could not verify DNS for "
+                                                        <> item.diDiscoveryHost
+                                                        <> ": "
+                                                        <> Dns.renderLookupFailure dnsFailure
+                                                        <> " (automatic DNS update unavailable: "
+                                                        <> reason
+                                                        <> ")"
                                             )
                                         )
                                 UpsertEligible ->
                                     case (mToken, mZone) of
                                         (Just token, Just zoneId) -> do
+                                            forM_ lookupFailure $ \dnsFailure ->
+                                                printProviderErrLine
+                                                    ( "Warning: could not verify current DNS for "
+                                                        <> item.diDiscoveryHost
+                                                        <> " ("
+                                                        <> Dns.renderLookupFailure dnsFailure
+                                                        <> "); attempting the configured Cloudflare update"
+                                                    )
                                             printProviderLine
                                                 ( "Updating DNS "
                                                     <> item.diDiscoveryHost
@@ -785,20 +794,18 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                                                     Right () -> Right item
                                                     Left err ->
                                                         Left
-                                                            ( "Cloudflare could not update DNS for "
+                                                            ( "Cloudflare update failed for "
                                                                 <> item.diDiscoveryHost
                                                                 <> ": "
                                                                 <> err
-                                                                <> ". Check the Cloudflare zone and API token, then rerun deploy."
                                                             )
                                         _ ->
                                             pure
                                                 ( Left
-                                                    ( "DNS for "
-                                                        <> item.diDiscoveryHost
-                                                        <> " needs checking. Add Cloudflare credentials or update its DNS record to point to "
+                                                    ( item.diDiscoveryHost
+                                                        <> " must point to "
                                                         <> item.diExpectedHost
-                                                        <> ", then rerun deploy."
+                                                        <> " (Cloudflare credentials are missing)"
                                                     )
                                                 )
                     let failures = [err | Left err <- upsertResults]
@@ -807,16 +814,15 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                         else do
                             let updatedItems = [item | Right item <- upsertResults]
                             printProviderLine
-                                ( "Waiting for DNS updates for "
+                                ( "Waiting for DNS propagation for "
                                     <> envInfo.userName
                                 )
                             waitForAuthoritativeDnsPropagation dnsCache updatedItems >>= \case
-                                Left _ ->
+                                Left err ->
                                     pure
                                         ( Left
-                                            ( "Hostenv could not confirm the DNS updates for "
-                                                <> T.intercalate ", " (map (.diDiscoveryHost) updatedItems)
-                                                <> ". Check that their nameservers are responding, then rerun deploy."
+                                            ( "DNS propagation could not be verified: "
+                                                <> Dns.renderLookupFailure err
                                             )
                                         )
                                 Right (_, timedOutItems) ->
@@ -825,13 +831,12 @@ ensureEnvironmentDns dnsCache mTokenOverride mZoneOverride plan envInfo items = 
                                         else
                                             pure
                                                 ( Left
-                                                    ( "DNS changes have not reached every nameserver for "
+                                                    ( "DNS did not propagate to the destination for: "
                                                         <> T.intercalate
                                                             ", "
                                                             [ item.diDiscoveryHost <> " -> " <> item.diExpectedHost
                                                             | item <- timedOutItems
                                                             ]
-                                                        <> ". Allow more time for DNS to update, then rerun deploy."
                                                     )
                                                 )
 
@@ -1994,16 +1999,40 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                             [ (item, dnsFailure)
                             | (item, Left dnsFailure) <- dnsChecks
                             ]
-                    let pendingHosts =
-                            [ item.diDiscoveryHost | item <- mismatched ]
-                                <> [ item.diDiscoveryHost | (item, _) <- lookupFailures ]
-                    unless (null pendingHosts) $
-                        printProviderLine
-                            ( "DNS for "
-                                <> envInfo.userName
-                                <> " will be checked after deployment: "
-                                <> T.intercalate ", " pendingHosts
+                    forM_ lookupFailures $ \(item, dnsFailure) ->
+                        printProviderErrLine
+                            ( "Warning: could not check DNS for "
+                                <> item.diDiscoveryHost
+                                <> ": "
+                                <> Dns.renderLookupFailure dnsFailure
+                                <> "; deployment will try to reconcile DNS after activation"
                             )
+                    let destinationPresent =
+                            (M.lookup envInfo.node observedNodeUsers >>= M.lookup envInfo.userName)
+                                == Just envInfo.uid
+                    let migrationSource =
+                            lookup envInfo.userName
+                                [ (migrationEnv.userName, sourceNode)
+                                | (migrationEnv, sourceNode) <- migrations
+                                ]
+                    let lifecycleText =
+                            case migrationSource of
+                                Just sourceNode -> "migration " <> sourceNode <> " -> " <> envInfo.node
+                                Nothing ->
+                                    if destinationPresent
+                                        then "existing environment on " <> envInfo.node
+                                        else "fresh environment on " <> envInfo.node
+                    printProviderLine
+                        ( "DNS preflight for "
+                            <> envInfo.userName
+                            <> " ("
+                            <> lifecycleText
+                            <> "): "
+                            <> let pendingCount = length mismatched + length lookupFailures
+                                in if pendingCount == 0
+                                    then "ready"
+                                    else "DNS reconciliation needed after deployment; hostnames: " <> T.pack (show pendingCount)
+                        )
                     pure (envInfo.userName, items)
             let dnsItemsByUser = M.fromList dnsStateRows
             -- Keep all virtual hosts for certificate handling, but reconcile
@@ -2235,30 +2264,16 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                             attempt <- tryAny $
                                 runRemoteOutput target
                                     ([ "sudo", "-n", "/run/current-system/sw/bin/hostenv-acme-deploy", "retry", "--" ] ++ hosts)
-                            let failure =
-                                    "Could not request certificates on "
-                                        <> envInfo.node
-                                        <> " for "
-                                        <> T.intercalate ", " hosts
-                                nextStep = ". Check the certificate service logs on that node, then rerun deploy."
                             pure $ case attempt of
-                                Left err ->
-                                    Left (failure <> ": " <> T.pack (displayException err) <> nextStep)
+                                Left err -> Left ("could not request certificates: " <> T.pack (displayException err))
                                 Right (ExitSuccess, _, _) -> Right ()
-                                Right (ExitFailure code, out, err) ->
-                                    let details = filter (not . T.null) (map T.strip (T.lines (out <> "\n" <> err)))
-                                        explanation =
-                                            case reverse details of
-                                                [] -> ""
-                                                detail : _ -> ": " <> T.dropWhileEnd (== '.') detail
-                                     in Left
-                                            ( failure
-                                                <> " (exit code "
-                                                <> T.pack (show code)
-                                                <> ")"
-                                                <> explanation
-                                                <> nextStep
-                                            )
+                                Right (code, out, err) ->
+                                    Left
+                                        ( "could not request certificates ("
+                                            <> T.pack (show code)
+                                            <> "): "
+                                            <> T.strip (out <> "\n" <> err)
+                                        )
 
             let reconcileDnsAfterDeployment envInfo = do
                     dnsResult <-
@@ -2404,10 +2419,11 @@ runDeploy mNode mCfTokenOverride mCfZoneOverride mSigningKeyPath forceRemoteBuil
                                                         Right () -> pure (envResult, True, verificationFailure)
                                                         Left err -> do
                                                             printProviderErrLine
-                                                                ( "Environment "
+                                                                ( "DNS or certificate setup failed for "
                                                                     <> envName
-                                                                    <> " was deployed, but domain setup could not finish: "
+                                                                    <> " after deployment: "
                                                                     <> err
+                                                                    <> ". Fix the reported problem and rerun deploy."
                                                                 )
                                                             pure ((envName, ExitFailure 1), False, verificationFailure)
 

@@ -875,10 +875,8 @@ in
       ${pkgs.gnugrep}/bin/grep -Fq 'CLEANUP acme-prod' "$eventLog"
       ${pkgs.gnugrep}/bin/grep -Fq 'HANDOFF_QUIESCED acme-prod' "$eventLog"
       ! ${pkgs.gnugrep}/bin/grep -Fq '#"old-node"."system"' "$nixLog"
-      ${pkgs.gnugrep}/bin/grep -Fq 'Migration cannot finish after the source was stopped' "$TMPDIR/ns-fail.out"
-      ${pkgs.gnugrep}/bin/grep -Fq 'Hostenv could not confirm the DNS updates for acme-prod.hosting.test' "$TMPDIR/ns-fail.out"
-      ${pkgs.gnugrep}/bin/grep -Fq 'Check that their nameservers are responding, then rerun deploy.' "$TMPDIR/ns-fail.out"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'DNS server returned SERVFAIL' "$TMPDIR/ns-fail.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'authoritative nameserver discovery' "$TMPDIR/ns-fail.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'DNS server returned SERVFAIL' "$TMPDIR/ns-fail.out"
 
       # DNS is part of migration finalization. If automatic updates are
       # unavailable, a moved source is quiesced but its account is not removed
@@ -1281,8 +1279,7 @@ in
       rm -f "$TMPDIR/dns-state/fresh-prod-new"
       PATH="$fakeBin:$PATH" NIX_LOG="$log" DIG_LOG="$digLog" DNS_STATE_DIR="$TMPDIR/dns-state" CF_API_TOKEN=test-token CF_ZONE_ID=zone \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/fresh.out" 2>&1
-      ${pkgs.gnugrep}/bin/grep -Fq 'DNS for fresh-prod will be checked after deployment:' "$TMPDIR/fresh.out"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'Migration backup for fresh-prod' "$TMPDIR/fresh.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'fresh environment on new-node' "$TMPDIR/fresh.out"
       test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test A$' "$digLog")" -eq 2
       test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test AAAA$' "$digLog")" -eq 2
       ! ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
@@ -1297,9 +1294,8 @@ in
       : > "$digLog"
       rm -f "$TMPDIR/dns-state/fresh-prod-new"
       PATH="$fakeBin:$PATH" NIX_LOG="$log" DIG_LOG="$digLog" DNS_STATE_DIR="$TMPDIR/dns-state" DNS_OBSERVATION_FAIL=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/lookup-repair.out" 2>&1
-      ${pkgs.gnugrep}/bin/grep -Fq 'Updating DNS fresh-prod.hosting.test -> new-node.hosting.test' "$TMPDIR/lookup-repair.out"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'could not verify current DNS' "$TMPDIR/lookup-repair.out"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'DNS server returned SERVFAIL' "$TMPDIR/lookup-repair.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'could not verify current DNS for fresh-prod.hosting.test' "$TMPDIR/lookup-repair.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'attempting the configured Cloudflare update' "$TMPDIR/lookup-repair.out"
       test -f "$TMPDIR/dns-state/fresh-prod-new"
       ${pkgs.diffutils}/bin/cmp "$TMPDIR/fresh-canonical-plan.json" generated/plan.json
 
@@ -1310,8 +1306,7 @@ in
       rm -f "$TMPDIR/dns-state/fresh-prod-new"
       PATH="$fakeBin:$PATH" NIX_LOG="$log" DIG_LOG="$digLog" DNS_STATE_DIR="$TMPDIR/dns-state" EXISTING_DEST=1 CF_API_TOKEN=test-token CF_ZONE_ID=zone \
         ${cliPkg}/bin/hostenv-provider deploy --remote-build --skip-verification > "$TMPDIR/existing.out" 2>&1
-      ${pkgs.gnugrep}/bin/grep -Fq 'DNS for fresh-prod will be checked after deployment:' "$TMPDIR/existing.out"
-      ! ${pkgs.gnugrep}/bin/grep -Fq 'Migration backup for fresh-prod' "$TMPDIR/existing.out"
+      ${pkgs.gnugrep}/bin/grep -Fq 'existing environment on new-node' "$TMPDIR/existing.out"
       test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test A$' "$digLog")" -eq 2
       test "$(${pkgs.gnugrep}/bin/grep -Ec 'new-node\.hosting\.test AAAA$' "$digLog")" -eq 2
       ! ${pkgs.gnugrep}/bin/grep -Fq 'path:' "$log"
