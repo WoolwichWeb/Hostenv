@@ -14,6 +14,7 @@
   // (import ./backups-repo-host.nix { inherit pkgs makeHostenv; })
   // (import ./mysql-backups.nix { inherit pkgs; })
   // (import ./mysql-programs.nix { inherit pkgs; })
+  // (import ./drupal-composer-sources.nix { inherit pkgs; })
   // (import ./mysql-binlog-retention.nix { inherit pkgs; })
   // (import ./redis.nix { inherit pkgs; })
   // (import ./mysql-backups-dependency.nix { inherit pkgs makeHostenv; })
