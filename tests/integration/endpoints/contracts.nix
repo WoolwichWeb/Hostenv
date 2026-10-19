@@ -54,6 +54,9 @@ let
   exactRoot = "/" + lib.concatStrings (lib.replicate 99 "r");
   checks = [
     (unitEvaluates single "example" "default")
+    # Declaring endpoints must not silently change the owner's network policy.
+    (!single.systemd.services.example.hostenv.network.isolated)
+    (!(lib.hasInfix "/bin/unshare" single.systemd.units."example.service".text))
     (single.systemd.services.example.endpoints.default.socket == "${runtime}/example.sock")
     (ep.default.socket == single.systemd.services.example.endpoints.default.socket)
     (ep.api.socket == named.systemd.services.example.endpoints.api.socket)
