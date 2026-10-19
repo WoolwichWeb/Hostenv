@@ -36,9 +36,11 @@ let
   disabled = evaluate {
     systemd.services.example = owner // { enable = false; endpoints.default.port = 3000; };
   };
-  # Force the resulting systemd unit definitions, including their text, so
-  # invalid endpoint declarations fail without exposing an internal plan.
-  fails = extra: !(builtins.tryEval (builtins.deepSeq (evaluate extra).systemd.units true)).success;
+  # Force the resulting systemd units so endpoint validation is exercised
+  # without exposing an internal plan. A positive control below also checks
+  # that forcing valid units succeeds.
+  unitsEvaluate = cfg: (builtins.tryEval (builtins.deepSeq cfg.systemd.units true)).success;
+  fails = extra: !(unitsEvaluate (evaluate extra));
   ep = multiple.systemd.services.example.endpoints;
   runtime = multiple.hostenv.runtimeDir;
   samePort = evaluate {
@@ -46,6 +48,7 @@ let
   };
   exactRoot = "/" + lib.concatStrings (lib.replicate 99 "r");
   checks = [
+    (unitsEvaluate single)
     (single.systemd.services.example.endpoints.default.socket == "${runtime}/example.sock")
     (ep.default.socket == single.systemd.services.example.endpoints.default.socket)
     (ep.api.socket == named.systemd.services.example.endpoints.api.socket)
