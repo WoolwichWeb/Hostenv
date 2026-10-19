@@ -1,6 +1,11 @@
 { pkgs, makeHostenv }:
 let
   lib = pkgs.lib;
+  # Unlike lib.hasInfix, replaceStrings does not construct a regular
+  # expression, which cannot contain Nix store-path string context.
+  contains = needle: haystack:
+    builtins.replaceStrings [ needle ] [ "" ] haystack != haystack;
+
   evaluate = extra: (makeHostenv [
     {
       hostenv = {
@@ -44,16 +49,16 @@ let
     (isolated.systemd.services.example.hostenv.network.isolated)
     (isolated.systemd.services.example.serviceConfig.ExecStart == command)
     (isolated.systemd.services.example.serviceConfig.NoNewPrivileges == true)
-    (lib.hasInfix
+    (contains
       "ExecStart=${pkgs.util-linux}/bin/unshare --user --map-current-user --keep-caps --net "
       isolatedUnit)
-    (lib.hasInfix " ${command}" isolatedUnit)
-    (lib.hasInfix "ExecReload=${reload}" isolatedUnit)
-    (lib.hasInfix "NoNewPrivileges=true" isolatedUnit)
+    (contains " ${command}" isolatedUnit)
+    (contains "ExecReload=${reload}" isolatedUnit)
+    (contains "NoNewPrivileges=true" isolatedUnit)
 
     (!ordinary.systemd.services.example.hostenv.network.isolated)
-    (lib.hasInfix "ExecStart=${command}" ordinaryUnit)
-    (!(lib.hasInfix "/bin/unshare" ordinaryUnit))
+    (contains "ExecStart=${command}" ordinaryUnit)
+    (!(contains "/bin/unshare" ordinaryUnit))
 
     (fails { hostenv.network.isolated = true; })
     (fails {
