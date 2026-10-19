@@ -242,7 +242,7 @@ attachReady settings manifest = do
     withOwner pid =
       bracket (pidfdOpen pid) closeFd $ \ownerFd -> do
         bracket (openNamespace ("/proc/" ++ show pid ++ "/ns/user")) closeFd $ \userFd ->
-          bracket (openNamespace ("/proc/" ++ show pid ++ "/ns/net")) closeFd $ \netFd ->
+          bracket (openNamespace ("/proc/" ++ show pid ++ "/ns/net")) closeFd $ \netFd -> do
             bracket (openNamespace "/proc/self/ns/net") closeFd $ \hostFd -> do
               isolated <- not <$> sameNamespace netFd hostFd
               unless isolated $
