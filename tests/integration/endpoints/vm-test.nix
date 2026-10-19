@@ -284,7 +284,12 @@ pkgs.testers.runNixOSTest {
         ready(a, "api", 3001)
 
     with subtest("namespace setup failure does not launch an isolated service"):
-        machine.fail(control(a, "start isolated-probe-blocked.service"))
+        # Type=exec can report startup before unshare attempts its syscall.
+        machine.execute(control(a, "start isolated-probe-blocked.service"))
+        machine.wait_until_succeeds(
+            control(a, "is-failed --quiet isolated-probe-blocked.service"),
+            timeout=timedelta(seconds=30),
+        )
         machine.fail("test -e " + quote(a["runtime"] + "/blocked-probe-state/loopback"))
   '';
 }
