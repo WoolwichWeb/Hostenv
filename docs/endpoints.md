@@ -14,9 +14,9 @@ systemd.services.example.endpoints = {
 
 The declaration extends Hostenv's existing nixpkgs-derived systemd service options. It does not replace `ExecStart`, `Type`, reload or restart settings.
 
-The service integration must start the owner in a private user and network namespace. The owner must be a foreground `simple`, `exec`, `notify` or `notify-reload` service. The current Haskell helper cannot export a listener belonging to a child in a different namespace from the owner's main process. It refuses an unisolated owner; it does not transform arbitrary commands into isolated services.
+The owner must run in a private user and network namespace, but declaring an endpoint does not create one. Integrations can use `systemd.services.<name>.hostenv.network.isolated = true` for the main process (see [Private network namespaces](private-network.md)). The owner must be a foreground `simple`, `exec`, `notify` or `notify-reload` service. The Haskell helper cannot export a listener belonging to a child in a different namespace from the owner's main process. It refuses an unisolated owner.
 
-Gotenberg is the first built-in integration. Customers still enable it with `services.gotenberg.enable = true`. Its existing socket path, fonts, conversion tools and outbound isolation are retained. Its systemd user service sets `NoNewPrivileges=true` to prevent privilege gains through setuid executables or file capabilities.
+Gotenberg is the first built-in integration. Customers still enable it with `services.gotenberg.enable = true`. Its existing socket path, fonts, conversion tools and outbound isolation are retained. It uses the shared private-network option, which also enforces `NoNewPrivileges=true`.
 
 ## Stable paths
 

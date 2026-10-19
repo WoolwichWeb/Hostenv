@@ -35,6 +35,9 @@ in
             endpoint-contracts = import ../../tests/integration/endpoints/contracts.nix {
               inherit pkgs makeHostenv;
             };
+            private-network-contracts = import ../../tests/integration/private-network/contracts.nix {
+              inherit pkgs makeHostenv;
+            };
             endpoint-runtime-cli = pkgs.runCommand "endpoint-runtime-cli" {
               nativeBuildInputs = [ (cfgTop.flake.lib.hostenv.packagesFor pkgs).hostenv-runtime ];
             } ''
