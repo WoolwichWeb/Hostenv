@@ -152,6 +152,8 @@ in
     
         in
         {
+          # Wrap the resolved command during unit generation, not by defining
+          # ExecStart in terms of itself in the service option fixpoint.
           systemd.units =
             mapAttrs' (n: v: nameValuePair "${n}.path" (pathToUnit v)) cfg.paths
             // mapAttrs' (n: v: nameValuePair "${n}.service" (serviceToUnit (wrapPrivateNetwork pkgs v))) cfg.services

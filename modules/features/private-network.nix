@@ -25,7 +25,7 @@
         '';
       in
       if !supported then
-        throw "Hostenv private networking for ${service.name} requires a single ExecStart command beginning with an absolute executable path."
+        throw "Hostenv private networking for ${service.name} requires one ExecStart command with an absolute executable path (no systemd prefixes or command separators)."
       else if service.serviceConfig.NoNewPrivileges != true then
         throw "Hostenv private networking for ${service.name} requires NoNewPrivileges=true."
       else

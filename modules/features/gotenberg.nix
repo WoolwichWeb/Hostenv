@@ -100,7 +100,6 @@
                 fi
               '';
             };
-
           in
           {
             description = "Gotenberg PDF conversion";
