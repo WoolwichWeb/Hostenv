@@ -1,7 +1,12 @@
 { ... }:
 {
   flake.modules.hostenv.drupalOptions =
-    { lib, config, pkgs, ... }:
+    {
+      lib,
+      config,
+      pkgs,
+      ...
+    }:
     let
       cfg = config.services.drupal;
       env = config.environments.${config.hostenv.environmentName};
@@ -11,14 +16,22 @@
     in
     {
       options.services.drupal = {
-        enable = lib.mkEnableOption ''support for Drupal in this project.
-          Enabling this will bring up all the services required for a Drupal
-          project, with some opinionated decisions about PHP setup and which database
-          to use (MariaDB).
+        enable = lib.mkEnableOption ''
+          support for Drupal in this project.
+                    Enabling this will bring up all the services required for a Drupal
+                    project, with some opinionated decisions about PHP setup and which database
+                    to use (MariaDB).
         '';
 
         majorVersion = lib.mkOption {
-          type = lib.types.enum [ 6 7 8 9 10 11 ];
+          type = lib.types.enum [
+            6
+            7
+            8
+            9
+            10
+            11
+          ];
           default = 10;
           description = ''
             Major Drupal version for this project.
@@ -30,14 +43,19 @@
 
         composer = {
 
-          enable = lib.mkEnableOption ''composer integration in this Drupal project.
+          enable =
+            lib.mkEnableOption ''
+              composer integration in this Drupal project.
 
-            If enabled, `dump-autoload` and `drupal:scaffold` will be run during
-            the build phase.
+                          If enabled, `dump-autoload` and `drupal:scaffold` will be run during
+                          the build phase.
 
-            By default, this will be enabled if a 'composer.json' file is found in
-            the project root, and that file is in version control.
-          '' // { default = lib.pathExists (config.hostenv.root + /composer.lock); };
+                          By default, this will be enabled if a 'composer.json' file is found in
+                          the project root, and that file is in version control.
+            ''
+            // {
+              default = lib.pathExists (config.hostenv.root + /composer.lock);
+            };
 
           dependencyHash = lib.mkOption {
             type = lib.types.str;
@@ -45,8 +63,16 @@
             default = lib.fakeHash;
           };
 
-          enablePlugins = lib.mkEnableOption "composer plugins when running commands like `composer install`" // { default = true; };
-          enableScripts = lib.mkEnableOption "composer scripts when running commands like `composer install`" // { default = true; };
+          enablePlugins =
+            lib.mkEnableOption "composer plugins when running commands like `composer install`"
+            // {
+              default = true;
+            };
+          enableScripts =
+            lib.mkEnableOption "composer scripts when running commands like `composer install`"
+            // {
+              default = true;
+            };
           enableDev = lib.mkEnableOption "dev dependencies in composer";
         };
 
@@ -72,13 +98,12 @@
           description = "Name of the Drupal database (used in default settings and restore guard).";
         };
 
-        enableRouteDebugging = (lib.mkEnableOption "route debug information in HTTP headers") //
-          {
-            description = ''
-              Emit X-Handled tracing headers to show which Nginx location handled the request; enabled by default outside production.
-            '';
-            default = env.type != "production";
-          };
+        enableRouteDebugging = (lib.mkEnableOption "route debug information in HTTP headers") // {
+          description = ''
+            Emit X-Handled tracing headers to show which Nginx location handled the request; enabled by default outside production.
+          '';
+          default = env.type != "production";
+        };
 
         phpPackage = lib.mkOption {
           type = lib.types.package;
@@ -116,10 +141,9 @@
         phpOptions = lib.mkOption {
           type = lib.types.lines;
           default = "";
-          example =
-            ''
-              date.timezone = "CET"
-            '';
+          example = ''
+            date.timezone = "CET"
+          '';
           description = ''
             Additional options appended to the PHP configuration file {file}`php.ini`.
           '';
@@ -140,17 +164,14 @@
           version =
             let
               lockFile = config.hostenv.root + /composer.lock;
-              # If there is a composer.lock file present, we use its 'content-hash'
-              # to ensure the FOD is rebuilt when the composer dependencies change.
+              # If there is a composer.lock file present, we use its hash as
+              # the version; this ensures the FOD is rebuilt when the composer
+              # dependencies change.
               calculatedVersion =
-                if builtins.pathExists lockFile
-                then
-                  let
-                    lockJson = builtins.fromJSON (builtins.readFile lockFile);
-                    lockFileHash = builtins.hashFile "sha256" lockFile;
-                  in
-                  builtins.substring 0 7 (lockJson.content-hash or lockFileHash)
-                else config.hostenv.safeEnvironmentName;
+                if builtins.pathExists lockFile then
+                  builtins.substring 0 7 (builtins.hashFile "sha256" lockFile)
+                else
+                  config.hostenv.safeEnvironmentName;
             in
             lib.mkOption {
               type = lib.types.str;
@@ -193,7 +214,9 @@
         };
 
         cron = {
-          enable = (lib.mkEnableOption "running Drupal's cron.") // { default = true; };
+          enable = (lib.mkEnableOption "running Drupal's cron.") // {
+            default = true;
+          };
           timerConfig = lib.mkOption {
             type = lib.types.attrsOf unitOption;
             default = {
@@ -235,9 +258,10 @@
 
           trustedHostPatterns = lib.mkOption {
             type = lib.types.listOf lib.types.str;
-            default = (builtins.map
-              (hostname: "^${builtins.replaceStrings ["."] ["\\."] hostname}$")
-              (builtins.attrNames env.virtualHosts)
+            default = (
+              builtins.map (hostname: "^${builtins.replaceStrings [ "." ] [ "\\." ] hostname}$") (
+                builtins.attrNames env.virtualHosts
+              )
             );
             defaultText = lib.literalExpression ''
               let
@@ -260,9 +284,10 @@
           errorReporting = lib.mkOption {
             type = lib.types.str;
             default =
-              if env.type == "production" || env.type == "testing"
-              then "E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE"
-              else "E_ALL";
+              if env.type == "production" || env.type == "testing" then
+                "E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED & ~E_NOTICE"
+              else
+                "E_ALL";
           };
 
           extraSettings = lib.mkOption {
