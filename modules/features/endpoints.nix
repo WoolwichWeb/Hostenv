@@ -52,10 +52,14 @@ in
         (path: builtins.isString path && lib.hasPrefix "/" path)
         (lib.toList value);
       systemdSocketPaths = lib.concatLists (lib.mapAttrsToList (_: unit:
-        lib.optionals unit.enable (
-          listenPaths (unit.socketConfig.ListenStream or [ ])
-          ++ listenPaths unit.listenStreams
-        )
+        lib.optionals unit.enable (lib.concatMap listenPaths [
+          (unit.socketConfig.ListenStream or [ ])
+          (unit.socketConfig.ListenDatagram or [ ])
+          (unit.socketConfig.ListenSequentialPacket or [ ])
+          (unit.socketConfig.ListenFIFO or [ ])
+          unit.listenStreams
+          unit.listenDatagrams
+        ])
       ) config.systemd.sockets);
 
       errors =

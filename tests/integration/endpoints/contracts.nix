@@ -93,6 +93,10 @@ let
       systemd.services.example = owner // { endpoints.api.port = 3000; };
       systemd.sockets.existing.socketConfig.ListenStream = "${runtime}/example";
     })
+    (fails {
+      systemd.services.example = owner // { endpoints.default.port = 3000; };
+      systemd.sockets.existing.listenDatagrams = [ "${runtime}/example.sock" ];
+    })
     (unitEvaluates (evaluate {
       systemd.services.example = owner // { endpoints.default.port = 3000; };
       systemd.sockets.existing.listenStreams = [ "${runtime}/unrelated.sock" ];
