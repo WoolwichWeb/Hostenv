@@ -101,28 +101,17 @@
               '';
             };
 
-            isolate = pkgs.writeShellApplication {
-              name = "gotenberg-isolate";
-              runtimeInputs = [ pkgs.iproute2 pkgs.util-linux ];
-              text = ''
-                ip link set lo up
-                exec setpriv --bounding-set=-all --inh-caps=-all --ambient-caps=-all ${lib.getExe start}
-              '';
-            };
           in
           {
             description = "Gotenberg PDF conversion";
             path = [ cfg.package ];
             endpoints.default.port = lib.mkDefault 3000;
+            hostenv.network.isolated = true;
             serviceConfig = {
               Type = "notify";
               NotifyAccess = "all";
-              # PrivateNetwork= may be ignored after setup errors in user
-              # services. Explicit unshare prevents Gotenberg starting unless
-              # its private network namespace was created successfully.
-              ExecStart = "${pkgs.util-linux}/bin/unshare --user --map-current-user --keep-caps --net ${lib.getExe isolate}";
+              ExecStart = lib.getExe start;
               PrivateTmp = true;
-              NoNewPrivileges = true;
               RuntimeDirectory = "gotenberg";
               WorkingDirectory = "%t/gotenberg";
               Environment = [

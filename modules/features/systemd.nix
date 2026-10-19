@@ -10,7 +10,10 @@
 #   LICENSES/MIT-nixpkgs.
 #   LICENSES/MIT-home-manager.
 
-{ ... }:
+{ config, ... }:
+let
+  wrapPrivateNetwork = config.flake.lib.hostenv.privateNetwork.wrapService;
+in
 {
   flake.modules.hostenv.systemd =
     # Based on nixpkgs' systemd.nix but with all the system-level
@@ -151,7 +154,7 @@
         {
           systemd.units =
             mapAttrs' (n: v: nameValuePair "${n}.path" (pathToUnit v)) cfg.paths
-            // mapAttrs' (n: v: nameValuePair "${n}.service" (serviceToUnit v)) cfg.services
+            // mapAttrs' (n: v: nameValuePair "${n}.service" (serviceToUnit (wrapPrivateNetwork pkgs v))) cfg.services
             // mapAttrs' (n: v: nameValuePair "${n}.slice" (sliceToUnit v)) cfg.slices
             // mapAttrs' (n: v: nameValuePair "${n}.socket" (socketToUnit v)) cfg.sockets
             // mapAttrs' (n: v: nameValuePair "${n}.target" (targetToUnit v)) cfg.targets
