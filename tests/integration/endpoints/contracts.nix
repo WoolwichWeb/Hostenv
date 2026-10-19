@@ -77,7 +77,7 @@ let
     (ep.api.proxyUnit != ep.admin.proxyUnit)
     (fails { systemd.services.example = owner // { endpoints.default.port = 0; }; })
     (fails { systemd.services.example = owner // { endpoints.default.port = 65536; }; })
-    (fails { systemd.services.example = owner // { endpoints."../bad".port = 3000; }; })
+    (failsWith "example" "../bad" { systemd.services.example = owner // { endpoints."../bad".port = 3000; }; })
     (failsWith "example@%i" "default" {
       systemd.services."example@%i" = owner // { endpoints.default.port = 3000; };
     })
