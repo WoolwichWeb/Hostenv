@@ -16,13 +16,13 @@ The declaration extends Hostenv's existing nixpkgs-derived systemd service optio
 
 The service integration must start the owner in a private user and network namespace. The owner must be a foreground `simple`, `exec`, `notify` or `notify-reload` service. The current Haskell helper cannot export a listener belonging to a child in a different namespace from the owner's main process. It refuses an unisolated owner; it does not transform arbitrary commands into isolated services.
 
-Gotenberg is the first built-in integration. Customers still enable it with `services.gotenberg.enable = true`. Its existing socket path, fonts, conversion tools and outbound isolation are retained.
+Gotenberg is the first built-in integration. Customers still enable it with `services.gotenberg.enable = true`. Its existing socket path, fonts, conversion tools and outbound isolation are retained. Its systemd user service sets `NoNewPrivileges=true` to prevent privilege gains through setuid executables or file capabilities.
 
 ## Stable paths
 
 The default export is `<runtimeDir>/example.sock`. Named exports are `<runtimeDir>/example/api.sock` and `<runtimeDir>/example/admin.sock`, even when there is only one named endpoint. Use the read-only `config.systemd.services.example.endpoints.api.socket` rather than reconstructing it.
 
-The internal `networking.endpointPlan` lists the paths, private ports, descriptor names and helper units. Native socket paths are registered internally for collision checks; the native-socket module does not create or modify them. Unknown pre-existing runtime objects are rejected without being removed. The provider creates the environment runtime directory with mode `2700` (private owner access and setgid for group inheritance). The endpoint preflight accepts `2700` as well as `0700` for this directory and its private subdirectories. It still rejects any group or other-user access, unexpected mode bits, or a different owner.
+The internal `networking.endpointPlan` lists the paths, private ports, descriptor names and helper units. Native socket paths are registered internally for collision checks; the native-socket module does not create or modify them. Unknown pre-existing runtime objects are rejected without being removed. The provider creates the environment runtime directory with mode `2700` (private owner access and setgid for group inheritance). The generated socket units use `DirectoryMode=0700` and `SocketMode=0600`. The endpoint preflight refuses symlinked parent directories and existing socket-path objects, but does not change directory ownership or permissions.
 
 ## How forwarding works
 

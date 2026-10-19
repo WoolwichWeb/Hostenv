@@ -7,10 +7,9 @@ import Control.Monad (unless, void, when)
 import Data.Aeson (FromJSON (..), (.:), withObject)
 import qualified Data.Aeson as A
 import qualified Data.ByteString as BS
-import Data.Bits ((.&.))
 import Data.Char (isAscii, isAlphaNum, isSpace)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import Data.List (find, isPrefixOf, stripPrefix)
+import Data.List (stripPrefix)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Foreign.C.Error (eEXIST, eSRCH, getErrno, throwErrno, throwErrnoIfMinus1Retry)
@@ -21,14 +20,13 @@ import Numeric (readHex)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO (hPutStrLn, stderr)
-import System.Posix.Files (deviceID, fileID, fileMode, fileOwner, getFdStatus, isDirectory)
+import System.Posix.Files (deviceID, fileID, getFdStatus)
 import System.Posix.IO (FdOption (CloseOnExec), closeFd, setFdOption)
 import System.Posix.Process
   (executeFile, exitImmediately, forkProcess, getProcessID, getProcessStatus)
 import System.Posix.Signals
   (Handler (Catch), Signal, installHandler, sigINT, sigKILL, sigTERM, signalProcess)
 import System.Posix.Types (Fd (..), ProcessID)
-import System.Posix.User (getEffectiveUserID)
 import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
@@ -182,28 +180,18 @@ withDirectories current (part : rest) action =
   bracket (openDirectory current part) closeFd $ \next ->
     withDirectories next rest action
 
-requirePrivate :: String -> Fd -> IO ()
-requirePrivate message fd = do
-  status <- getFdStatus fd
-  uid <- getEffectiveUserID
-  unless (isDirectory status && fileOwner status == uid &&
-          fileMode status .&. 0o7777 `elem` [0o700, 0o2700]) $
-    invalid message
-
 withEndpointDirectories :: Fd -> [String] -> (Fd -> IO a) -> IO a
 withEndpointDirectories current [] action = action current
 withEndpointDirectories current (part : rest) action = do
   makeDirectory current part
-  bracket (openDirectory current part) closeFd $ \next -> do
-    requirePrivate "an endpoint directory has unsafe ownership or permissions" next
+  bracket (openDirectory current part) closeFd $ \next ->
     withEndpointDirectories next rest action
 
 prepare :: Settings -> IO ()
 prepare settings = do
   let location = socketLocation settings
   bracket (openDirectory (Fd (-100)) "/") closeFd $ \top ->
-    withDirectories top (runtimeComponents location) $ \runtime -> do
-      requirePrivate "the environment runtime directory must be owned by its user and private (mode 0700 or 2700)" runtime
+    withDirectories top (runtimeComponents location) $ \runtime ->
       withEndpointDirectories runtime (socketDirectories location) $ \parent ->
         withCString (socketFilename location) $ \name -> do
           let Fd raw = parent
@@ -265,15 +253,6 @@ ownerState settings = do
                             let (key, value) = break (== '=') line,
                             '=' : contents <- [value]])
 
-requireOwnerUid :: ProcessID -> IO ()
-requireOwnerUid pid = do
-  status <- readFile ("/proc/" ++ show pid ++ "/status")
-  let uidLine = find ("Uid:" `isPrefixOf`) (lines status)
-      uids = uidLine >>= traverse (readMaybe :: String -> Maybe Integer) . drop 1 . words
-  expected <- fromIntegral <$> getEffectiveUserID
-  unless (uids == Just (replicate 4 expected)) $
-    invalid "the owning process does not belong to this environment user"
-
 attachReady :: Settings -> FilePath -> IO Bool
 attachReady settings manifest = do
   state <- ownerState settings
@@ -286,7 +265,6 @@ attachReady settings manifest = do
   where
     withOwner pid =
       bracket (pidfdOpen pid) closeFd $ \ownerFd -> do
-        requireOwnerUid pid
         bracket (openNamespace ("/proc/" ++ show pid ++ "/ns/user")) closeFd $ \userFd ->
           bracket (openNamespace ("/proc/" ++ show pid ++ "/ns/net")) closeFd $ \netFd ->
             bracket (openNamespace "/proc/self/ns/net") closeFd $ \hostFd -> do

@@ -121,6 +121,7 @@
               # its private network namespace was created successfully.
               ExecStart = "${pkgs.util-linux}/bin/unshare --user --map-current-user --keep-caps --net ${lib.getExe isolate}";
               PrivateTmp = true;
+              NoNewPrivileges = true;
               RuntimeDirectory = "gotenberg";
               WorkingDirectory = "%t/gotenberg";
               Environment = [

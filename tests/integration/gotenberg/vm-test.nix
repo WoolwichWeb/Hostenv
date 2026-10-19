@@ -337,6 +337,23 @@ pkgs.testers.runNixOSTest {
                 if len(fields) > 1:
                     assert fields[1] != "00000000", routes
 
+    with subtest("Gotenberg cannot gain new privileges"):
+        for env in [a, b]:
+            configured = machine.succeed(
+                systemctl(env, "show -P NoNewPrivileges gotenberg.service")
+            ).strip()
+            assert configured == "yes", (env[0], configured)
+
+            supervisor, backend, _, _ = service_processes(env)
+            for pid in [supervisor, backend]:
+                status = machine.succeed("cat /proc/" + pid + "/status")
+                values = [
+                    line.partition(":")[2].strip()
+                    for line in status.splitlines()
+                    if line.startswith("NoNewPrivs:")
+                ]
+                assert values == ["1"], (pid, status)
+
     with subtest("other tenants cannot access the private sockets"):
         machine.fail(health((a[0], a[1], a[2], b[3])))
         machine.fail(health((b[0], b[1], b[2], a[3])))

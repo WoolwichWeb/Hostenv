@@ -67,6 +67,10 @@ in
               hostenv-system endpoint prepare manifest.json
               test -d "$TMPDIR/runtime/fixture"
               test ! -e "$TMPDIR/runtime/fixture/api.sock"
+              chmod 0770 "$TMPDIR/runtime" "$TMPDIR/runtime/fixture"
+              hostenv-system endpoint prepare manifest.json
+              test "$(stat -c %a "$TMPDIR/runtime")" = 770
+              test "$(stat -c %a "$TMPDIR/runtime/fixture")" = 770
 
               write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime" hostenv-api 3001 /bin/true
               expect_rejected "the export must be inside the environment's runtime directory"

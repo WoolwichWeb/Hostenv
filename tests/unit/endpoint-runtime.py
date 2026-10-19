@@ -177,16 +177,16 @@ while True:
                 directory = Path(data['socket']).parent
                 self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o2700)
 
-    def test_prepare_rejects_unsafe_runtime_directory_modes(self):
+    def test_prepare_preserves_runtime_directory_permissions(self):
         manifest, _ = self.manifest(os.getpid())
-        for mode in (0o770, 0o2710, 0o1700, 0o4700, 0o705):
+        for mode in (0o700, 0o2700, 0o770, 0o705):
             with self.subTest(mode=oct(mode)):
                 os.chmod(self.state, mode)
                 result = self.run_tenant([RUNTIME, 'endpoint', 'prepare', str(manifest)])
-                self.assertNotEqual(result.returncode, 0, oct(mode))
-                self.assertIn('must be owned by its user and private', result.stderr)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), mode)
 
-    def test_prepare_rejects_unsafe_named_endpoint_directory(self):
+    def test_prepare_preserves_existing_named_directory_permissions(self):
         os.chmod(self.state, 0o2700)
         manifest, data = self.manifest(os.getpid(), 'api')
         directory = Path(data['socket']).parent
@@ -195,8 +195,9 @@ while True:
             os.chown(directory, UID, GID)
         os.chmod(directory, 0o2770)
         result = self.run_tenant([RUNTIME, 'endpoint', 'prepare', str(manifest)])
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('endpoint directory has unsafe ownership or permissions', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o2770)
+        self.assertFalse(Path(data['socket']).exists())
 
     def test_prepare_refuses_existing_file_and_symlink(self):
         manifest, data = self.manifest(os.getpid())
