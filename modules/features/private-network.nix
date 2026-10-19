@@ -26,6 +26,8 @@
       in
       if !supported then
         throw "Hostenv private networking for ${service.name} requires a single ExecStart command beginning with an absolute executable path."
+      else if service.serviceConfig.NoNewPrivileges != true then
+        throw "Hostenv private networking for ${service.name} requires NoNewPrivileges=true."
       else
         service // {
           serviceConfig = service.serviceConfig // {

@@ -72,6 +72,13 @@ let
       hostenv.network.isolated = true;
       serviceConfig = { ExecStart = command; NoNewPrivileges = false; };
     })
+    (fails {
+      hostenv.network.isolated = true;
+      serviceConfig = {
+        ExecStart = command;
+        NoNewPrivileges = lib.mkForce false;
+      };
+    })
   ];
 in
 assert lib.assertMsg (builtins.all (value: value) checks) "Private network service contract failed";
