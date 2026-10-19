@@ -63,6 +63,17 @@
             default = lib.fakeHash;
           };
 
+          extraSources = lib.mkOption {
+            type = lib.types.listOf lib.types.path;
+            default = [ ];
+            example = lib.literalExpression "[ ./patches ]";
+            description = ''
+              Additional project files or directories to include in the Composer build source.
+              Use this for local Composer patches, for example with cweagans/composer-patches.
+              Paths must be within the project root.
+            '';
+          };
+
           enablePlugins =
             lib.mkEnableOption "composer plugins when running commands like `composer install`"
             // {

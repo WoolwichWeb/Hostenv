@@ -72,14 +72,32 @@ in
           drupalPhpPool.effectivePhpCliPackage.buildComposerProject2 (finalAttrs: {
             pname = cfg.codebase.name;
             version = cfg.codebase.version;
-            src = lib.cleanSourceWith {
-              src = config.hostenv.root;
-              filter =
-                path: type:
-                baseNameOf path == "composer.json"
-                || baseNameOf path == "composer.lock"
-                || baseNameOf path == "patches.lock.json";
-            };
+            src =
+              let
+                rootPath = toString config.hostenv.root;
+                extraSources = map toString cfg.composer.extraSources;
+                composerFiles = map (file: "${rootPath}/${file}") [
+                  "composer.json"
+                  "composer.lock"
+                  "patches.lock.json"
+                ];
+              in
+              lib.cleanSourceWith {
+                src = config.hostenv.root;
+                filter =
+                  path: _type:
+                  let
+                    name = toString path;
+                  in
+                  lib.elem name composerFiles
+                  || lib.any
+                    (source:
+                      name == source
+                      || lib.hasPrefix "${source}/" name
+                      || lib.hasPrefix "${name}/" source
+                    )
+                    extraSources;
+              };
             composerLock = config.hostenv.root + /composer.lock;
             vendorHash = cfg.composer.dependencyHash;
             composerNoPlugins = !cfg.composer.enablePlugins;

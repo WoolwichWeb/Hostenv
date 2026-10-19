@@ -1,0 +1,5 @@
+--- a/ignored.txt
++++ b/ignored.txt
+@@ -1 +1 @@
+-old
++new
