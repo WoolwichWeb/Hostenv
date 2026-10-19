@@ -45,6 +45,19 @@ in
       generatedNames = lib.concatMap (endpoint: [ endpoint.socketUnit endpoint.proxyUnit ]) entries;
       paths = map (endpoint: endpoint.socket) entries;
       pathsConflict = a: b: a == b || lib.hasPrefix "${a}/" b || lib.hasPrefix "${b}/" a;
+
+      # Socket units declare their listeners directly, so these paths can be
+      # checked without maintaining a registry of application-created sockets.
+      listenPaths = value: lib.filter
+        (path: builtins.isString path && lib.hasPrefix "/" path)
+        (lib.toList value);
+      systemdSocketPaths = lib.concatLists (lib.mapAttrsToList (_: unit:
+        lib.optionals unit.enable (
+          listenPaths (unit.socketConfig.ListenStream or [ ])
+          ++ listenPaths unit.listenStreams
+        )
+      ) config.systemd.sockets);
+
       errors =
         lib.concatMap (endpoint:
           let owner = config.systemd.services.${endpoint.service};
@@ -52,8 +65,8 @@ in
             "Endpoint ${endpoint.service}.${endpoint.name}: the owning unit name must not be overridden."
           ++ lib.optional (!(lib.elem (owner.serviceConfig.Type or "simple") [ "simple" "exec" "notify" "notify-reload" ]))
             "Endpoint ${endpoint.service}.${endpoint.name}: only foreground simple, exec and notifying services are supported."
-          ++ lib.optional (lib.any (path: pathsConflict endpoint.socket path) config.hostenv.endpoints.reservedSocketPaths)
-            "Endpoint ${endpoint.service}.${endpoint.name}: ${endpoint.socket} conflicts with a native socket."
+          ++ lib.optional (lib.any (path: pathsConflict endpoint.socket path) systemdSocketPaths)
+            "Endpoint ${endpoint.service}.${endpoint.name}: ${endpoint.socket} conflicts with a declared systemd socket."
         ) entries
         ++ lib.optional (builtins.length generatedNames != builtins.length (lib.unique generatedNames))
           "Hostenv endpoints generated conflicting unit names."
@@ -165,24 +178,6 @@ in
               };
             }
           ));
-        };
-        # Extend the existing hostenv submodule. Its type merges with the
-        # definition in the core module, keeping this option with the feature.
-        hostenv = lib.mkOption {
-          type = lib.types.submodule {
-            options.endpoints.reservedSocketPaths = lib.mkOption {
-              type = lib.types.listOf lib.types.str;
-              default = [ ];
-              internal = true;
-              description = ''
-                Unix socket paths already used by other services. Service
-                integrations register their listener paths here so Hostenv
-                can reject endpoints that would use the same path or overlap
-                an existing socket directory. This list does not create,
-                modify or reserve sockets on the filesystem.
-              '';
-            };
-          };
         };
       };
       config.systemd.units = lib.listToAttrs (lib.concatMap makeUnits plan);

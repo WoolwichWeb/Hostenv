@@ -22,9 +22,9 @@ Gotenberg is the first built-in integration. Customers still enable it with `ser
 
 The default export is `<runtimeDir>/example.sock`. Named exports are `<runtimeDir>/example/api.sock` and `<runtimeDir>/example/admin.sock`, even when there is only one named endpoint. Use the read-only `config.systemd.services.example.endpoints.api.socket` rather than reconstructing it.
 
-Hostenv checks new endpoint paths against sockets already declared by MariaDB, Valkey, PostgreSQL, PHP-FPM and systemd socket units. Their integrations register paths through the internal `hostenv.endpoints.reservedSocketPaths` option, which is a configuration-time list: it neither creates sockets nor changes existing services. An overlapping path causes Nix evaluation to fail.
+During Nix evaluation, Hostenv rejects overlapping endpoint paths and conflicts with Unix socket paths declared through `systemd.sockets`. It does not maintain a registry of sockets that applications create themselves. Service integrations must avoid configuring an endpoint on a native socket path; Hostenv cannot detect every such conflict before startup.
 
-The provider creates each environment's runtime directory with mode `2700` (private owner access and setgid for group inheritance). The generated socket units use `DirectoryMode=0700` and `SocketMode=0600`. At startup, endpoint preflight also refuses symlinked parent directories or objects already occupying the requested socket path. It does not change directory ownership or permissions.
+The provider creates each environment's runtime directory with mode `2700` (private owner access and setgid for group inheritance). The generated socket units use `DirectoryMode=0700` and `SocketMode=0600`. At startup, endpoint preflight refuses symlinked parent directories and existing socket-path objects, rather than overwriting them. It does not change directory ownership or permissions.
 
 ## How forwarding works
 

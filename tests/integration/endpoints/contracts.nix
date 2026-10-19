@@ -83,14 +83,20 @@ let
     })
     (fails { systemd.services.example = owner // { endpoints.default = { port = 3000; protocol = "http"; }; }; })
     (fails { systemd.services.example = owner // { endpoints.default = { port = 3000; socket = "/tmp/override"; }; }; })
+    # Detect conflicts with actual systemd socket declarations, not a
+    # separately maintained list of paths.
     (fails {
       systemd.services.example = owner // { endpoints.default.port = 3000; };
-      hostenv.endpoints.reservedSocketPaths = [ "${runtime}/example.sock" ];
+      systemd.sockets.existing.listenStreams = [ "${runtime}/example.sock" ];
     })
     (failsWith "example" "api" {
       systemd.services.example = owner // { endpoints.api.port = 3000; };
-      hostenv.endpoints.reservedSocketPaths = [ "${runtime}/example" ];
+      systemd.sockets.existing.socketConfig.ListenStream = "${runtime}/example";
     })
+    (unitEvaluates (evaluate {
+      systemd.services.example = owner // { endpoints.default.port = 3000; };
+      systemd.sockets.existing.listenStreams = [ "${runtime}/unrelated.sock" ];
+    }) "example" "default")
     (fails {
       systemd.services.example = owner // { endpoints.default.port = 3000; };
       systemd.sockets.example.listenStreams = [ "/run/other.sock" ];
