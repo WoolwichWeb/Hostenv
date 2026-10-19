@@ -36,11 +36,16 @@ let
   disabled = evaluate {
     systemd.services.example = owner // { enable = false; endpoints.default.port = 3000; };
   };
-  # Force the resulting systemd units so endpoint validation is exercised
-  # without exposing an internal plan. A positive control below also checks
-  # that forcing valid units succeeds.
-  unitsEvaluate = cfg: (builtins.tryEval (builtins.deepSeq cfg.systemd.units true)).success;
-  fails = extra: !(unitsEvaluate (evaluate extra));
+  # Evaluate only the relevant generated socket unit. Forcing every systemd
+  # unit traverses unrelated definitions and may recurse. Reading the generated
+  # text still forces endpoint validation without exposing an internal plan.
+  socketUnitText = cfg: service: endpoint:
+    let name = cfg.systemd.services.${service}.endpoints.${endpoint}.socketUnit;
+    in cfg.systemd.units.${name}.text;
+  unitEvaluates = cfg: service: endpoint:
+    (builtins.tryEval (builtins.deepSeq (socketUnitText cfg service endpoint) true)).success;
+  failsWith = service: endpoint: extra: !(unitEvaluates (evaluate extra) service endpoint);
+  fails = failsWith "example" "default";
   ep = multiple.systemd.services.example.endpoints;
   runtime = multiple.hostenv.runtimeDir;
   samePort = evaluate {
@@ -48,7 +53,7 @@ let
   };
   exactRoot = "/" + lib.concatStrings (lib.replicate 99 "r");
   checks = [
-    (unitsEvaluate single)
+    (unitEvaluates single "example" "default")
     (single.systemd.services.example.endpoints.default.socket == "${runtime}/example.sock")
     (ep.default.socket == single.systemd.services.example.endpoints.default.socket)
     (ep.api.socket == named.systemd.services.example.endpoints.api.socket)
@@ -73,14 +78,16 @@ let
     (fails { systemd.services.example = owner // { endpoints.default.port = 0; }; })
     (fails { systemd.services.example = owner // { endpoints.default.port = 65536; }; })
     (fails { systemd.services.example = owner // { endpoints."../bad".port = 3000; }; })
-    (fails { systemd.services."example@%i" = owner // { endpoints.default.port = 3000; }; })
+    (failsWith "example@%i" "default" {
+      systemd.services."example@%i" = owner // { endpoints.default.port = 3000; };
+    })
     (fails { systemd.services.example = owner // { endpoints.default = { port = 3000; protocol = "http"; }; }; })
     (fails { systemd.services.example = owner // { endpoints.default = { port = 3000; socket = "/tmp/override"; }; }; })
     (fails {
       systemd.services.example = owner // { endpoints.default.port = 3000; };
       hostenv.endpoints.reservedSocketPaths = [ "${runtime}/example.sock" ];
     })
-    (fails {
+    (failsWith "example" "api" {
       systemd.services.example = owner // { endpoints.api.port = 3000; };
       hostenv.endpoints.reservedSocketPaths = [ "${runtime}/example" ];
     })
