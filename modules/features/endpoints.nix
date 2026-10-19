@@ -52,7 +52,7 @@ in
             "Endpoint ${endpoint.service}.${endpoint.name}: the owning unit name must not be overridden."
           ++ lib.optional (!(lib.elem (owner.serviceConfig.Type or "simple") [ "simple" "exec" "notify" "notify-reload" ]))
             "Endpoint ${endpoint.service}.${endpoint.name}: only foreground simple, exec and notifying services are supported."
-          ++ lib.optional (lib.any (path: pathsConflict endpoint.socket path) config.networking.reservedSocketPaths)
+          ++ lib.optional (lib.any (path: pathsConflict endpoint.socket path) config.hostenv.endpoints.reservedSocketPaths)
             "Endpoint ${endpoint.service}.${endpoint.name}: ${endpoint.socket} conflicts with a native socket."
         ) entries
         ++ lib.optional (builtins.length generatedNames != builtins.length (lib.unique generatedNames))
@@ -166,18 +166,23 @@ in
             }
           ));
         };
-        networking.reservedSocketPaths = lib.mkOption {
-          type = lib.types.listOf lib.types.str;
-          default = [ ];
-          internal = true;
-          description = "Native listener paths registered by service integrations for collision checks.";
-        };
-        networking.endpointPlan = lib.mkOption {
-          type = lib.types.listOf lib.types.attrs;
-          readOnly = true;
-          internal = true;
-          default = plan;
-          description = "Resolved non-secret endpoint paths, ports and helper identities.";
+        # Extend the existing hostenv submodule. Its type merges with the
+        # definition in the core module, keeping this option with the feature.
+        hostenv = lib.mkOption {
+          type = lib.types.submodule {
+            options.endpoints.reservedSocketPaths = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [ ];
+              internal = true;
+              description = ''
+                Unix socket paths already used by other services. Service
+                integrations register their listener paths here so Hostenv
+                can reject endpoints that would use the same path or overlap
+                an existing socket directory. This list does not create,
+                modify or reserve sockets on the filesystem.
+              '';
+            };
+          };
         };
       };
       config.systemd.units = lib.listToAttrs (lib.concatMap makeUnits plan);

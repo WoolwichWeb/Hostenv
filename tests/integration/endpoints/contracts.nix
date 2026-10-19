@@ -36,7 +36,9 @@ let
   disabled = evaluate {
     systemd.services.example = owner // { enable = false; endpoints.default.port = 3000; };
   };
-  fails = extra: !(builtins.tryEval (builtins.deepSeq (evaluate extra).networking.endpointPlan true)).success;
+  # Force the resulting systemd unit definitions, including their text, so
+  # invalid endpoint declarations fail without exposing an internal plan.
+  fails = extra: !(builtins.tryEval (builtins.deepSeq (evaluate extra).systemd.units true)).success;
   ep = multiple.systemd.services.example.endpoints;
   runtime = multiple.hostenv.runtimeDir;
   samePort = evaluate {
@@ -50,8 +52,11 @@ let
     (ep.api.socket == "${runtime}/example/api.sock")
     (ep.admin.socket == "${runtime}/example/admin.sock")
     (multiple.systemd.services.other.endpoints.api.socket == "${runtime}/other/api.sock")
-    (disabled.networking.endpointPlan == [ ])
-    (builtins.length samePort.networking.endpointPlan == 2)
+    (!(disabled.systemd.units ? "example.socket"))
+    (samePort.systemd.services.example.endpoints.api.socketUnit
+      != samePort.systemd.services.example.endpoints.alias.socketUnit)
+    (builtins.hasAttr samePort.systemd.services.example.endpoints.api.socketUnit samePort.systemd.units)
+    (builtins.hasAttr samePort.systemd.services.example.endpoints.alias.socketUnit samePort.systemd.units)
     (builtins.all (key:
       multiple.systemd.services.example.serviceConfig.${key} == owner.serviceConfig.${key}
     ) (builtins.attrNames owner.serviceConfig))
@@ -70,11 +75,11 @@ let
     (fails { systemd.services.example = owner // { endpoints.default = { port = 3000; socket = "/tmp/override"; }; }; })
     (fails {
       systemd.services.example = owner // { endpoints.default.port = 3000; };
-      networking.reservedSocketPaths = [ "${runtime}/example.sock" ];
+      hostenv.endpoints.reservedSocketPaths = [ "${runtime}/example.sock" ];
     })
     (fails {
       systemd.services.example = owner // { endpoints.api.port = 3000; };
-      networking.reservedSocketPaths = [ "${runtime}/example" ];
+      hostenv.endpoints.reservedSocketPaths = [ "${runtime}/example" ];
     })
     (fails {
       systemd.services.example = owner // { endpoints.default.port = 3000; };

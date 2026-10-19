@@ -11,7 +11,7 @@
     {
       # Register existing listeners without creating, renaming or changing them.
       # Native daemons keep ownership of their sockets and authentication.
-      networking.reservedSocketPaths = lib.mkMerge [
+      hostenv.endpoints.reservedSocketPaths = lib.mkMerge [
         (lib.mkIf config.services.mysql.enable [ config.services.mysql.settings.mysqld.socket ])
         (lib.mkIf config.services.redis.enable [ config.services.redis.socket ])
         (lib.mkIf postgres.enable (map
