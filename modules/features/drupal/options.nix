@@ -66,11 +66,17 @@
           extraSources = lib.mkOption {
             type = lib.types.listOf lib.types.path;
             default = [ ];
-            example = lib.literalExpression "[ ./patches ]";
+            example = lib.literalExpression "[ ../patches ]";
             description = ''
               Additional project files or directories to include in the Composer build source.
               Use this for local Composer patches, for example with cweagans/composer-patches.
               Paths must be within the project root.
+
+              Do not forget that the project root is usually one-level above your hostenv.nix.
+              With this project directory structure:
+              `composer.json, composer.lock, patches/issue001.patch, hostenv/hostenv.nix`
+              to make `issue001.patch` available to composer, set `extraSources` to:
+              `[ ../patches ]`
             '';
           };
 
