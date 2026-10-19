@@ -43,25 +43,40 @@ let
                     + b"\r\nConnection: close\r\n\r\n" + body
                 )
   '';
-  enter = pkgs.writeShellApplication {
-    name = "endpoint-test-enter";
-    runtimeInputs = [ pkgs.iproute2 pkgs.util-linux ];
-    text = ''
-      ip link set lo up
-      exec setpriv --bounding-set=-all --inh-caps=-all --ambient-caps=-all "$@"
-    '';
-  };
+  probe = pkgs.writeShellScript "isolated-service-probe" ''
+    ${pkgs.coreutils}/bin/mkdir -p "$1"
+    ${pkgs.iproute2}/bin/ip -o link show lo > "$1/loopback"
+    ${pkgs.iproute2}/bin/ip route show default > "$1/default-route"
+    exec ${pkgs.coreutils}/bin/sleep infinity
+  '';
   make = project: endpoints: (makeHostenv [
     ({ config, ... }: {
       hostenv = { organisation = "test"; inherit project; root = pkgs.emptyDirectory; hostenvHostname = "hosting.test"; };
       environments.main.enable = true;
       systemd.services.example = {
         inherit endpoints;
+        hostenv.network.isolated = true;
         serviceConfig = {
           Type = "notify";
-          ExecStart = "${pkgs.util-linux}/bin/unshare --user --map-current-user --keep-caps --net ${lib.getExe enter} ${pkgs.python3}/bin/python3 -I -S ${server} ${config.hostenv.runtimeDir}/server-state";
+          ExecStart = "${pkgs.python3}/bin/python3 -I -S ${server} ${config.hostenv.runtimeDir}/server-state";
           ExecReload = "${pkgs.coreutils}/bin/kill -USR1 $MAINPID";
           Restart = "on-failure";
+        };
+      };
+      # This service has no endpoint: namespace setup must also work on its own.
+      systemd.services.isolated-probe = {
+        hostenv.network.isolated = true;
+        serviceConfig = {
+          Type = "exec";
+          ExecStart = "${probe} ${config.hostenv.runtimeDir}/probe-state";
+        };
+      };
+      systemd.services.isolated-probe-blocked = {
+        hostenv.network.isolated = true;
+        serviceConfig = {
+          Type = "exec";
+          ExecStart = "${probe} ${config.hostenv.runtimeDir}/blocked-probe-state";
+          RestrictNamespaces = true;
         };
       };
     })
@@ -174,6 +189,31 @@ pkgs.testers.runNixOSTest {
             for name in target["endpoints"]:
                 copy = dict(caller, endpoints=target["endpoints"])
                 machine.fail(request(copy, name))
+
+    with subtest("a service without endpoints can opt into private networking"):
+        for env in [a, b]:
+            machine.succeed(control(env, "start isolated-probe.service"))
+            state = env["runtime"] + "/probe-state"
+            machine.wait_for_file(state + "/loopback")
+            machine.succeed("grep -Fq 'LOOPBACK,UP' " + quote(state + "/loopback"))
+            machine.succeed("test ! -s " + quote(state + "/default-route"))
+            pid = main_pid(env, "isolated-probe.service")
+            assert namespace(pid) not in [namespace("1"), namespace(main_pid(env, "example.service"))]
+            fields = dict(
+                line.split(":", 1) for line in
+                machine.succeed("cat /proc/" + pid + "/status").splitlines()
+                if ":" in line
+            )
+            assert fields["Uid"].split() == [str(env["uid"])] * 4
+            for key in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]:
+                assert int(fields[key].strip(), 16) == 0, (pid, key, fields[key])
+            assert machine.succeed(
+                control(env, "show -P NoNewPrivileges isolated-probe.service")
+            ).strip() == "yes"
+
+    with subtest("namespace setup failure does not launch an isolated service"):
+        machine.fail(control(a, "start isolated-probe-blocked.service"))
+        machine.fail("test -e " + quote(a["runtime"] + "/blocked-probe-state/loopback"))
 
     with subtest("owner readiness and reload retain the real main process"):
         before = main_pid(a, "example.service")
