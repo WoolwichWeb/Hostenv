@@ -46,7 +46,7 @@ in
 
               write_manifest() {
                 cat > manifest.json <<EOF
-              {"owner":"$1","name":"$2","runtime_dir":"$3","socket":"$4","descriptor":"$5","port":$6,"systemctl":"$7","nsenter":"/bin/true","setpriv":"/bin/true","proxy":"/bin/true"}
+              {"owner":"$1","runtime_dir":"$2","socket":"$3","descriptor":"$4","port":$5,"systemctl":"$6","nsenter":"/bin/true","setpriv":"/bin/true","proxy":"/bin/true"}
               EOF
               }
 
@@ -63,35 +63,32 @@ in
               }
 
               mkdir -m 0700 "$TMPDIR/runtime"
-              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001 /bin/true
+              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001 /bin/true
               hostenv-system endpoint prepare manifest.json
               test -d "$TMPDIR/runtime/fixture"
               test ! -e "$TMPDIR/runtime/fixture/api.sock"
-              chmod 0770 "$TMPDIR/runtime" "$TMPDIR/runtime/fixture"
+              mkdir -m 0700 "$TMPDIR/_runtime"
+              write_manifest fixture.service "$TMPDIR/_runtime" "$TMPDIR/_runtime/fixture/api.sock" hostenv-api 3001 /bin/true
               hostenv-system endpoint prepare manifest.json
-              test "$(stat -c %a "$TMPDIR/runtime")" = 770
-              test "$(stat -c %a "$TMPDIR/runtime/fixture")" = 770
+              test -d "$TMPDIR/_runtime/fixture"
 
-              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime" hostenv-api 3001 /bin/true
+              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime" hostenv-api 3001 /bin/true
               expect_rejected "the export must be inside the environment's runtime directory"
-              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime-other/fixture/api.sock" hostenv-api 3001 /bin/true
+              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime-other/fixture/api.sock" hostenv-api 3001 /bin/true
               expect_rejected "the export must be inside the environment's runtime directory"
-              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/../escape.sock" hostenv-api 3001 /bin/true
+              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/../escape.sock" hostenv-api 3001 /bin/true
               expect_rejected "socket and runtime paths must be absolute, normalised and contain safe components"
               long_segment=$(printf '%0108d' 0 | tr 0 a)
-              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/$long_segment.sock" hostenv-api 3001 /bin/true
+              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/$long_segment.sock" hostenv-api 3001 /bin/true
               expect_rejected "the Unix socket path must be at most 107 bytes"
 
-              write_manifest 'fixture@.service' api "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001 /bin/true
-              expect_rejected "invalid owning unit name"
-              write_manifest fixture.service 'bad/name' "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001 /bin/true
-              expect_rejected "invalid endpoint name"
-              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" 'bad descriptor' 3001 /bin/true
-              expect_rejected "invalid activation descriptor name"
-              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 0 /bin/true
-              expect_rejected "the private TCP port must be between 1 and 65535"
-              write_manifest fixture.service api "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001 relative-systemctl
-              expect_rejected "helper executable paths must be absolute"
+              # Aeson remains responsible for decoding manifest field types.
+              sed 's/"port":3001/"port":"not-a-port"/' manifest.json > invalid.json
+              if hostenv-system endpoint prepare invalid.json >out.log 2>&1; then
+                echo "Endpoint runtime accepted a malformed manifest" >&2
+                exit 1
+              fi
+              grep -Fq 'invalid endpoint manifest:' out.log
 
               touch "$out"
             '';

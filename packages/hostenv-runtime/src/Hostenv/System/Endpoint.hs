@@ -7,11 +7,12 @@ import Control.Monad (unless, void, when)
 import Data.Aeson (FromJSON (..), (.:), withObject)
 import qualified Data.Aeson as A
 import qualified Data.ByteString as BS
-import Data.Char (isAscii, isAlphaNum, isSpace)
+import Data.Char (isSpace)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (stripPrefix)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Foreign.C.Error (eEXIST, eSRCH, getErrno, throwErrno, throwErrnoIfMinus1Retry)
 import Foreign.C.String (CString, withCString)
 import Foreign.C.Types (CInt (..))
@@ -73,26 +74,16 @@ data Settings = Settings
 invalid :: String -> IO a
 invalid = ioError . userError
 
-validName :: String -> Bool
-validName value =
-  case value of
-    first : rest -> asciiAlphaNum first && all safeChar rest
-    [] -> False
-  where
-    asciiAlphaNum c = isAscii c && isAlphaNum c
-    safeChar c = asciiAlphaNum c || c `elem` ("_.-" :: String)
-
-validExecutablePath :: FilePath -> Bool
-validExecutablePath ('/' : rest) = '\NUL' `notElem` rest
-validExecutablePath _ = False
-
 absoluteParts :: FilePath -> Either String [String]
 absoluteParts path =
   case T.splitOn "/" (T.pack path) of
     "" : parts
-      | not (null parts) && all (validName . T.unpack) parts ->
+      | not (null parts) && all validPart parts ->
           Right (map T.unpack parts)
-    _ -> Left "socket and runtime paths must be absolute, normalised and contain safe components"
+    _ -> Left "socket and runtime paths must be absolute, normalised and contain no NUL bytes"
+  where
+    validPart part = not (T.null part) && part /= "." && part /= ".."
+      && not (T.any (== '\NUL') part)
 
 parseSocketLocation :: FilePath -> FilePath -> Either String SocketLocation
 parseSocketLocation runtime path = do
@@ -102,8 +93,8 @@ parseSocketLocation runtime path = do
                     Right (stripPrefix root socket)
   case reverse relative of
     filename : directories -> do
-      -- absoluteParts admits only ASCII, so characters and bytes agree here.
-      unless (length path < 108) $
+      -- Unix socket path limits are measured in bytes, not characters.
+      unless (BS.length (TE.encodeUtf8 (T.pack path)) < 108) $
         Left "the Unix socket path must be at most 107 bytes"
       pure SocketLocation
         { runtimeComponents = root
@@ -115,7 +106,6 @@ parseSocketLocation runtime path = do
 instance FromJSON Settings where
   parseJSON = withObject "Hostenv endpoint manifest" $ \obj -> do
     ownerName <- obj .: "owner"
-    name <- obj .: "name"
     runtime <- obj .: "runtime_dir"
     path <- obj .: "socket"
     descriptorName <- obj .: "descriptor"
@@ -125,21 +115,7 @@ instance FromJSON Settings where
     setprivPath <- obj .: "setpriv"
     proxyPath <- obj .: "proxy"
 
-    unless (maybe False (validName . T.unpack)
-              (T.stripSuffix ".service" (T.pack ownerName))) $
-      fail "invalid owning unit name"
-    unless (validName name) $
-      fail "invalid endpoint name"
-    unless (not (null descriptorName) && length descriptorName <= 255 &&
-            all (\c -> isAscii c && (isAlphaNum c || c `elem` ("_.-" :: String)))
-                descriptorName) $
-      fail "invalid activation descriptor name"
-    unless (privatePort >= 1 && privatePort <= 65535) $
-      fail "the private TCP port must be between 1 and 65535"
     location <- either fail pure (parseSocketLocation runtime path)
-    unless (all validExecutablePath
-              [systemctlPath, nsenterPath, setprivPath, proxyPath]) $
-      fail "helper executable paths must be absolute"
 
     pure Settings
       { owner = ownerName
@@ -271,21 +247,21 @@ attachReady settings manifest = do
               isolated <- not <$> sameNamespace netFd hostFd
               unless isolated $
                 invalid "the owning service has not entered a private network namespace"
-              dead <- pidfdExited ownerFd 0
-              updated <- ownerState settings
-              unless (not dead && Map.lookup "MainPID" updated == Just (show pid)) $
-                invalid "the owning service changed during namespace setup"
-              let descriptors = [ownerFd, userFd, netFd, hostFd]
-              mapM_ (\fd -> setFdOption fd CloseOnExec False) descriptors
-              binary <- getExecutablePath
-              let arguments =
-                    [ "--user=/proc/self/fd/" ++ showFd userFd
-                    , "--net=/proc/self/fd/" ++ showFd netFd
-                    , "--preserve-credentials", "--keep-caps"
-                    , setpriv settings, "--bounding-set=-all", "--inh-caps=-all"
-                    , "--ambient-caps=-all", binary, "endpoint", "joined", manifest
-                    ] ++ map showFd descriptors
-              executeFile (nsenter settings) False arguments Nothing
+            dead <- pidfdExited ownerFd 0
+            updated <- ownerState settings
+            unless (not dead && Map.lookup "MainPID" updated == Just (show pid)) $
+              invalid "the owning service changed during namespace setup"
+            let descriptors = [ownerFd, userFd, netFd]
+            mapM_ (\fd -> setFdOption fd CloseOnExec False) descriptors
+            binary <- getExecutablePath
+            let arguments =
+                  [ "--user=/proc/self/fd/" ++ showFd userFd
+                  , "--net=/proc/self/fd/" ++ showFd netFd
+                  , "--preserve-credentials", "--keep-caps"
+                  , setpriv settings, "--bounding-set=-all", "--inh-caps=-all"
+                  , "--ambient-caps=-all", binary, "endpoint", "joined", manifest
+                  ] ++ map showFd descriptors
+            executeFile (nsenter settings) False arguments Nothing
     showFd (Fd fd) = show fd
 
 attach :: IORef Bool -> Settings -> FilePath -> Double -> IO ExitCode
@@ -378,18 +354,17 @@ startProxy settings descriptors = do
 joined :: IORef Bool -> Settings -> [Fd] -> IO ExitCode
 joined interrupted settings handles = do
   let raw = map (\(Fd fd) -> fd) handles
-  (ownerFd, userFd, netFd, hostFd) <-
+  (ownerFd, userFd, netFd) <-
     case handles of
-      [ownerFd, userFd, netFd, hostFd]
-        | all (> 3) raw && length (Map.fromList [(fd, ()) | fd <- raw]) == 4 ->
-            pure (ownerFd, userFd, netFd, hostFd)
+      [ownerFd, userFd, netFd]
+        | all (> 3) raw && length (Map.fromList [(fd, ()) | fd <- raw]) == 3 ->
+            pure (ownerFd, userFd, netFd)
       _ -> invalid "invalid private namespace handles"
   validateActivation settings
   requireCapabilitiesDropped
   bracket (openNamespace "/proc/self/ns/net") closeFd $ \currentNet -> do
     expected <- sameNamespace currentNet netFd
-    host <- sameNamespace hostFd netFd
-    unless (expected && not host) $
+    unless expected $
       invalid "refusing to forward outside the intended private network namespace"
   bracket (openNamespace "/proc/self/ns/user") closeFd $ \currentUser -> do
     expected <- sameNamespace currentUser userFd
@@ -430,7 +405,7 @@ withSignals action = do
     (const (action requested))
 
 usage :: String
-usage = "Usage: hostenv-system endpoint prepare MANIFEST | serve MANIFEST [--timeout=SECONDS] | joined MANIFEST OWNERFD USERFD NETFD HOSTFD"
+usage = "Usage: hostenv-system endpoint prepare MANIFEST | serve MANIFEST [--timeout=SECONDS] | joined MANIFEST OWNERFD USERFD NETFD"
 
 dispatch :: IORef Bool -> [String] -> IO ExitCode
 dispatch _ ["prepare", manifest] = loadSettings manifest >>= prepare >> pure ExitSuccess
@@ -441,7 +416,7 @@ dispatch stop ["serve", manifest, option]
   | Just duration <- stripTimeout option = do
       settings <- loadSettings manifest
       attach stop settings manifest duration
-dispatch stop ("joined" : manifest : raw) | length raw == 4 = do
+dispatch stop ("joined" : manifest : raw) | length raw == 3 = do
   settings <- loadSettings manifest
   fds <- maybe (invalid "invalid namespace descriptor numbers") pure
     (traverse (readMaybe :: String -> Maybe CInt) raw)

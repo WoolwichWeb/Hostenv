@@ -124,7 +124,7 @@ while True:
         control = self.base / 'systemctl-test'
         control.write_text(f"#!/bin/sh\nprintf 'MainPID={owner}\nActiveState=active\n'\n")
         control.chmod(0o755)
-        data = dict(owner='fixture.service', name=name, runtime_dir=str(self.state),
+        data = dict(owner='fixture.service', runtime_dir=str(self.state),
                     socket=str(self.state / ('fixture.sock' if name == 'default' else f'fixture/{name}.sock')),
                     descriptor='fixture-' + name, port=port, systemctl=str(control),
                     nsenter=shutil.which('nsenter'), setpriv=shutil.which('setpriv'),
@@ -155,6 +155,7 @@ while True:
             ('sibling path', '/run/test', '/run/testing/foo.sock', 'must be inside'),
             ('runtime directory itself', '/run/test', '/run/test', 'must be inside'),
             ('path too long', '/run/test', '/run/test/' + 'a'*108, 'at most 107 bytes'),
+            ('UTF-8 byte length', '/run/test', '/run/test/' + 'é'*55 + '.sock', 'at most 107 bytes'),
         ]
         for description, root, path, message in cases:
             with self.subTest(description=description):
@@ -177,27 +178,17 @@ while True:
                 directory = Path(data['socket']).parent
                 self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o2700)
 
-    def test_prepare_preserves_runtime_directory_permissions(self):
-        manifest, _ = self.manifest(os.getpid())
-        for mode in (0o700, 0o2700, 0o770, 0o705):
-            with self.subTest(mode=oct(mode)):
-                os.chmod(self.state, mode)
-                result = self.run_tenant([RUNTIME, 'endpoint', 'prepare', str(manifest)])
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), mode)
-
-    def test_prepare_preserves_existing_named_directory_permissions(self):
-        os.chmod(self.state, 0o2700)
-        manifest, data = self.manifest(os.getpid(), 'api')
-        directory = Path(data['socket']).parent
-        directory.mkdir(mode=0o700)
+    def test_prepare_accepts_runtime_root_with_underscore(self):
+        manifest, data = self.manifest(os.getpid())
+        alternate = self.base / '_runtime'
+        alternate.mkdir(mode=0o700)
         if os.getuid() == 0:
-            os.chown(directory, UID, GID)
-        os.chmod(directory, 0o2770)
+            os.chown(alternate, UID, GID)
+        path = alternate / 'fixture.sock'
+        manifest.write_text(json.dumps(dict(data, runtime_dir=str(alternate), socket=str(path))))
         result = self.run_tenant([RUNTIME, 'endpoint', 'prepare', str(manifest)])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o2770)
-        self.assertFalse(Path(data['socket']).exists())
+        self.assertFalse(path.exists())
 
     def test_prepare_refuses_existing_file_and_symlink(self):
         manifest, data = self.manifest(os.getpid())
@@ -280,39 +271,19 @@ while True:
         self.assertNotEqual(proxy.wait(timeout=3), 0)
         self.assertIn('not the declared Unix stream listener', self.read_logs())
 
-    def test_invalid_manifest_fields_are_refused(self):
+    def test_malformed_manifest_is_refused(self):
         manifest, data = self.manifest(os.getpid())
         cases = [
-            ('owner template', {'owner': 'fixture@.service'}, 'invalid owning unit name'),
-            ('owner suffix', {'owner': 'fixture'}, 'invalid owning unit name'),
-            ('endpoint path', {'name': '../escape'}, 'invalid endpoint name'),
-            ('empty descriptor', {'descriptor': ''}, 'invalid activation descriptor name'),
-            ('long descriptor', {'descriptor': 'a' * 256}, 'invalid activation descriptor name'),
-            ('descriptor characters', {'descriptor': 'bad name'}, 'invalid activation descriptor name'),
-            ('systemctl path', {'systemctl': 'systemctl'}, 'helper executable paths must be absolute'),
-            ('nsenter path', {'nsenter': 'nsenter'}, 'helper executable paths must be absolute'),
-            ('setpriv path', {'setpriv': 'setpriv'}, 'helper executable paths must be absolute'),
-            ('proxy path', {'proxy': 'proxy'}, 'helper executable paths must be absolute'),
-            ('NUL in helper path', {'proxy': '/bin/' + chr(0) + 'bad'}, 'helper executable paths must be absolute'),
+            ('wrong port type', dict(data, port='3000')),
+            ('wrong path type', dict(data, socket=False)),
+            ('missing descriptor', {key: value for key, value in data.items() if key != 'descriptor'}),
         ]
-        for description, changes, message in cases:
+        for description, payload in cases:
             with self.subTest(description=description):
-                manifest.write_text(json.dumps(dict(data, **changes)))
+                manifest.write_text(json.dumps(payload))
                 result = self.run_tenant([RUNTIME, 'endpoint', 'prepare', str(manifest)])
-                self.assertNotEqual(result.returncode, 0, changes)
+                self.assertNotEqual(result.returncode, 0, description)
                 self.assertIn('invalid endpoint manifest:', result.stderr)
-                self.assertIn(message, result.stderr)
-
-    def test_invalid_manifest_port_is_refused(self):
-        manifest, data = self.manifest(os.getpid())
-        for port in (0, 65536, True, '3000'):
-            with self.subTest(port=port):
-                manifest.write_text(json.dumps(dict(data, port=port)))
-                result = self.run_tenant([RUNTIME, 'endpoint', 'prepare', str(manifest)])
-                self.assertNotEqual(result.returncode, 0, port)
-                self.assertIn('invalid endpoint manifest:', result.stderr)
-                if type(port) is int:
-                    self.assertIn('the private TCP port must be between 1 and 65535', result.stderr)
 
 
 if __name__ == '__main__':

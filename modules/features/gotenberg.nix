@@ -53,7 +53,8 @@
                 # The converter only needs its private TCP listener. Activation
                 # descriptors belong to the endpoint's separate proxy service.
                 (
-                  unset LISTEN_FDS LISTEN_PID LISTEN_PIDFDID LISTEN_FDNAMES NOTIFY_SOCKET
+                  # The supervisor, not the converter, signals readiness.
+                  unset NOTIFY_SOCKET
                   exec ${lib.getExe cfg.package} \
                     --api-bind-ip=127.0.0.1 \
                     --api-port=${toString apiPort} \

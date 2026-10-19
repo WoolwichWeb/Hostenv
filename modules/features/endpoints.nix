@@ -67,7 +67,7 @@ in
       makeUnits = endpoint:
         let
           manifest = pkgs.writeText "hostenv-endpoint-${endpointId endpoint.service endpoint.name}.json" (builtins.toJSON {
-            inherit (endpoint) owner name socket port descriptor;
+            inherit (endpoint) owner socket port descriptor;
             runtime_dir = runtimeDir;
             systemctl = "${config.systemd.package}/bin/systemctl";
             nsenter = "${pkgs.util-linux}/bin/nsenter";
