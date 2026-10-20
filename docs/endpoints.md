@@ -19,8 +19,8 @@ systemd.services.example = {
 };
 ```
 
-The application must listen on `127.0.0.1:3000` and `127.0.0.1:3001` inside
-its private network. Hostenv forwards connections using the network namespace
+The application must accept connections to `127.0.0.1:3000` and
+`127.0.0.1:3001` inside its private network. Hostenv forwards connections using the network namespace
 of the service's main process. Any process listening on these ports must share
 that namespace. See [Private networking](private-network.md) for details.
 
@@ -47,8 +47,8 @@ The environment's Unix user owns these sockets, which have permissions
 paths declared in other systemd socket units. It also refuses to overwrite an
 existing file or follow a symbolic link in the socket's directory path.
 
-Service and endpoint names must start with a letter or digit. They may also
-contain full stops, hyphens and underscores. The full socket path must be at
+Service and endpoint names must start with an ASCII letter or digit. They may
+also contain full stops, hyphens and underscores. The full socket path must be at
 most 107 bytes long.
 
 ## How connections work
