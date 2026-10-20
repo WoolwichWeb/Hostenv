@@ -32,12 +32,26 @@ let
       };
     };
   };
+  # Drupal 6 and other integrations supply an entire serviceConfig using
+  # mkDefault. Isolation must not discard those settings, whether enabled
+  # or disabled for the service.
+  defaultServiceConfig = lib.mkDefault {
+    Type = "oneshot";
+    ExecStart = command;
+  };
   ordinary = evaluate {
-    systemd.services.example.serviceConfig.ExecStart = command;
+    systemd.services.example.serviceConfig = defaultServiceConfig;
+  };
+  isolatedWithDefaults = evaluate {
+    systemd.services.example = {
+      hostenv.network.isolated = true;
+      serviceConfig = defaultServiceConfig;
+    };
   };
 
   isolatedUnit = isolated.systemd.units."example.service".text;
   ordinaryUnit = ordinary.systemd.units."example.service".text;
+  isolatedWithDefaultsUnit = isolatedWithDefaults.systemd.units."example.service".text;
 
   fails = declaration: !(builtins.tryEval (
     builtins.deepSeq (evaluate {
@@ -48,7 +62,6 @@ let
   checks = [
     (isolated.systemd.services.example.hostenv.network.isolated)
     (isolated.systemd.services.example.serviceConfig.ExecStart == command)
-    (isolated.systemd.services.example.serviceConfig.NoNewPrivileges == true)
     (contains
       "ExecStart=${pkgs.util-linux}/bin/unshare --user --map-current-user --keep-caps --net "
       isolatedUnit)
@@ -57,8 +70,20 @@ let
     (contains "NoNewPrivileges=true" isolatedUnit)
 
     (!ordinary.systemd.services.example.hostenv.network.isolated)
+    (ordinary.systemd.services.example.serviceConfig.Type == "oneshot")
+    (ordinary.systemd.services.example.serviceConfig.ExecStart == command)
+    (contains "Type=oneshot" ordinaryUnit)
     (contains "ExecStart=${command}" ordinaryUnit)
     (!(contains "/bin/unshare" ordinaryUnit))
+
+    (isolatedWithDefaults.systemd.services.example.hostenv.network.isolated)
+    (isolatedWithDefaults.systemd.services.example.serviceConfig.ExecStart == command)
+    (contains "Type=oneshot" isolatedWithDefaultsUnit)
+    (contains "NoNewPrivileges=true" isolatedWithDefaultsUnit)
+    (contains
+      "ExecStart=${pkgs.util-linux}/bin/unshare --user --map-current-user --keep-caps --net "
+      isolatedWithDefaultsUnit)
+    (contains " ${command}" isolatedWithDefaultsUnit)
 
     (fails { hostenv.network.isolated = true; })
     (fails {
