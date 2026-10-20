@@ -1,3 +1,9 @@
+# Expose private TCP listeners through Unix sockets.
+#
+# Services declare named endpoints under `systemd.services.<name>.endpoints`.
+# For each endpoint, Hostenv generates a systemd socket unit and a forwarding
+# service that connects to the declared TCP port inside the owning service's
+# private network namespace.
 { config, ... }:
 let
   packagesFor = config.flake.lib.hostenv.packagesFor;
@@ -6,7 +12,6 @@ in
   flake.modules.hostenv.endpoints =
     { config, lib, pkgs, ... }:
     let
-      runtimeDir = config.hostenv.runtimeDir;
       # Service and endpoint names also become Unix socket path components.
       # Their naming contract is stricter than systemd's unit-name rules.
       safeName = name: builtins.match "[A-Za-z0-9][A-Za-z0-9_.-]*" name != null;
@@ -14,9 +19,9 @@ in
       socketPath = service: endpoint:
         let
           path = if endpoint == "default" then
-            "${runtimeDir}/${service}.sock"
+            "${config.hostenv.runtimeDir}/${service}.sock"
           else
-            "${runtimeDir}/${service}/${endpoint}.sock";
+            "${config.hostenv.runtimeDir}/${service}/${endpoint}.sock";
         in
         if !(safeName service && safeName endpoint) then
           throw "Endpoint ${service}.${endpoint}: service and endpoint names must be safe path components; templates are not supported."
@@ -36,9 +41,9 @@ in
         }) unit.endpoints)
       ) config.systemd.services);
 
-      # Only existing declarations are examined here. Helpers are emitted as
-      # concrete units, not added to systemd.services while iterating that same
-      # option, which would introduce a module-evaluation recursion.
+      # Collect declared service and socket unit names so that generated
+      # endpoint units cannot reuse them. Generate the endpoint units under
+      # systemd.units to avoid defining systemd.services in terms of itself.
       existingUnits =
         map (name: "${name}.service") (builtins.attrNames config.systemd.services)
         ++ map (name: "${name}.socket") (builtins.attrNames config.systemd.sockets);
@@ -46,8 +51,10 @@ in
       paths = map (endpoint: endpoint.socket) entries;
       pathsConflict = a: b: a == b || lib.hasPrefix "${a}/" b || lib.hasPrefix "${b}/" a;
 
-      # Socket units declare their listeners directly, so these paths can be
-      # checked without maintaining a registry of application-created sockets.
+      # Check the filesystem listener paths declared by enabled systemd socket
+      # units. Endpoint paths must not reuse these paths or overlap them as
+      # files and directories. Listeners opened directly by applications
+      # cannot be identified during Nix evaluation.
       listenPaths = value: lib.filter
         (path: builtins.isString path && lib.hasPrefix "/" path)
         (lib.toList value);
@@ -80,12 +87,16 @@ in
           "Hostenv endpoints have conflicting socket paths or file/directory names.";
       plan = if errors == [ ] then entries else throw (lib.concatStringsSep "\n" errors);
 
+      # The Haskell helper checks socket paths and manages forwarding into
+      # the owning service's private network namespace.
       runtime = "${(packagesFor pkgs).hostenv-runtime}/bin/hostenv-system endpoint";
       makeUnits = endpoint:
         let
           manifest = pkgs.writeText "hostenv-endpoint-${endpointId endpoint.service endpoint.name}.json" (builtins.toJSON {
             inherit (endpoint) owner socket port descriptor;
-            runtime_dir = runtimeDir;
+            runtime_dir = config.hostenv.runtimeDir;
+            # Use exact Nix store paths for the helper executables. The user
+            # service's PATH may vary, and the proxy is outside bin/.
             systemctl = "${config.systemd.package}/bin/systemctl";
             nsenter = "${pkgs.util-linux}/bin/nsenter";
             setpriv = "${pkgs.util-linux}/bin/setpriv";
