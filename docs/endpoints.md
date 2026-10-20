@@ -4,6 +4,9 @@ A Hostenv endpoint makes a service's private TCP port available through a Unix
 socket. Other processes in the same hosting environment can connect to the
 service using that socket.
 
+Hostenv configures endpoints automatically for built-in services that need
+them. You can also define endpoints for your own systemd services.
+
 ## Configuring endpoints
 
 Add endpoints to an existing systemd user service:
@@ -20,13 +23,12 @@ systemd.services.example = {
 ```
 
 The application must accept connections to `127.0.0.1:3000` and
-`127.0.0.1:3001` inside its private network. Hostenv forwards connections using the network namespace
-of the service's main process. Any process listening on these ports must share
+`127.0.0.1:3001` inside its private network. Hostenv forwards connections using the network
+namespace of the service's main process. Any process listening on these ports must share
 that namespace. See [Private networking](private-network.md) for details.
 
 Endpoints support services running in the foreground with a systemd type of
-`simple`, `exec`, `notify` or `notify-reload`. Built-in integrations, such as
-Gotenberg, configure their endpoints automatically.
+`simple`, `exec`, `notify` or `notify-reload`.
 
 ## Socket paths
 

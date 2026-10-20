@@ -4,6 +4,9 @@ Hostenv can run a service's main process in its own network namespace. The
 process and its children can communicate over `127.0.0.1`, but have no route
 to other networks.
 
+Hostenv enables private networking automatically for built-in services that
+need it. You can also enable it for your own systemd services.
+
 ## Enabling private networking
 
 Set `hostenv.network.isolated` on a systemd user service:
