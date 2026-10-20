@@ -166,7 +166,13 @@ in
                       type = lib.types.str;
                       readOnly = true;
                       default = socketPath service name;
-                      description = "Generated environment-private Unix socket path.";
+                      defaultText = lib.literalExpression ''
+                        if name == "default" then
+                          "''${config.hostenv.runtimeDir}/''${service}.sock"
+                        else
+                          "''${config.hostenv.runtimeDir}/''${service}/''${name}.sock"
+                      '';
+                      description = "Path to the Unix socket for this endpoint.";
                     };
                     socketUnit = lib.mkOption {
                       type = lib.types.str;

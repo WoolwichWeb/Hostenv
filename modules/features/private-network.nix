@@ -1,5 +1,4 @@
 # Private network isolation for the main process of a systemd user service.
-# Keep the namespace machinery independent of application integrations.
 { ... }:
 {
   flake.lib.hostenv.privateNetwork.wrapService = pkgs: service:
@@ -49,11 +48,11 @@
           type = lib.types.bool;
           default = false;
           description = ''
-            Run the service's main ExecStart process in private user and
-            network namespaces with loopback enabled and no general outbound
-            network access. Namespace setup must succeed before the application
-            starts. This does not isolate ExecStartPre, ExecStartPost,
-            ExecReload or other systemd control commands.
+            Run ExecStart in private user and network namespaces, with loopback
+            enabled and no route to other networks.
+
+            Other service commands, such as ExecStartPre and ExecReload, run
+            outside these namespaces.
           '';
         };
 
