@@ -26,11 +26,15 @@
       in
       if !supported then
         throw "Hostenv private networking for ${service.name} requires one ExecStart command with an absolute executable path (no systemd prefixes or command separators)."
-      else if service.serviceConfig.NoNewPrivileges != true then
+      else if (service.serviceConfig.NoNewPrivileges or true) != true then
         throw "Hostenv private networking for ${service.name} requires NoNewPrivileges=true."
       else
+        # Add hardening to the rendered unit. Defining a serviceConfig
+        # attribute in the option fixpoint would override service modules
+        # that use mkDefault for their entire serviceConfig.
         service // {
           serviceConfig = service.serviceConfig // {
+            NoNewPrivileges = true;
             ExecStart =
               "${pkgs.util-linux}/bin/unshare --user --map-current-user --keep-caps --net ${enter} ${command}";
           };
@@ -38,7 +42,7 @@
 
   flake.modules.hostenv.private-network = { lib, ... }: {
     options.systemd.services = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.submodule ({ config, lib, ... }: {
+      type = lib.types.attrsOf (lib.types.submodule {
         options.hostenv.network.isolated = lib.mkOption {
           type = lib.types.bool;
           default = false;
@@ -50,12 +54,7 @@
             ExecReload or other systemd control commands.
           '';
         };
-
-        # Enforce the existing Gotenberg security property for every service
-        # using this execution mode. A conflicting explicit false must fail.
-        config.serviceConfig.NoNewPrivileges =
-          lib.mkIf config.hostenv.network.isolated true;
-      }));
+      });
     };
   };
 }
