@@ -23,9 +23,9 @@ systemd.services.example = {
 ```
 
 The application must accept connections to `127.0.0.1:3000` and
-`127.0.0.1:3001` inside its private network. Hostenv forwards connections using the network
-namespace of the service's main process. Any process listening on these ports must share
-that namespace. See [Private networking](private-network.md) for details.
+`127.0.0.1:3001` inside its private network. Hostenv forwards connections using
+the network namespace of the service's main process. Any listener on these
+ports must use that namespace. See [Private networking](private-network.md).
 
 Endpoints support services running in the foreground with a systemd type of
 `simple`, `exec`, `notify` or `notify-reload`.
