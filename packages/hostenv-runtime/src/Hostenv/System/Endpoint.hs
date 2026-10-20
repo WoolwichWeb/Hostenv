@@ -1,4 +1,6 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+-- | Forward connections from systemd Unix sockets to TCP listeners in
+-- private network namespaces, and supervise the forwarding processes.
 module Hostenv.System.Endpoint (run) where
 
 import Control.Concurrent (threadDelay)
@@ -32,8 +34,8 @@ import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
--- The C shim contains only Linux ABI calls. The namespace and process
--- lifecycle live here, alongside the other hostenv-system subcommands.
+-- These C helpers safely inspect directories and sockets, open namespaces,
+-- and manage processes using Linux file descriptors.
 foreign import ccall unsafe "hostenv_endpoint_open_directory"
   c_openDirectory :: CInt -> CString -> IO CInt
 foreign import ccall unsafe "hostenv_endpoint_open_namespace"
@@ -51,14 +53,17 @@ foreign import ccall safe "hostenv_endpoint_pidfd_exited"
 foreign import ccall unsafe "hostenv_endpoint_pidfd_signal"
   c_pidfdSignal :: CInt -> CInt -> IO CInt
 
--- Parsed once when reading the manifest; prepare needs components rather
--- than having to split and inspect the socket path again.
+-- | A socket path split into components for safe directory traversal.
+-- The runtime components locate the environment's runtime directory;
+-- the socket directories lead from there to the socket's parent.
 data SocketLocation = SocketLocation
   { runtimeComponents :: [FilePath]
   , socketDirectories :: [FilePath]
   , socketFilename :: FilePath
   } deriving (Show)
 
+-- | One endpoint's systemd service, Unix socket, activation descriptor and
+-- destination TCP port, read from the generated JSON manifest.
 data Settings = Settings
   { owner :: String
   , socketPath :: FilePath
@@ -70,6 +75,8 @@ data Settings = Settings
 invalid :: String -> IO a
 invalid = ioError . userError
 
+-- | Split an absolute path into components, rejecting empty components,
+-- "." and "..", and embedded NUL bytes.
 absoluteParts :: FilePath -> Either String [String]
 absoluteParts path =
   case T.splitOn "/" (T.pack path) of
@@ -81,6 +88,8 @@ absoluteParts path =
     validPart part = not (T.null part) && part /= "." && part /= ".."
       && not (T.any (== '\NUL') part)
 
+-- | Check that the socket is inside the environment's runtime directory and
+-- short enough for a Unix socket address, then split it for safe traversal.
 parseSocketLocation :: FilePath -> FilePath -> Either String SocketLocation
 parseSocketLocation runtime path = do
   root <- absoluteParts runtime
@@ -117,16 +126,19 @@ instance FromJSON Settings where
       , port = privatePort
       }
 
+-- | Read an endpoint manifest and validate the paths it contains.
 loadSettings :: FilePath -> IO Settings
 loadSettings manifest = do
   bytes <- BS.readFile manifest
   either (invalid . ("invalid endpoint manifest: " ++)) pure
     (A.eitherDecodeStrict' bytes)
 
+-- | Open a directory relative to an open parent, refusing symlinks.
 openDirectory :: Fd -> FilePath -> IO Fd
 openDirectory (Fd parent) name = withCString name $ \raw ->
   Fd <$> throwErrnoIfMinus1Retry "openat(endpoint directory)" (c_openDirectory parent raw)
 
+-- | Hold a namespace open even if the process that created it exits.
 openNamespace :: FilePath -> IO Fd
 openNamespace path = withCString path $ \raw ->
   Fd <$> throwErrnoIfMinus1Retry "open(namespace)" (c_openNamespace raw)
@@ -138,12 +150,15 @@ makeDirectory (Fd parent) name = withCString name $ \raw -> do
     errno <- getErrno
     unless (errno == eEXIST) $ throwErrno "mkdirat(endpoint directory)"
 
+-- | Walk existing directories without following symlinks, closing the
+-- directory handles when the action finishes.
 withDirectories :: Fd -> [String] -> (Fd -> IO a) -> IO a
 withDirectories current [] action = action current
 withDirectories current (part : rest) action =
   bracket (openDirectory current part) closeFd $ \next ->
     withDirectories next rest action
 
+-- | Create missing endpoint directories and safely open each one.
 withEndpointDirectories :: Fd -> [String] -> (Fd -> IO a) -> IO a
 withEndpointDirectories current [] action = action current
 withEndpointDirectories current (part : rest) action = do
@@ -151,6 +166,8 @@ withEndpointDirectories current (part : rest) action = do
   bracket (openDirectory current part) closeFd $ \next ->
     withEndpointDirectories next rest action
 
+-- | Create the socket's parent directories and refuse to replace an existing
+-- file or socket. Systemd opens the listener after this check succeeds.
 prepare :: Settings -> IO ()
 prepare settings = do
   let location = socketLocation settings
@@ -166,6 +183,8 @@ prepare settings = do
                           "; stop its owning unit and inspect it before removing it")
             _ -> throwErrno "openat(endpoint preflight)"
 
+-- | Check that systemd passed exactly the Unix listening socket named in
+-- the manifest before forwarding any connections.
 validateActivation :: Settings -> IO ()
 validateActivation settings = do
   myself <- getProcessID
@@ -183,21 +202,29 @@ validateActivation settings = do
   unless (matched == 1) $
     invalid "descriptor 3 is not the declared Unix stream listener"
 
+-- | Hold a reference to a particular process even if its numeric PID is
+-- later reused by another process.
 pidfdOpen :: ProcessID -> IO Fd
 pidfdOpen pid = Fd <$> throwErrnoIfMinus1Retry "pidfd_open"
   (c_pidfdOpen (fromIntegral pid))
 
+-- | Check whether a pinned process has exited, waiting at most the given
+-- number of milliseconds.
 pidfdExited :: Fd -> Int -> IO Bool
 pidfdExited (Fd fd) milliseconds = do
   state <- throwErrnoIfMinus1Retry "poll(pidfd)" (c_pidfdExited fd (fromIntegral milliseconds))
   pure (state /= 0)
 
+-- | Check whether two open descriptors refer to the same kernel namespace.
 sameNamespace :: Fd -> Fd -> IO Bool
 sameNamespace first second = do
   a <- getFdStatus first
   b <- getFdStatus second
   pure (deviceID a == deviceID b && fileID a == fileID b)
 
+-- | Read the owning service's main PID and state from the user systemd
+-- manager. Remove inherited socket-activation variables before calling
+-- systemctl.
 ownerState :: Settings -> IO (Map.Map String String)
 ownerState settings = do
   environment <- getEnvironment
@@ -217,6 +244,8 @@ ownerState settings = do
                             let (key, value) = break (== '=') line,
                             '=' : contents <- [value]])
 
+-- | Check whether the owning service is ready. Once it is, keep handles to
+-- its process and namespaces while entering the private network.
 attachReady :: Settings -> FilePath -> IO Bool
 attachReady settings manifest = do
   state <- ownerState settings
@@ -239,6 +268,8 @@ attachReady settings manifest = do
             updated <- ownerState settings
             unless (not dead && Map.lookup "MainPID" updated == Just (show pid)) $
               invalid "the owning service changed during namespace setup"
+            -- Keep these handles open across exec so the next process can
+            -- verify its namespaces and detect when the owner exits.
             let descriptors = [ownerFd, userFd, netFd]
             mapM_ (\fd -> setFdOption fd CloseOnExec False) descriptors
             binary <- getExecutablePath
@@ -252,6 +283,8 @@ attachReady settings manifest = do
             executeFile "nsenter" True arguments Nothing
     showFd (Fd fd) = show fd
 
+-- | Keep the socket-activated process alive while waiting for the owning
+-- service to become ready, up to the requested timeout.
 attach :: IORef Bool -> Settings -> FilePath -> Double -> IO ExitCode
 attach interrupted settings manifest duration = do
   start <- getMonotonicTimeNSec
@@ -276,6 +309,7 @@ attach interrupted settings manifest duration = do
   validateActivation settings
   loop "the owning service is not ready"
 
+-- | Check that no Linux capabilities remain before starting the forwarder.
 requireCapabilitiesDropped :: IO ()
 requireCapabilitiesDropped = do
   status <- readFile "/proc/self/status"
@@ -293,6 +327,7 @@ requireCapabilitiesDropped = do
   unless (all zero ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"]) $
     invalid "namespace setup capabilities were not dropped"
 
+-- | Signal the pinned process, avoiding the risk of signalling a reused PID.
 sendPidfd :: Fd -> Signal -> IO ()
 sendPidfd (Fd fd) number = do
   result <- c_pidfdSignal fd (fromIntegral number)
@@ -301,6 +336,8 @@ sendPidfd (Fd fd) number = do
     unless (errno == eSRCH) $
       throwErrno "pidfd_send_signal(endpoint proxy)"
 
+-- | Request a clean stop of the forwarding process, escalate to SIGKILL if
+-- necessary, and reap the child.
 terminateChild :: ProcessID -> Fd -> IO ()
 terminateChild child childFd = do
   dead <- pidfdExited childFd 0
@@ -310,10 +347,12 @@ terminateChild child childFd = do
     unless stopped $ do
       sendPidfd childFd sigKILL
       void (pidfdExited childFd 1000)
-  -- Never block unboundedly or signal the numeric PID after reaping.
+  -- Every signal uses the pidfd so a reused numeric PID cannot be signalled.
   void (getProcessStatus False False child `catch`
         (\(_ :: IOException) -> pure Nothing))
 
+-- | Launch systemd-socket-proxyd with systemd's listening socket, and keep a
+-- process handle for monitoring and cleanup.
 startProxy :: Settings -> [Fd] -> IO (ProcessID, Fd)
 startProxy settings descriptors = do
   child <- forkProcess $ do
@@ -339,6 +378,8 @@ startProxy settings descriptors = do
     invalid ("cannot pin the endpoint proxy: " ++ displayException err)
   pure (child, childFd)
 
+-- | Confirm that the helper entered the owning service's private namespaces,
+-- then supervise the forwarder until the owner stops or forwarding fails.
 joined :: IORef Bool -> Settings -> [Fd] -> IO ExitCode
 joined interrupted settings handles = do
   let raw = map (\(Fd fd) -> fd) handles
@@ -365,6 +406,8 @@ joined interrupted settings handles = do
       (\(_, childFd) -> watch childFd ownerFd))
     (mapM_ (\fd -> closeFd fd `catch` (\(_ :: IOException) -> pure ())) handles)
   where
+    -- A proxy exit while its owner is running is a failure, so systemd can
+    -- restart the forwarding service.
     watch childFd ownerFd = do
       requested <- readIORef interrupted
       if requested
@@ -379,6 +422,8 @@ joined interrupted settings handles = do
                 then pure (ExitFailure 1)
                 else threadDelay 200000 >> watch childFd ownerFd
 
+-- | Record termination requests so the forwarder can be stopped and cleaned
+-- up before the helper exits.
 withSignals :: (IORef Bool -> IO a) -> IO a
 withSignals action = do
   requested <- newIORef False
@@ -395,6 +440,8 @@ withSignals action = do
 usage :: String
 usage = "Usage: hostenv-system endpoint prepare MANIFEST | serve MANIFEST [--timeout=SECONDS] | joined MANIFEST OWNERFD USERFD NETFD"
 
+-- | Prepare the socket path, serve an activated socket, or resume forwarding
+-- after joining the owning service's namespaces.
 dispatch :: IORef Bool -> [String] -> IO ExitCode
 dispatch _ ["prepare", manifest] = loadSettings manifest >>= prepare >> pure ExitSuccess
 dispatch stop ["serve", manifest] = do
@@ -411,6 +458,7 @@ dispatch stop ("joined" : manifest : raw) | length raw == 3 = do
   joined stop settings (map Fd fds)
 dispatch _ _ = invalid usage
 
+-- | Parse a positive, finite timeout of at most one hour.
 stripTimeout :: String -> Maybe Double
 stripTimeout option = do
   raw <- T.stripPrefix "--timeout=" (T.pack option)
@@ -419,6 +467,8 @@ stripTimeout option = do
     then Just seconds
     else Nothing
 
+-- | Run an endpoint command and report operating-system errors as readable
+-- messages with a failed exit status.
 run :: [String] -> IO ExitCode
 run arguments = withSignals $ \interrupted ->
   dispatch interrupted arguments `catch` \(err :: IOException) -> do
