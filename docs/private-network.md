@@ -1,6 +1,12 @@
-# Private network namespaces for user services
+# Private networking for systemd services
 
-Service integrations can run their main process in a private network namespace:
+Hostenv can run a service's main process in its own network namespace. The
+process and its children can communicate over `127.0.0.1`, but have no route
+to other networks.
+
+## Enabling private networking
+
+Set `hostenv.network.isolated` on a systemd user service:
 
 ```nix
 systemd.services.example = {
@@ -9,24 +15,22 @@ systemd.services.example = {
 };
 ```
 
-By default, `hostenv.network.isolated` is `false`. Setting it to `true` makes Hostenv create private user and network namespaces, bring up loopback and drop its namespace-setup capabilities before running the original `ExecStart` command. If setup fails, the application does not start. The service also requires `NoNewPrivileges=true`.
-
-The application and its descendants can use `127.0.0.1` inside their private namespace, but Hostenv does not provide an outbound network route. This is an execution setting, independent of `systemd.services.<name>.endpoints`: an isolated service does not need to export an endpoint, and declaring an endpoint does not automatically enable isolation.
+Private networking is disabled by default. When enabled, Hostenv also creates
+a private user namespace and sets `NoNewPrivileges=true` for the service.
 
 ## Supported commands
 
-The initial implementation accepts one ordinary `ExecStart` command beginning with an absolute executable path. It preserves the command's systemd argument parsing, the main process identity, service type, working directory, environment and readiness notifications. Unsupported executable prefixes (such as `-` or `@`) and multiple `ExecStart` commands, including semicolon-separated commands, are rejected during evaluation.
+The service must have one `ExecStart` command beginning with an absolute
+executable path. Systemd command prefixes, such as `-` and `@`, and multiple
+commands, including those separated by semicolons, are not supported.
 
-Only the **main `ExecStart` process** is placed in the private namespace. systemd control commands such as `ExecStartPre`, `ExecStartPost`, `ExecReload` and `ExecStop` retain their normal execution context. Do not use those hooks for application work that must be isolated. Extending network policy to every execution path, including outbound access and DNS, belongs to the later service-connections work in MR 52.
+The private network applies to `ExecStart` and the processes it starts. Other
+systemd commands, including `ExecStartPre`, `ExecStartPost`, `ExecReload`
+and `ExecStop`, run outside the private network. Run any tasks that require
+isolation as part of the main service process.
 
-Gotenberg uses this option for its converter. Its HTTP readiness check and application supervision remain in the Gotenberg module.
+## Connecting to an isolated service
 
-## Verification
-
-```bash
-nix build .#checks.x86_64-linux.private-network-contracts -L
-nix build .#endpoints-vm-test -L
-nix build .#gotenberg-vm-test -L
-```
-
-The endpoint VM test includes a standalone service with no endpoints and verifies its isolated loopback, process capabilities, independence from another namespace and refusal to start when namespace creation is forbidden. The Gotenberg VM test verifies the application and Chromium still run in isolated network contexts.
+To make a TCP port in the private network accessible to other processes in the
+same hosting environment, declare a [TCP endpoint](endpoints.md). Hostenv
+creates a Unix socket that forwards connections to that port.
