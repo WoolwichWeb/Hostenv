@@ -39,6 +39,9 @@ class EndpointRuntimeTests(unittest.TestCase):
         self.state.mkdir(mode=0o700)
         if os.getuid() == 0:
             os.chown(self.state, UID, GID)
+        self.tools = self.base / 'tools'
+        self.tools.mkdir(mode=0o755)
+        (self.tools / 'systemd-socket-proxyd').symlink_to(PROXY)
         self.processes = []
         self.logs = []
 
@@ -55,14 +58,21 @@ class EndpointRuntimeTests(unittest.TestCase):
             log.close()
         self.temp.cleanup()
 
+    def tool_env(self, env=None):
+        result = dict(os.environ if env is None else env)
+        result['PATH'] = str(self.tools) + os.pathsep + result.get('PATH', '')
+        return result
+
     def run_tenant(self, command, **kwargs):
+        env = self.tool_env(kwargs.pop('env', None))
         return subprocess.run(command, capture_output=True, text=True,
-                              timeout=12, **as_tenant(), **kwargs)
+                              timeout=12, env=env, **as_tenant(), **kwargs)
 
     def start(self, command, name):
         log = open(self.base / (name + '.log'), 'w+')
         self.logs.append(log)
-        process = subprocess.Popen(command, stdout=log, stderr=log, **as_tenant())
+        process = subprocess.Popen(command, stdout=log, stderr=log,
+                                   env=self.tool_env(), **as_tenant())
         self.processes.append(process)
         return process, log
 
@@ -121,14 +131,12 @@ while True:
         return process
 
     def manifest(self, owner, name='default', port=3000):
-        control = self.base / 'systemctl-test'
+        control = self.tools / 'systemctl'
         control.write_text(f"#!/bin/sh\nprintf 'MainPID={owner}\nActiveState=active\n'\n")
         control.chmod(0o755)
         data = dict(owner='fixture.service', runtime_dir=str(self.state),
                     socket=str(self.state / ('fixture.sock' if name == 'default' else f'fixture/{name}.sock')),
-                    descriptor='fixture-' + name, port=port, systemctl=str(control),
-                    nsenter=shutil.which('nsenter'), setpriv=shutil.which('setpriv'),
-                    proxy=PROXY)
+                    descriptor='fixture-' + name, port=port)
         manifest = self.base / (name + '.json')
         manifest.write_text(json.dumps(data))
         return manifest, data

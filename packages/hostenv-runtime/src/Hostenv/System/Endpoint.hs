@@ -65,10 +65,6 @@ data Settings = Settings
   , socketLocation :: SocketLocation
   , descriptor :: String
   , port :: Int
-  , systemctl :: FilePath
-  , nsenter :: FilePath
-  , setpriv :: FilePath
-  , proxy :: FilePath
   } deriving (Show)
 
 invalid :: String -> IO a
@@ -110,10 +106,6 @@ instance FromJSON Settings where
     path <- obj .: "socket"
     descriptorName <- obj .: "descriptor"
     privatePort <- obj .: "port"
-    systemctlPath <- obj .: "systemctl"
-    nsenterPath <- obj .: "nsenter"
-    setprivPath <- obj .: "setpriv"
-    proxyPath <- obj .: "proxy"
 
     location <- either fail pure (parseSocketLocation runtime path)
 
@@ -123,10 +115,6 @@ instance FromJSON Settings where
       , socketLocation = location
       , descriptor = descriptorName
       , port = privatePort
-      , systemctl = systemctlPath
-      , nsenter = nsenterPath
-      , setpriv = setprivPath
-      , proxy = proxyPath
       }
 
 loadSettings :: FilePath -> IO Settings
@@ -216,7 +204,7 @@ ownerState settings = do
   let unsafeKeys = ["LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES",
                     "LISTEN_PIDFDID", "NOTIFY_SOCKET"]
       clean = filter (\(key, _) -> key `notElem` unsafeKeys) environment
-      process = (proc (systemctl settings)
+      process = (proc "systemctl"
         ["--user", "show", owner settings, "--property=MainPID", "--property=ActiveState"])
         { env = Just clean, close_fds = True }
   reply <- timeout 5000000 (readCreateProcessWithExitCode process "")
@@ -258,10 +246,10 @@ attachReady settings manifest = do
                   [ "--user=/proc/self/fd/" ++ showFd userFd
                   , "--net=/proc/self/fd/" ++ showFd netFd
                   , "--preserve-credentials", "--keep-caps"
-                  , setpriv settings, "--bounding-set=-all", "--inh-caps=-all"
+                  , "setpriv", "--bounding-set=-all", "--inh-caps=-all"
                   , "--ambient-caps=-all", binary, "endpoint", "joined", manifest
                   ] ++ map showFd descriptors
-            executeFile (nsenter settings) False arguments Nothing
+            executeFile "nsenter" True arguments Nothing
     showFd (Fd fd) = show fd
 
 attach :: IORef Bool -> Settings -> FilePath -> Double -> IO ExitCode
@@ -338,7 +326,7 @@ startProxy settings descriptors = do
             name `notElem` ["LISTEN_PID", "LISTEN_PIDFDID", "NOTIFY_SOCKET"])
             environment
           inherited = ("LISTEN_PID", show myself) : clean
-      executeFile (proxy settings) False
+      executeFile "systemd-socket-proxyd" True
         ["127.0.0.1:" ++ show (port settings)] (Just inherited))
       `catch` (\(err :: IOException) -> pure (Left err))
     case result of

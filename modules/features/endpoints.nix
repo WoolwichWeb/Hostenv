@@ -95,12 +95,6 @@ in
           manifest = pkgs.writeText "hostenv-endpoint-${endpointId endpoint.service endpoint.name}.json" (builtins.toJSON {
             inherit (endpoint) owner socket port descriptor;
             runtime_dir = config.hostenv.runtimeDir;
-            # Use exact Nix store paths for the helper executables. The user
-            # service's PATH may vary, and the proxy is outside bin/.
-            systemctl = "${config.systemd.package}/bin/systemctl";
-            nsenter = "${pkgs.util-linux}/bin/nsenter";
-            setpriv = "${pkgs.util-linux}/bin/setpriv";
-            proxy = "${config.systemd.package}/lib/systemd/systemd-socket-proxyd";
           });
         in
         [
@@ -135,6 +129,7 @@ in
 
               [Service]
               Type=exec
+              Environment="PATH=${lib.makeBinPath [ config.systemd.package pkgs.util-linux ]}:${config.systemd.package}/lib/systemd"
               ExecStart=${runtime} serve ${manifest}
               # Give the monitor SIGTERM first so it can stop and reap the
               # proxy. With control-group, both receive SIGTERM at once and
@@ -157,9 +152,9 @@ in
               options.endpoints = lib.mkOption {
                 default = { };
                 description = ''
-                  Export named private TCP listeners through environment-private
-                  Unix sockets. The owning service must establish its private
-                  user and network namespaces through its service integration.
+                  Expose TCP listeners in this service's private network
+                  namespace through Unix sockets. Set each endpoint's port
+                  to a listener reachable on 127.0.0.1.
                 '';
                 type = lib.types.attrsOf (lib.types.submodule ({ name, ... }: {
                   options = {

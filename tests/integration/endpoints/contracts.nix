@@ -1,6 +1,9 @@
 { pkgs, makeHostenv }:
 let
   lib = pkgs.lib;
+  # Compare generated units without interpreting Nix store paths as regexes.
+  contains = needle: haystack:
+    builtins.replaceStrings [ needle ] [ "" ] haystack != haystack;
   evaluate = extra: (makeHostenv [
     {
       hostenv = {
@@ -75,6 +78,9 @@ let
     (!(lib.hasInfix "Endpoint=" multiple.systemd.units."example.service".text))
     (lib.hasInfix "SocketMode=0600" multiple.systemd.units.${ep.api.socketUnit}.text)
     (lib.hasInfix "KillMode=mixed" multiple.systemd.units.${ep.api.proxyUnit}.text)
+    (contains
+      "Environment=\"PATH=${lib.makeBinPath [ multiple.systemd.package pkgs.util-linux ]}:${multiple.systemd.package}/lib/systemd\""
+      multiple.systemd.units.${ep.api.proxyUnit}.text)
     (lib.hasInfix "FileDescriptorName=hostenv-" multiple.systemd.units.${ep.api.socketUnit}.text)
     (ep.default.socketUnit == "example.socket")
     (ep.api.proxyUnit != ep.admin.proxyUnit)

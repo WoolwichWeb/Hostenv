@@ -49,7 +49,7 @@ in
 
               write_manifest() {
                 cat > manifest.json <<EOF
-              {"owner":"$1","runtime_dir":"$2","socket":"$3","descriptor":"$4","port":$5,"systemctl":"$6","nsenter":"/bin/true","setpriv":"/bin/true","proxy":"/bin/true"}
+              {"owner":"$1","runtime_dir":"$2","socket":"$3","descriptor":"$4","port":$5}
               EOF
               }
 
@@ -66,23 +66,23 @@ in
               }
 
               mkdir -m 0700 "$TMPDIR/runtime"
-              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001 /bin/true
+              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001
               hostenv-system endpoint prepare manifest.json
               test -d "$TMPDIR/runtime/fixture"
               test ! -e "$TMPDIR/runtime/fixture/api.sock"
               mkdir -m 0700 "$TMPDIR/_runtime"
-              write_manifest fixture.service "$TMPDIR/_runtime" "$TMPDIR/_runtime/fixture/api.sock" hostenv-api 3001 /bin/true
+              write_manifest fixture.service "$TMPDIR/_runtime" "$TMPDIR/_runtime/fixture/api.sock" hostenv-api 3001
               hostenv-system endpoint prepare manifest.json
               test -d "$TMPDIR/_runtime/fixture"
 
-              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime" hostenv-api 3001 /bin/true
+              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime" hostenv-api 3001
               expect_rejected "the export must be inside the environment's runtime directory"
-              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime-other/fixture/api.sock" hostenv-api 3001 /bin/true
+              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime-other/fixture/api.sock" hostenv-api 3001
               expect_rejected "the export must be inside the environment's runtime directory"
-              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/../escape.sock" hostenv-api 3001 /bin/true
+              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/../escape.sock" hostenv-api 3001
               expect_rejected "socket and runtime paths must be absolute, normalised and contain no NUL bytes"
               long_segment=$(printf '%0108d' 0 | tr 0 a)
-              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/$long_segment.sock" hostenv-api 3001 /bin/true
+              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/$long_segment.sock" hostenv-api 3001
               expect_rejected "the Unix socket path must be at most 107 bytes"
 
               # Aeson remains responsible for decoding manifest field types.
