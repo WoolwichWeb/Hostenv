@@ -32,20 +32,24 @@ let
       };
     };
   };
-  # Drupal 6 and other integrations supply an entire serviceConfig using
-  # mkDefault. Isolation must not discard those settings, whether enabled
-  # or disabled for the service.
-  defaultServiceConfig = lib.mkDefault {
+  # A service that does not request isolation must retain its existing
+  # serviceConfig defaults, even when the entire set is defined with mkDefault.
+  wholeServiceDefaults = lib.mkDefault {
     Type = "oneshot";
     ExecStart = command;
   };
   ordinary = evaluate {
-    systemd.services.example.serviceConfig = defaultServiceConfig;
+    systemd.services.example.serviceConfig = wholeServiceDefaults;
   };
+  # When another module adds serviceConfig settings, set defaults on each
+  # field so those settings can merge independently.
   isolatedWithDefaults = evaluate {
     systemd.services.example = {
       hostenv.network.isolated = true;
-      serviceConfig = defaultServiceConfig;
+      serviceConfig = {
+        Type = lib.mkDefault "oneshot";
+        ExecStart = lib.mkDefault command;
+      };
     };
   };
 
@@ -62,6 +66,7 @@ let
   checks = [
     (isolated.systemd.services.example.hostenv.network.isolated)
     (isolated.systemd.services.example.serviceConfig.ExecStart == command)
+    (isolated.systemd.services.example.serviceConfig.NoNewPrivileges == true)
     (contains
       "ExecStart=${pkgs.util-linux}/bin/unshare --user --map-current-user --keep-caps --net "
       isolatedUnit)
@@ -78,6 +83,7 @@ let
 
     (isolatedWithDefaults.systemd.services.example.hostenv.network.isolated)
     (isolatedWithDefaults.systemd.services.example.serviceConfig.ExecStart == command)
+    (isolatedWithDefaults.systemd.services.example.serviceConfig.NoNewPrivileges == true)
     (contains "Type=oneshot" isolatedWithDefaultsUnit)
     (contains "NoNewPrivileges=true" isolatedWithDefaultsUnit)
     (contains

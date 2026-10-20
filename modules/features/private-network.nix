@@ -26,15 +26,17 @@
       in
       if !supported then
         throw "Hostenv private networking for ${service.name} requires one ExecStart command with an absolute executable path (no systemd prefixes or command separators)."
-      else if (service.serviceConfig.NoNewPrivileges or true) != true then
+      else if service.serviceConfig.NoNewPrivileges != true then
         throw "Hostenv private networking for ${service.name} requires NoNewPrivileges=true."
       else
-        # Add hardening to the rendered unit. Defining a serviceConfig
-        # attribute in the option fixpoint would override service modules
-        # that use mkDefault for their entire serviceConfig.
+        # @todo: Private networking currently changes ExecStart after Nix has
+        # merged the systemd service options. This is unusual: the command in
+        # the generated unit differs from serviceConfig.ExecStart in the
+        # evaluated configuration. In future, consider using the systemd
+        # `script` option for service commands and deriving ExecStart from it,
+        # as Nixpkgs does, rather than rewriting ExecStart when rendering units.
         service // {
           serviceConfig = service.serviceConfig // {
-            NoNewPrivileges = true;
             ExecStart =
               "${pkgs.util-linux}/bin/unshare --user --map-current-user --keep-caps --net ${enter} ${command}";
           };
@@ -42,7 +44,7 @@
 
   flake.modules.hostenv.private-network = { lib, ... }: {
     options.systemd.services = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.submodule {
+      type = lib.types.attrsOf (lib.types.submodule ({ config, lib, ... }: {
         options.hostenv.network.isolated = lib.mkOption {
           type = lib.types.bool;
           default = false;
@@ -54,7 +56,11 @@
             ExecReload or other systemd control commands.
           '';
         };
-      });
+
+        config = lib.mkIf config.hostenv.network.isolated {
+          serviceConfig.NoNewPrivileges = true;
+        };
+      }));
     };
   };
 }
