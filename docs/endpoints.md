@@ -48,6 +48,8 @@ The environment's Unix user owns these sockets, which have permissions
 `0600`. Hostenv checks for overlapping endpoint paths and conflicts with
 paths declared in other systemd socket units. It also refuses to overwrite an
 existing file or follow a symbolic link in the socket's directory path.
+After an unclean shutdown, a leftover socket must be checked and removed
+manually before the socket unit can start again.
 
 Service and endpoint names must start with an ASCII letter or digit. They may
 also contain full stops, hyphens and underscores. The full socket path must be at

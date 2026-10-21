@@ -11,4 +11,4 @@ services in private network namespaces, and stops forwarding when those
 services exit.
 
 The small C shim under `cbits/` provides Linux operations for checking socket
-descriptors, opening namespaces and monitoring processes.
+descriptors, inspecting IPv6 listeners and monitoring processes.

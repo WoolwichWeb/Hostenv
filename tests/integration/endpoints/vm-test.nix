@@ -91,8 +91,11 @@ let
     listener.bind(("::", 3200))
     listener.listen(8)
     requests = 0
+    accepted = 0
     while True:
         connection, _ = listener.accept()
+        accepted += 1
+        (state / "accepted").write_text(str(accepted))
         with connection:
             connection.settimeout(2)
             try:
@@ -282,6 +285,8 @@ pkgs.testers.runNixOSTest {
         ))
         assert result == "dual-stack\n", result
         machine.succeed("grep -Fxq 1 " + quote(a["runtime"] + "/dual-stack-state/requests"))
+        # The readiness check must not make an extra connection and close it.
+        machine.succeed("grep -Fxq 1 " + quote(a["runtime"] + "/dual-stack-state/accepted"))
 
     with subtest("several named sockets reach their own private ports"):
         for env in [a, b]:

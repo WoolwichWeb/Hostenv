@@ -96,32 +96,34 @@ in
               test -L "$TMPDIR/runtime/fixture/api.sock"
               rm "$TMPDIR/runtime/fixture/api.sock"
 
-              # Reclaim abandoned sockets but never replace live listeners.
-              python3 - <<'PY'
-              import os
-              import socket
-              path = os.environ["TMPDIR"] + "/runtime/fixture/api.sock"
-              listener = socket.socket(socket.AF_UNIX)
-              listener.bind(path)
-              listener.listen()
-              listener.close()
-              PY
-              hostenv-system endpoint prepare manifest.json
-              test ! -e "$TMPDIR/runtime/fixture/api.sock"
+              # Preserve both abandoned sockets and sockets which are bound
+              # but have not yet begun listening. ECONNREFUSED cannot
+              # distinguish these cases, so neither can safely be removed.
               python3 - <<'PY'
               import os
               import socket
               import subprocess
               path = os.environ["TMPDIR"] + "/runtime/fixture/api.sock"
+
+              def rejected():
+                  result = subprocess.run(
+                      ["hostenv-system", "endpoint", "prepare", "manifest.json"],
+                      capture_output=True, text=True,
+                  )
+                  assert result.returncode != 0, result
+                  assert "refusing to replace existing object" in result.stderr, result.stderr
+                  assert os.path.exists(path)
+
+              # This application owns the socket, but has not called listen().
               listener = socket.socket(socket.AF_UNIX)
               listener.bind(path)
+              rejected()
               listener.listen()
-              result = subprocess.run(["hostenv-system", "endpoint", "prepare", "manifest.json"],
-                                      capture_output=True, text=True)
-              assert result.returncode != 0, result
-              assert "refusing to replace existing object" in result.stderr, result.stderr
-              assert os.path.exists(path)
+              rejected()
               listener.close()
+
+              # A stopped listener also leaves a pathname behind.
+              rejected()
               os.unlink(path)
               PY
 

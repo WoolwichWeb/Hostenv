@@ -1,14 +1,20 @@
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <errno.h>
-#include <fcntl.h>
+#include <linux/inet_diag.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#include <linux/sock_diag.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -45,65 +51,108 @@ int hostenv_endpoint_socket_matches(int fd, const char *path)
     return memcmp(address.sun_path, path, path_length + 1) == 0;
 }
 
-/* Recover only a socket left behind without an active listener. Never
- * remove a different object that replaced it while we were checking. */
-int hostenv_endpoint_recover_stale_socket(int parent, const char *name, const char *path)
+/* Inspect the kernel's IPv6 listener table without connecting to the
+ * application. Inet-diag reports IPV6_V6ONLY for listening sockets.
+ * Returns 1 for a dual-stack wildcard listener, 0 otherwise, -1 on error. */
+int hostenv_endpoint_ipv6_accepts_ipv4(int port)
 {
-    struct stat initial, current;
-    if (fstatat(parent, name, &initial, AT_SYMLINK_NOFOLLOW) < 0)
-        return errno == ENOENT ? 0 : -1;
-    if (!S_ISSOCK(initial.st_mode) || initial.st_uid != geteuid())
-        return 1;
-
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_SOCK_DIAG);
     if (fd < 0)
         return -1;
-    struct sockaddr_un address = { .sun_family = AF_UNIX };
-    size_t size = strlen(path);
-    if (size >= sizeof(address.sun_path)) {
+    struct timeval deadline = {.tv_sec = 2};
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &deadline, sizeof(deadline)) < 0) {
+        int error = errno;
         close(fd);
-        errno = ENAMETOOLONG;
+        errno = error;
         return -1;
     }
-    memcpy(address.sun_path, path, size + 1);
-    int connected = connect(fd, (struct sockaddr *)&address,
-                            offsetof(struct sockaddr_un, sun_path) + size + 1);
-    int error = errno;
-    close(fd);
-    if (connected == 0 || error != ECONNREFUSED)
-        return 1;
-    if (fstatat(parent, name, &current, AT_SYMLINK_NOFOLLOW) < 0)
-        return errno == ENOENT ? 0 : -1;
-    if (!S_ISSOCK(current.st_mode) || current.st_uid != initial.st_uid ||
-        current.st_dev != initial.st_dev || current.st_ino != initial.st_ino)
-        return 1;
-    return unlinkat(parent, name, 0);
-}
-
-/* Only used for possible dual-stack IPv6 sockets, from inside the owner's
- * private network namespace. A successful connection is immediately closed. */
-int hostenv_endpoint_probe_ipv4(int port)
-{
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-    if (fd < 0)
+    struct {
+        struct nlmsghdr header;
+        struct inet_diag_req_v2 request;
+    } query = {0};
+    query.header.nlmsg_len = NLMSG_LENGTH(sizeof(query.request));
+    query.header.nlmsg_type = SOCK_DIAG_BY_FAMILY;
+    query.header.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    query.header.nlmsg_seq = 1;
+    query.request.sdiag_family = AF_INET6;
+    query.request.sdiag_protocol = IPPROTO_TCP;
+    query.request.idiag_states = 1u << 10; /* TCP_LISTEN */
+    struct sockaddr_nl kernel = {.nl_family = AF_NETLINK};
+    if (sendto(fd, &query, query.header.nlmsg_len, 0,
+               (struct sockaddr *)&kernel, sizeof(kernel)) < 0) {
+        int error = errno;
+        close(fd);
+        errno = error;
         return -1;
-    struct sockaddr_in address = { .sin_family = AF_INET,
-                                   .sin_port = htons((unsigned short)port) };
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    int result = connect(fd, (struct sockaddr *)&address, sizeof(address));
-    int error = errno;
-    if (result < 0 && error == EINPROGRESS) {
-        struct pollfd item = { .fd = fd, .events = POLLOUT };
-        int ready = poll(&item, 1, 500);
-        if (ready > 0) {
-            int so_error = 0;
-            socklen_t length = sizeof(so_error);
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &length) == 0)
-                result = so_error == 0 ? 0 : -1;
+    }
+    int result = 0;
+    int error = 0;
+    int done = 0;
+    while (!done) {
+        char buffer[65536];
+        ssize_t got = recv(fd, buffer, sizeof(buffer), MSG_TRUNC);
+        if (got < 0) {
+            if (errno == EINTR)
+                continue;
+            error = errno;
+            break;
+        }
+        if (got == 0 || got > (ssize_t)sizeof(buffer)) {
+            error = EMSGSIZE;
+            break;
+        }
+        int left = (int)got;
+        for (struct nlmsghdr *message = (struct nlmsghdr *)buffer;
+             NLMSG_OK(message, left);
+             message = NLMSG_NEXT(message, left)) {
+            if (message->nlmsg_seq != 1)
+                continue;
+            if (message->nlmsg_type == NLMSG_DONE) {
+                if (message->nlmsg_flags & NLM_F_DUMP_INTR)
+                    error = EINTR;
+                done = 1;
+                break;
+            }
+            if (message->nlmsg_type == NLMSG_ERROR) {
+                if (message->nlmsg_len >= NLMSG_LENGTH(sizeof(struct nlmsgerr))) {
+                    const struct nlmsgerr *reply = NLMSG_DATA(message);
+                    error = reply->error < 0 ? -reply->error : EIO;
+                } else {
+                    error = EPROTO;
+                }
+                done = 1;
+                break;
+            }
+            if (message->nlmsg_type != SOCK_DIAG_BY_FAMILY ||
+                message->nlmsg_len < NLMSG_LENGTH(sizeof(struct inet_diag_msg)))
+                continue;
+            struct inet_diag_msg *listener = NLMSG_DATA(message);
+            if (listener->idiag_family != AF_INET6 ||
+                ntohs(listener->id.idiag_sport) != port)
+                continue;
+            uint32_t zeros[4] = {0};
+            if (memcmp(listener->id.idiag_src, zeros, sizeof(zeros)) != 0)
+                continue;
+            int attrs = (int)(message->nlmsg_len - NLMSG_LENGTH(sizeof(*listener)));
+            struct rtattr *attr = (struct rtattr *)((char *)listener + NLMSG_ALIGN(sizeof(*listener)));
+            for (; RTA_OK(attr, attrs); attr = RTA_NEXT(attr, attrs)) {
+                if (attr->rta_type == INET_DIAG_SKV6ONLY && RTA_PAYLOAD(attr) >= 1 &&
+                    *(const unsigned char *)RTA_DATA(attr) == 0) {
+                    result = 1;
+                    done = 1;
+                    break;
+                }
+            }
+            if (done)
+                break;
         }
     }
     close(fd);
-    return result == 0 ? 1 : 0;
+    if (error) {
+        errno = error;
+        return -1;
+    }
+    return result;
 }
 
 int hostenv_endpoint_pidfd_open(pid_t pid)

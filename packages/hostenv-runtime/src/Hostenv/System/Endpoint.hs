@@ -49,10 +49,8 @@ foreign import ccall unsafe "hostenv_endpoint_make_directory"
   c_makeDirectory :: CInt -> CString -> IO CInt
 foreign import ccall unsafe "hostenv_endpoint_socket_matches"
   c_socketMatches :: CInt -> CString -> IO CInt
-foreign import ccall unsafe "hostenv_endpoint_recover_stale_socket"
-  c_recoverStaleSocket :: CInt -> CString -> CString -> IO CInt
-foreign import ccall unsafe "hostenv_endpoint_probe_ipv4"
-  c_probeIPv4 :: CInt -> IO CInt
+foreign import ccall unsafe "hostenv_endpoint_ipv6_accepts_ipv4"
+  c_ipv6AcceptsIPv4 :: CInt -> IO CInt
 foreign import ccall unsafe "hostenv_endpoint_pidfd_open"
   c_pidfdOpen :: CInt -> IO CInt
 foreign import ccall safe "hostenv_endpoint_pidfd_exited"
@@ -188,8 +186,9 @@ socketObjectExists parent name =
     `catch` \(err :: IOException) ->
       if isDoesNotExistError err then pure False else ioError err
 
--- | Create the socket's parent directories and recover a stale Unix socket
--- without deleting regular files, symlinks or live sockets.
+-- | Create the socket's parent directories, refusing all existing objects.
+-- An abandoned socket cannot reliably be distinguished from a live socket
+-- that has bound its pathname but has not started listening.
 prepare :: Settings -> IO ()
 prepare settings = do
   let location = socketLocation settings
@@ -197,15 +196,9 @@ prepare settings = do
     withDirectories top (runtimeComponents location) $ \runtime ->
       withEndpointDirectories runtime (socketDirectories location) $ \parent -> do
         exists <- socketObjectExists parent (socketFilename location)
-        when exists $ withCString (socketFilename location) $ \name ->
-          withCString (socketPath settings) $ \path -> do
-            let Fd raw = parent
-            result <- c_recoverStaleSocket raw name path
-            case result of
-              0 -> pure ()
-              1 -> invalid ("refusing to replace existing object " ++ socketPath settings ++
-                            "; stop its owning unit and inspect it before removing it")
-              _ -> throwErrno "recover stale endpoint socket"
+        when exists $
+          invalid ("refusing to replace existing object " ++ socketPath settings ++
+                   "; stop its owning unit and inspect it before removing it")
 
 -- | Check that systemd passed exactly the Unix listening socket named in
 -- the manifest before forwarding any connections.
@@ -464,12 +457,13 @@ joined interrupted settings handles = do
     unless expected $ invalid "wrong user namespace"
   stopped <- pidfdExited ownerFd 0
   when stopped $ invalid "the owning service exited before forwarding started"
-  -- /proc/net/tcp6 does not reveal IPV6_V6ONLY. Check actual IPv4
-  -- reachability only when the backend has no IPv4 listening socket.
+  -- /proc/net/tcp6 does not reveal IPV6_V6ONLY. Inspect the kernel's
+  -- listener metadata without establishing a connection to the application.
   ipv4 <- B8.readFile "/proc/self/net/tcp"
   unless (any (ipv4Listening (port settings)) (B8.lines ipv4)) $ do
-    reachable <- c_probeIPv4 (fromIntegral (port settings))
-    unless (reachable == 1) $
+    compatible <- throwErrnoIfMinus1Retry "inspect IPv6 listener" $
+      c_ipv6AcceptsIPv4 (fromIntegral (port settings))
+    unless (compatible == 1) $
       invalid "the IPv6 listener does not accept IPv4 loopback connections"
   finally
     (bracket (startProxy settings handles)
