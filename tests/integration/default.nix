@@ -22,3 +22,6 @@
 // (import ./socket-contract.nix { inherit pkgs envs; })
 // { hostenv-hostname = import ./hostname.nix { inherit pkgs makeHostenv; }; }
 // { public-env-json = import ./public-env-json.nix { inherit pkgs makeHostenv; }; }
+// pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+  provider-foreign-arch-deploy-eval = import ./provider-foreign-arch-deploy-eval.nix { inherit pkgs inputs; };
+}
