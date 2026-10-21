@@ -274,9 +274,14 @@ ownerState settings = do
 tcpListening :: ProcessID -> Int -> IO Bool
 tcpListening pid destination = do
   ipv4 <- B8.readFile ("/proc/" ++ show pid ++ "/net/tcp")
-  ipv6 <- B8.readFile ("/proc/" ++ show pid ++ "/net/tcp6")
-  pure (any (listensAt ["0100007F", "00000000"]) (B8.lines ipv4) ||
-        any (listensAt ["00000000000000000000000000000000"]) (B8.lines ipv6))
+  if any (listensAt ["0100007F", "00000000"]) (B8.lines ipv4) then
+    pure True
+  else do
+    -- An IPv6 socket table may be unavailable when IPv6 is disabled.
+    ipv6 <- B8.readFile ("/proc/" ++ show pid ++ "/net/tcp6")
+      `catch` \(err :: IOException) ->
+        if isDoesNotExistError err then pure B8.empty else ioError err
+    pure (any (listensAt ["00000000000000000000000000000000"]) (B8.lines ipv6))
   where
     listensAt addresses row =
       case B8.words row of
