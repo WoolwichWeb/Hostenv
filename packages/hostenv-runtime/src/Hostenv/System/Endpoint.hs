@@ -49,7 +49,7 @@ foreign import ccall unsafe "hostenv_endpoint_make_directory"
   c_makeDirectory :: CInt -> CString -> IO CInt
 foreign import ccall unsafe "hostenv_endpoint_socket_matches"
   c_socketMatches :: CInt -> CString -> IO CInt
-foreign import ccall unsafe "hostenv_endpoint_ipv6_accepts_ipv4"
+foreign import ccall safe "hostenv_endpoint_ipv6_accepts_ipv4"
   c_ipv6AcceptsIPv4 :: CInt -> IO CInt
 foreign import ccall unsafe "hostenv_endpoint_pidfd_open"
   c_pidfdOpen :: CInt -> IO CInt
