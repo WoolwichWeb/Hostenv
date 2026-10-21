@@ -10,6 +10,7 @@ import Control.Monad (unless, void, when)
 import Data.Aeson (FromJSON (..), (.:), withObject)
 import qualified Data.Aeson as A
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as B8
 import Data.Char (isSpace)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (stripPrefix)
@@ -257,9 +258,28 @@ ownerState settings = do
                             let (key, value) = break (== '=') line,
                             '=' : contents <- [value]])
 
--- | Check whether the owning service is ready. Once it is, keep handles to
--- its process and namespaces while entering the private network.
-attachReady :: Settings -> FilePath -> IO Bool
+-- | Check for a TCP listener on IPv4 loopback in the owner's network
+-- namespace. Reading the kernel's socket table avoids making a dummy
+-- connection to the application.
+tcpListening :: ProcessID -> Int -> IO Bool
+tcpListening pid destination = do
+  table <- B8.readFile ("/proc/" ++ show pid ++ "/net/tcp")
+  pure (any listensOnLoopback (B8.lines table))
+  where
+    listensOnLoopback row =
+      case B8.words row of
+        _ : local : _ : state : _
+          | state == "0A" ->
+              let (address, encodedPort) = B8.break (== ':') local
+              in address `elem` ["0100007F", "00000000"] &&
+                 (case readHex (B8.unpack (B8.drop 1 encodedPort)) of
+                    [(number, "")] -> number == destination
+                    _ -> False)
+        _ -> False
+
+-- | Enter the owner's namespaces once systemd considers it ready and its
+-- TCP listener is open. Otherwise return a reason to keep waiting.
+attachReady :: Settings -> FilePath -> IO String
 attachReady settings manifest = do
   state <- ownerState settings
   let pid = Map.lookup "MainPID" state >>= (readMaybe :: String -> Maybe Int)
@@ -267,7 +287,7 @@ attachReady settings manifest = do
     (Just active, Just number)
       | active `elem` ["active", "reloading"] && number > 0 ->
           withOwner (fromIntegral number)
-    _ -> pure False
+    _ -> pure "the owning service is not active"
   where
     withOwner pid =
       bracket (pidfdOpen pid) closeFd $ \ownerFd -> do
@@ -281,19 +301,23 @@ attachReady settings manifest = do
             updated <- ownerState settings
             unless (not dead && Map.lookup "MainPID" updated == Just (show pid)) $
               invalid "the owning service changed during namespace setup"
-            -- Keep these handles open across exec so the next process can
-            -- verify its namespaces and detect when the owner exits.
-            let descriptors = [ownerFd, userFd, netFd]
-            mapM_ (\fd -> setFdOption fd CloseOnExec False) descriptors
-            binary <- getExecutablePath
-            let arguments =
-                  [ "--user=/proc/self/fd/" ++ showFd userFd
-                  , "--net=/proc/self/fd/" ++ showFd netFd
-                  , "--preserve-credentials", "--keep-caps"
-                  , "setpriv", "--bounding-set=-all", "--inh-caps=-all"
-                  , "--ambient-caps=-all", binary, "endpoint", "joined", manifest
-                  ] ++ map showFd descriptors
-            executeFile "nsenter" True arguments Nothing
+            listening <- tcpListening pid (port settings)
+            if not listening then
+              pure ("TCP listener on 127.0.0.1:" ++ show (port settings) ++ " is not ready")
+            else do
+              -- Keep these handles open across exec so the next process can
+              -- verify its namespaces and detect when the owner exits.
+              let descriptors = [ownerFd, userFd, netFd]
+              mapM_ (\fd -> setFdOption fd CloseOnExec False) descriptors
+              binary <- getExecutablePath
+              let arguments =
+                    [ "--user=/proc/self/fd/" ++ showFd userFd
+                    , "--net=/proc/self/fd/" ++ showFd netFd
+                    , "--preserve-credentials", "--keep-caps"
+                    , "setpriv", "--bounding-set=-all", "--inh-caps=-all"
+                    , "--ambient-caps=-all", binary, "endpoint", "joined", manifest
+                    ] ++ map showFd descriptors
+              executeFile "nsenter" True arguments Nothing
     showFd (Fd fd) = show fd
 
 -- | Keep the socket-activated process alive while waiting for the owning
@@ -309,18 +333,15 @@ attach interrupted settings manifest duration = do
           else do
             now <- getMonotonicTimeNSec
             if now >= deadline
-              then invalid ("cannot enter " ++ owner settings ++
-                            "'s private namespace: " ++ lastProblem)
+              then invalid ("cannot start forwarding to " ++ owner settings ++
+                            ": " ++ lastProblem)
               else do
-                outcome <- (Right <$> attachReady settings manifest)
-                  `catch` (\(err :: IOException) -> pure (Left (displayException err)))
-                let problem = case outcome of
-                      Left message -> message
-                      Right _ -> "the owning service is not ready"
+                problem <- attachReady settings manifest
+                  `catch` (\(err :: IOException) -> pure (displayException err))
                 threadDelay 100000
                 loop problem
   validateActivation settings
-  loop "the owning service is not ready"
+  loop "the owning service is not active"
 
 -- | Check that no Linux capabilities remain before starting the forwarder.
 requireCapabilitiesDropped :: IO ()

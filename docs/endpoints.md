@@ -59,6 +59,6 @@ Hostenv creates the Unix sockets when the environment is activated. Connecting
 to a socket starts its service if necessary, then forwards traffic to the
 configured TCP port inside the service's private network.
 
-Hostenv waits up to two minutes for systemd to report that the service is
-active. The application should open its TCP listener promptly after starting.
-Forwarding stops when the service stops. A later connection can start it again.
+Hostenv waits up to two minutes for the service to become active and its TCP
+port to start listening. Forwarding stops when the service stops. A later
+connection can start it again.

@@ -43,6 +43,41 @@ let
                     + b"\r\nConnection: close\r\n\r\n" + body
                 )
   '';
+
+  delayedServer = pkgs.writeText "endpoint-delayed-server.py" ''
+    import socket
+    import sys
+    import time
+    from pathlib import Path
+
+    state = Path(sys.argv[1])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "starting").touch()
+    time.sleep(3)
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 3100))
+    listener.listen(8)
+    connections = 0
+    while True:
+        connection, _ = listener.accept()
+        connections += 1
+        (state / "connections").write_text(str(connections))
+        with connection:
+            connection.settimeout(5)
+            request = b""
+            while b"\r\n\r\n" not in request:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                request += chunk
+            if request:
+                body = b"ready\n"
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
+                    + b"\r\nConnection: close\r\n\r\n" + body
+                )
+  '';
   probe = pkgs.writeShellScript "isolated-service-probe" ''
     ${pkgs.coreutils}/bin/mkdir -p "$1"
     ${pkgs.iproute2}/bin/ip -o link show lo > "$1/loopback"
@@ -61,6 +96,15 @@ let
           ExecStart = "${pkgs.python3}/bin/python3 -I -S ${server} ${config.hostenv.runtimeDir}/server-state";
           ExecReload = "${pkgs.coreutils}/bin/kill -USR1 $MAINPID";
           Restart = "on-failure";
+        };
+      };
+      # Type=exec can become active before the TCP listener is open.
+      systemd.services.delayed = {
+        endpoints.default.port = 3100;
+        hostenv.network.isolated = true;
+        serviceConfig = {
+          Type = "exec";
+          ExecStart = "${pkgs.python3}/bin/python3 -I -S ${delayedServer} ${config.hostenv.runtimeDir}/delayed-state";
         };
       };
       # This service has no endpoint: namespace setup must also work on its own.
@@ -91,6 +135,7 @@ let
     profile = toString cfg.activatePackage;
     runtime = cfg.hostenv.runtimeDir;
     endpoints = lib.mapAttrs (_: ep: { inherit (ep) socket socketUnit proxyUnit; }) cfg.systemd.services.example.endpoints;
+    delayedSocket = cfg.systemd.services.delayed.endpoints.default.socket;
   };
 in
 pkgs.testers.runNixOSTest {
@@ -174,6 +219,19 @@ pkgs.testers.runNixOSTest {
             for ep in env["endpoints"].values():
                 machine.succeed(control(env, "is-active --quiet " + ep["socketUnit"]))
                 assert machine.succeed("stat -c '%u:%a' " + quote(ep["socket"])).strip() == str(env["uid"]) + ":600"
+
+    with subtest("first request waits for a Type=exec service to listen"):
+        # One curl invocation, without test-harness retries. The backend counts
+        # every connection, including any unintended readiness probes.
+        machine.fail(control(a, "is-active --quiet delayed.service"))
+        result = machine.succeed(as_user(
+            a,
+            "${pkgs.curl}/bin/curl --noproxy '*' --fail --silent "
+            "--show-error --max-time 15 --unix-socket "
+            + quote(a["delayedSocket"]) + " http://localhost/"
+        ))
+        assert result == "ready\n", result
+        machine.succeed("grep -Fxq 1 " + quote(a["runtime"] + "/delayed-state/connections"))
 
     with subtest("several named sockets reach their own private ports"):
         for env in [a, b]:
