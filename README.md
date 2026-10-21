@@ -25,14 +25,13 @@ Here's an example hosting environment for the
 # hostenv.nix
 { pkgs, config, ... }: {
 
-  # Runtime tools needed by the application are available in its shell and
-  # application services.
+  # Runtime tools needed by the application
   packages = [ pkgs.pdftk ];
 
   services.drupal.enable = true;
   services.drupal.phpVersion = "8.3";
 
-  # Run cron every five minutes.
+  # Run cron every five minutes
   services.drupal.cron.timerConfig.OnCalendar = "*:0/5";
 
   environments.main = {
@@ -56,11 +55,6 @@ Here's an example hosting environment for the
   };
 }
 ```
-
-The top-level `packages` option is for executables the application needs at
-runtime, such as `pdftk`, ImageMagick, or FFmpeg. Packages are installed in the
-environment profile and added to application-service PATHs; infrastructure
-services such as MariaDB and Valkey do not inherit them.
 
 And here's the same idea for a simple PHP application using the built‑in
 `php-app` module:
@@ -193,12 +187,17 @@ still working on improvements to Provider support.
    nix run .#hostenv-provider -- plan
    ```
 
-   This writes: `generated/{flake.nix,plan.json,state.json}`. Commit
-   `generated/state.json`; it contains Hostenv's durable UID and hostname
-   reservations. It does not store environment placement or provider-node
-   history. `generated/plan.json` is disposable, although an existing valid
-   copy is used as an additional node-removal safety check before it is
-   atomically replaced.
+   This writes: `generated/{flake.nix,plan.json,state.json}`.
+   
+   Commit `generated/state.json` as it contains UID and hostname reservations that
+   must be preserved across deployments. `generated/plan.json` is used only during
+   a deployment, and can be deleted after. However, we recommend committing it as:
+
+      1) Hostenv uses it to perform additional correctness checks;
+      2) Nix requires files be `git add`ed for those files to be readable from Nix
+      code;
+      3) it may be used as an audit log of changes to your servers.
+
 
 6. **Deploy**
 
@@ -208,14 +207,6 @@ still working on improvements to Provider support.
 
    Hostenv deploys the configuration in `generated/plan.json`. It then updates
    managed DNS records and requests HTTPS certificates where needed.
-
-   When moving an environment between servers, Hostenv checks the destination
-   and waits for trusted HTTPS before removing the source. Run a full deployment
-   for migrations; use `--node <node>` only when no environments are moving
-   between servers.
-
-   Do not invoke deploy-rs directly for normal deployments. It bypasses
-   Hostenv's DNS and migration checks.
 
 ---
 
