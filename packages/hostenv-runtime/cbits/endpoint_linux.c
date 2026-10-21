@@ -1,10 +1,8 @@
 #define _GNU_SOURCE
 #include <errno.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -12,36 +10,10 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-/* Keep Linux-specific operations and flag definitions out of the Haskell
- * lifecycle code. All descriptors opened here have close-on-exec set until
- * Hostenv explicitly passes its pinned namespace handles through nsenter. */
-int hostenv_endpoint_open_directory(int parent, const char *path)
-{
-    return openat(parent, path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-}
-
-int hostenv_endpoint_open_namespace(const char *path)
-{
-    return open(path, O_RDONLY | O_CLOEXEC);
-}
-
+/* Create subdirectories relative to an already opened directory. */
 int hostenv_endpoint_make_directory(int parent, const char *name)
 {
     return mkdirat(parent, name, 0700);
-}
-
-/* O_PATH | O_NOFOLLOW detects even a dangling symlink. Never unlink an
- * object on behalf of the endpoint preflight. */
-int hostenv_endpoint_object_exists(int parent, const char *name)
-{
-    int fd = openat(parent, name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
-    if (fd >= 0) {
-        close(fd);
-        return 1;
-    }
-    if (errno == ENOENT)
-        return 0;
-    return -1;
 }
 
 int hostenv_endpoint_socket_matches(int fd, const char *path)

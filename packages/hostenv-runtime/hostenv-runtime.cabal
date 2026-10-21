@@ -24,7 +24,7 @@ library
     text,
     transformers,
     turtle,
-    unix
+    unix >=2.8
   default-language: GHC2021
   default-extensions: OverloadedStrings, ScopedTypeVariables
   ghc-options: -Wall

@@ -1,4 +1,5 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE PatternSynonyms #-}
 -- | Forward connections from systemd Unix sockets to TCP listeners in
 -- private network namespaces, and supervise the forwarding processes.
 module Hostenv.System.Endpoint (run) where
@@ -23,8 +24,15 @@ import Numeric (readHex)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO (hPutStrLn, stderr)
-import System.Posix.Files (deviceID, fileID, getFdStatus)
-import System.Posix.IO (FdOption (CloseOnExec), closeFd, setFdOption)
+import System.IO.Error (isDoesNotExistError)
+import System.Posix.Files
+  ( deviceID, fileID, getExtendedFileStatus, getFdStatus
+  , pattern StatxType, pattern SymlinkNoFollow
+  )
+import System.Posix.IO
+  ( FdOption (CloseOnExec), OpenFileFlags (cloexec, directory, nofollow)
+  , OpenMode (ReadOnly), closeFd, defaultFileFlags, openFd, openFdAt, setFdOption
+  )
 import System.Posix.Process
   (executeFile, exitImmediately, forkProcess, getProcessID, getProcessStatus)
 import System.Posix.Signals
@@ -34,16 +42,10 @@ import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
--- These C helpers safely inspect directories and sockets, open namespaces,
--- and manage processes using Linux file descriptors.
-foreign import ccall unsafe "hostenv_endpoint_open_directory"
-  c_openDirectory :: CInt -> CString -> IO CInt
-foreign import ccall unsafe "hostenv_endpoint_open_namespace"
-  c_openNamespace :: CString -> IO CInt
+-- These C helpers create directories relative to an open descriptor,
+-- validate socket activation and monitor processes on Linux.
 foreign import ccall unsafe "hostenv_endpoint_make_directory"
   c_makeDirectory :: CInt -> CString -> IO CInt
-foreign import ccall unsafe "hostenv_endpoint_object_exists"
-  c_objectExists :: CInt -> CString -> IO CInt
 foreign import ccall unsafe "hostenv_endpoint_socket_matches"
   c_socketMatches :: CInt -> CString -> IO CInt
 foreign import ccall unsafe "hostenv_endpoint_pidfd_open"
@@ -133,15 +135,22 @@ loadSettings manifest = do
   either (invalid . ("invalid endpoint manifest: " ++)) pure
     (A.eitherDecodeStrict' bytes)
 
+directoryFlags :: OpenFileFlags
+directoryFlags = defaultFileFlags
+  { nofollow = True
+  , directory = True
+  , cloexec = True
+  }
+
 -- | Open a directory relative to an open parent, refusing symlinks.
 openDirectory :: Fd -> FilePath -> IO Fd
-openDirectory (Fd parent) name = withCString name $ \raw ->
-  Fd <$> throwErrnoIfMinus1Retry "openat(endpoint directory)" (c_openDirectory parent raw)
+openDirectory parent name =
+  openFdAt (Just parent) name ReadOnly directoryFlags
 
 -- | Hold a namespace open even if the process that created it exits.
 openNamespace :: FilePath -> IO Fd
-openNamespace path = withCString path $ \raw ->
-  Fd <$> throwErrnoIfMinus1Retry "open(namespace)" (c_openNamespace raw)
+openNamespace path =
+  openFd path ReadOnly (defaultFileFlags { cloexec = True })
 
 makeDirectory :: Fd -> FilePath -> IO ()
 makeDirectory (Fd parent) name = withCString name $ \raw -> do
@@ -166,22 +175,26 @@ withEndpointDirectories current (part : rest) action = do
   bracket (openDirectory current part) closeFd $ \next ->
     withEndpointDirectories next rest action
 
+-- | Check the final path component relative to its opened parent directory.
+-- A dangling symlink counts as an existing object.
+socketObjectExists :: Fd -> FilePath -> IO Bool
+socketObjectExists parent name =
+  (getExtendedFileStatus (Just parent) name SymlinkNoFollow StatxType >> pure True)
+    `catch` \(err :: IOException) ->
+      if isDoesNotExistError err then pure False else ioError err
+
 -- | Create the socket's parent directories and refuse to replace an existing
 -- file or socket. Systemd opens the listener after this check succeeds.
 prepare :: Settings -> IO ()
 prepare settings = do
   let location = socketLocation settings
-  bracket (openDirectory (Fd (-100)) "/") closeFd $ \top ->
+  bracket (openFd "/" ReadOnly directoryFlags) closeFd $ \top ->
     withDirectories top (runtimeComponents location) $ \runtime ->
-      withEndpointDirectories runtime (socketDirectories location) $ \parent ->
-        withCString (socketFilename location) $ \name -> do
-          let Fd raw = parent
-          result <- c_objectExists raw name
-          case result of
-            0 -> pure ()
-            1 -> invalid ("refusing to replace existing object " ++ socketPath settings ++
-                          "; stop its owning unit and inspect it before removing it")
-            _ -> throwErrno "openat(endpoint preflight)"
+      withEndpointDirectories runtime (socketDirectories location) $ \parent -> do
+        exists <- socketObjectExists parent (socketFilename location)
+        when exists $
+          invalid ("refusing to replace existing object " ++ socketPath settings ++
+                   "; stop its owning unit and inspect it before removing it")
 
 -- | Check that systemd passed exactly the Unix listening socket named in
 -- the manifest before forwarding any connections.

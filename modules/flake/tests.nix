@@ -75,6 +75,38 @@ in
               hostenv-system endpoint prepare manifest.json
               test -d "$TMPDIR/_runtime/fixture"
 
+              # The preflight must refuse occupied paths, including dangling symlinks.
+              write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime/fixture/api.sock" hostenv-api 3001
+              expect_occupied() {
+                if hostenv-system endpoint prepare manifest.json >out.log 2>&1; then
+                  echo "Endpoint runtime accepted an occupied socket path" >&2
+                  exit 1
+                fi
+                grep -Fq 'refusing to replace existing object' out.log || {
+                  cat out.log >&2
+                  exit 1
+                }
+              }
+              printf 'preserved' > "$TMPDIR/runtime/fixture/api.sock"
+              expect_occupied
+              test "$(cat "$TMPDIR/runtime/fixture/api.sock")" = preserved
+              rm "$TMPDIR/runtime/fixture/api.sock"
+              ln -s "$TMPDIR/missing" "$TMPDIR/runtime/fixture/api.sock"
+              expect_occupied
+              test -L "$TMPDIR/runtime/fixture/api.sock"
+              rm "$TMPDIR/runtime/fixture/api.sock"
+
+              # A symlinked parent must not redirect preparation elsewhere.
+              rmdir "$TMPDIR/runtime/fixture"
+              mkdir -m 0700 "$TMPDIR/elsewhere"
+              ln -s "$TMPDIR/elsewhere" "$TMPDIR/runtime/fixture"
+              if hostenv-system endpoint prepare manifest.json >out.log 2>&1; then
+                echo "Endpoint runtime followed a symlinked parent" >&2
+                exit 1
+              fi
+              test ! -e "$TMPDIR/elsewhere/api.sock"
+              rm "$TMPDIR/runtime/fixture"
+
               write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime" hostenv-api 3001
               expect_rejected "the export must be inside the environment's runtime directory"
               write_manifest fixture.service "$TMPDIR/runtime" "$TMPDIR/runtime-other/fixture/api.sock" hostenv-api 3001
