@@ -60,5 +60,6 @@ to a socket starts its service if necessary, then forwards traffic to the
 configured TCP port inside the service's private network.
 
 Hostenv waits up to two minutes for the service to become active and its TCP
-port to start listening. Forwarding stops when the service stops. A later
-connection can start it again.
+port to start listening. A listener bound to the IPv6 wildcard address is also
+supported when it accepts IPv4 connections. Forwarding stops when the service
+stops. A later connection can start it again.

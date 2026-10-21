@@ -49,6 +49,10 @@ foreign import ccall unsafe "hostenv_endpoint_make_directory"
   c_makeDirectory :: CInt -> CString -> IO CInt
 foreign import ccall unsafe "hostenv_endpoint_socket_matches"
   c_socketMatches :: CInt -> CString -> IO CInt
+foreign import ccall unsafe "hostenv_endpoint_recover_stale_socket"
+  c_recoverStaleSocket :: CInt -> CString -> CString -> IO CInt
+foreign import ccall unsafe "hostenv_endpoint_probe_ipv4"
+  c_probeIPv4 :: CInt -> IO CInt
 foreign import ccall unsafe "hostenv_endpoint_pidfd_open"
   c_pidfdOpen :: CInt -> IO CInt
 foreign import ccall safe "hostenv_endpoint_pidfd_exited"
@@ -184,8 +188,8 @@ socketObjectExists parent name =
     `catch` \(err :: IOException) ->
       if isDoesNotExistError err then pure False else ioError err
 
--- | Create the socket's parent directories and refuse to replace an existing
--- file or socket. Systemd opens the listener after this check succeeds.
+-- | Create the socket's parent directories and recover a stale Unix socket
+-- without deleting regular files, symlinks or live sockets.
 prepare :: Settings -> IO ()
 prepare settings = do
   let location = socketLocation settings
@@ -193,9 +197,15 @@ prepare settings = do
     withDirectories top (runtimeComponents location) $ \runtime ->
       withEndpointDirectories runtime (socketDirectories location) $ \parent -> do
         exists <- socketObjectExists parent (socketFilename location)
-        when exists $
-          invalid ("refusing to replace existing object " ++ socketPath settings ++
-                   "; stop its owning unit and inspect it before removing it")
+        when exists $ withCString (socketFilename location) $ \name ->
+          withCString (socketPath settings) $ \path -> do
+            let Fd raw = parent
+            result <- c_recoverStaleSocket raw name path
+            case result of
+              0 -> pure ()
+              1 -> invalid ("refusing to replace existing object " ++ socketPath settings ++
+                            "; stop its owning unit and inspect it before removing it")
+              _ -> throwErrno "recover stale endpoint socket"
 
 -- | Check that systemd passed exactly the Unix listening socket named in
 -- the manifest before forwarding any connections.
@@ -263,15 +273,17 @@ ownerState settings = do
 -- connection to the application.
 tcpListening :: ProcessID -> Int -> IO Bool
 tcpListening pid destination = do
-  table <- B8.readFile ("/proc/" ++ show pid ++ "/net/tcp")
-  pure (any listensOnLoopback (B8.lines table))
+  ipv4 <- B8.readFile ("/proc/" ++ show pid ++ "/net/tcp")
+  ipv6 <- B8.readFile ("/proc/" ++ show pid ++ "/net/tcp6")
+  pure (any (listensAt ["0100007F", "00000000"]) (B8.lines ipv4) ||
+        any (listensAt ["00000000000000000000000000000000"]) (B8.lines ipv6))
   where
-    listensOnLoopback row =
+    listensAt addresses row =
       case B8.words row of
         _ : local : _ : state : _
           | state == "0A" ->
               let (address, encodedPort) = B8.break (== ':') local
-              in address `elem` ["0100007F", "00000000"] &&
+              in address `elem` addresses &&
                  (case readHex (B8.unpack (B8.drop 1 encodedPort)) of
                     [(number, "")] -> number == destination
                     _ -> False)
@@ -412,6 +424,19 @@ startProxy settings descriptors = do
     invalid ("cannot pin the endpoint proxy: " ++ displayException err)
   pure (child, childFd)
 
+-- | Check whether an IPv4 listener is present on loopback or all addresses.
+ipv4Listening :: Int -> B8.ByteString -> Bool
+ipv4Listening destination row =
+  case B8.words row of
+    _ : local : _ : state : _
+      | state == "0A" ->
+          let (address, encodedPort) = B8.break (== ':') local
+          in address `elem` ["0100007F", "00000000"] &&
+             (case readHex (B8.unpack (B8.drop 1 encodedPort)) of
+                [(number, "")] -> number == destination
+                _ -> False)
+    _ -> False
+
 -- | Confirm that the helper entered the owning service's private namespaces,
 -- then supervise the forwarder until the owner stops or forwarding fails.
 joined :: IORef Bool -> Settings -> [Fd] -> IO ExitCode
@@ -434,6 +459,13 @@ joined interrupted settings handles = do
     unless expected $ invalid "wrong user namespace"
   stopped <- pidfdExited ownerFd 0
   when stopped $ invalid "the owning service exited before forwarding started"
+  -- /proc/net/tcp6 does not reveal IPV6_V6ONLY. Check actual IPv4
+  -- reachability only when the backend has no IPv4 listening socket.
+  ipv4 <- B8.readFile "/proc/self/net/tcp"
+  unless (any (ipv4Listening (port settings)) (B8.lines ipv4)) $ do
+    reachable <- c_probeIPv4 (fromIntegral (port settings))
+    unless (reachable == 1) $
+      invalid "the IPv6 listener does not accept IPv4 loopback connections"
   finally
     (bracket (startProxy settings handles)
       (\(pid, childFd) -> terminateChild pid childFd `finally` closeFd childFd)

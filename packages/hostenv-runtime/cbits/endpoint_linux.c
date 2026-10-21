@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
 #include <stddef.h>
@@ -41,6 +43,67 @@ int hostenv_endpoint_socket_matches(int fd, const char *path)
         length < offsetof(struct sockaddr_un, sun_path) + path_length + 1)
         return 0;
     return memcmp(address.sun_path, path, path_length + 1) == 0;
+}
+
+/* Recover only a socket left behind without an active listener. Never
+ * remove a different object that replaced it while we were checking. */
+int hostenv_endpoint_recover_stale_socket(int parent, const char *name, const char *path)
+{
+    struct stat initial, current;
+    if (fstatat(parent, name, &initial, AT_SYMLINK_NOFOLLOW) < 0)
+        return errno == ENOENT ? 0 : -1;
+    if (!S_ISSOCK(initial.st_mode) || initial.st_uid != geteuid())
+        return 1;
+
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0)
+        return -1;
+    struct sockaddr_un address = { .sun_family = AF_UNIX };
+    size_t size = strlen(path);
+    if (size >= sizeof(address.sun_path)) {
+        close(fd);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(address.sun_path, path, size + 1);
+    int connected = connect(fd, (struct sockaddr *)&address,
+                            offsetof(struct sockaddr_un, sun_path) + size + 1);
+    int error = errno;
+    close(fd);
+    if (connected == 0 || error != ECONNREFUSED)
+        return 1;
+    if (fstatat(parent, name, &current, AT_SYMLINK_NOFOLLOW) < 0)
+        return errno == ENOENT ? 0 : -1;
+    if (!S_ISSOCK(current.st_mode) || current.st_uid != initial.st_uid ||
+        current.st_dev != initial.st_dev || current.st_ino != initial.st_ino)
+        return 1;
+    return unlinkat(parent, name, 0);
+}
+
+/* Only used for possible dual-stack IPv6 sockets, from inside the owner's
+ * private network namespace. A successful connection is immediately closed. */
+int hostenv_endpoint_probe_ipv4(int port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0)
+        return -1;
+    struct sockaddr_in address = { .sin_family = AF_INET,
+                                   .sin_port = htons((unsigned short)port) };
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int result = connect(fd, (struct sockaddr *)&address, sizeof(address));
+    int error = errno;
+    if (result < 0 && error == EINPROGRESS) {
+        struct pollfd item = { .fd = fd, .events = POLLOUT };
+        int ready = poll(&item, 1, 500);
+        if (ready > 0) {
+            int so_error = 0;
+            socklen_t length = sizeof(so_error);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &length) == 0)
+                result = so_error == 0 ? 0 : -1;
+        }
+    }
+    close(fd);
+    return result == 0 ? 1 : 0;
 }
 
 int hostenv_endpoint_pidfd_open(pid_t pid)
