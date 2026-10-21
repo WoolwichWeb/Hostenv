@@ -78,6 +78,37 @@ let
                     + b"\r\nConnection: close\r\n\r\n" + body
                 )
   '';
+
+  dualStackServer = pkgs.writeText "endpoint-dual-stack.py" ''
+    import socket
+    import sys
+    from pathlib import Path
+
+    state = Path(sys.argv[1])
+    state.mkdir(parents=True, exist_ok=True)
+    listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    listener.bind(("::", 3200))
+    listener.listen(8)
+    requests = 0
+    while True:
+        connection, _ = listener.accept()
+        with connection:
+            connection.settimeout(2)
+            try:
+                request = connection.recv(4096)
+            except (TimeoutError, ConnectionResetError):
+                continue
+            if not request:
+                continue
+            requests += 1
+            (state / "requests").write_text(str(requests))
+            body = b"dual-stack\n"
+            connection.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
+                + b"\r\nConnection: close\r\n\r\n" + body
+            )
+  '';
   probe = pkgs.writeShellScript "isolated-service-probe" ''
     ${pkgs.coreutils}/bin/mkdir -p "$1"
     ${pkgs.iproute2}/bin/ip -o link show lo > "$1/loopback"
@@ -105,6 +136,14 @@ let
         serviceConfig = {
           Type = "exec";
           ExecStart = "${pkgs.python3}/bin/python3 -I -S ${delayedServer} ${config.hostenv.runtimeDir}/delayed-state";
+        };
+      };
+      systemd.services.dual-stack = {
+        endpoints.default.port = 3200;
+        hostenv.network.isolated = true;
+        serviceConfig = {
+          Type = "exec";
+          ExecStart = "${pkgs.python3}/bin/python3 -I -S ${dualStackServer} ${config.hostenv.runtimeDir}/dual-stack-state";
         };
       };
       # This service has no endpoint: namespace setup must also work on its own.
@@ -136,6 +175,7 @@ let
     runtime = cfg.hostenv.runtimeDir;
     endpoints = lib.mapAttrs (_: ep: { inherit (ep) socket socketUnit proxyUnit; }) cfg.systemd.services.example.endpoints;
     delayedSocket = cfg.systemd.services.delayed.endpoints.default.socket;
+    dualStackSocket = cfg.systemd.services.dual-stack.endpoints.default.socket;
   };
 in
 pkgs.testers.runNixOSTest {
@@ -232,6 +272,16 @@ pkgs.testers.runNixOSTest {
         ))
         assert result == "ready\n", result
         machine.succeed("grep -Fxq 1 " + quote(a["runtime"] + "/delayed-state/connections"))
+
+    with subtest("dual-stack IPv6 wildcard listener accepts IPv4 through the endpoint"):
+        result = machine.succeed(as_user(
+            a,
+            "${pkgs.curl}/bin/curl --noproxy '*' --fail --silent "
+            "--show-error --max-time 15 --unix-socket "
+            + quote(a["dualStackSocket"]) + " http://localhost/"
+        ))
+        assert result == "dual-stack\n", result
+        machine.succeed("grep -Fxq 1 " + quote(a["runtime"] + "/dual-stack-state/requests"))
 
     with subtest("several named sockets reach their own private ports"):
         for env in [a, b]:

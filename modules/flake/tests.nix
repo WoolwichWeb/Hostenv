@@ -39,7 +39,7 @@ in
               inherit pkgs makeHostenv;
             };
             endpoint-runtime-cli = pkgs.runCommand "endpoint-runtime-cli" {
-              nativeBuildInputs = [ (cfgTop.flake.lib.hostenv.packagesFor pkgs).hostenv-runtime ];
+              nativeBuildInputs = [ (cfgTop.flake.lib.hostenv.packagesFor pkgs).hostenv-runtime pkgs.python3 ];
             } ''
               if hostenv-system endpoint prepare /nonexistent-manifest.json >out.log 2>&1; then
                 echo "Endpoint runtime unexpectedly accepted missing manifest" >&2
@@ -95,6 +95,35 @@ in
               expect_occupied
               test -L "$TMPDIR/runtime/fixture/api.sock"
               rm "$TMPDIR/runtime/fixture/api.sock"
+
+              # Reclaim abandoned sockets but never replace live listeners.
+              python3 - <<'PY'
+              import os
+              import socket
+              path = os.environ["TMPDIR"] + "/runtime/fixture/api.sock"
+              listener = socket.socket(socket.AF_UNIX)
+              listener.bind(path)
+              listener.listen()
+              listener.close()
+              PY
+              hostenv-system endpoint prepare manifest.json
+              test ! -e "$TMPDIR/runtime/fixture/api.sock"
+              python3 - <<'PY'
+              import os
+              import socket
+              import subprocess
+              path = os.environ["TMPDIR"] + "/runtime/fixture/api.sock"
+              listener = socket.socket(socket.AF_UNIX)
+              listener.bind(path)
+              listener.listen()
+              result = subprocess.run(["hostenv-system", "endpoint", "prepare", "manifest.json"],
+                                      capture_output=True, text=True)
+              assert result.returncode != 0, result
+              assert "refusing to replace existing object" in result.stderr, result.stderr
+              assert os.path.exists(path)
+              listener.close()
+              os.unlink(path)
+              PY
 
               # A symlinked parent must not redirect preparation elsewhere.
               rmdir "$TMPDIR/runtime/fixture"
