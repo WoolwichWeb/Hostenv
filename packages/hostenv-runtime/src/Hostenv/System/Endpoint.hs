@@ -17,6 +17,7 @@ import Data.List (stripPrefix)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Word (Word64)
 import Foreign.C.Error (eEXIST, eSRCH, getErrno, throwErrno, throwErrnoIfMinus1Retry)
 import Foreign.C.String (CString, withCString)
 import Foreign.C.Types (CInt (..))
@@ -289,8 +290,8 @@ tcpListening pid destination = do
 
 -- | Enter the owner's namespaces once systemd considers it ready and its
 -- TCP listener is open. Otherwise return a reason to keep waiting.
-attachReady :: Settings -> FilePath -> IO String
-attachReady settings manifest = do
+attachReady :: Settings -> FilePath -> Word64 -> IO String
+attachReady settings manifest deadline = do
   state <- ownerState settings
   let pid = Map.lookup "MainPID" state >>= (readMaybe :: String -> Maybe Int)
   case (Map.lookup "ActiveState" state, pid) of
@@ -326,7 +327,7 @@ attachReady settings manifest = do
                     , "--preserve-credentials", "--keep-caps"
                     , "setpriv", "--bounding-set=-all", "--inh-caps=-all"
                     , "--ambient-caps=-all", binary, "endpoint", "joined", manifest
-                    ] ++ map showFd descriptors
+                    ] ++ map showFd descriptors ++ [show deadline]
               executeFile "nsenter" True arguments Nothing
     showFd (Fd fd) = show fd
 
@@ -346,7 +347,7 @@ attach interrupted settings manifest duration = do
               then invalid ("cannot start forwarding to " ++ owner settings ++
                             ": " ++ lastProblem)
               else do
-                problem <- attachReady settings manifest
+                problem <- attachReady settings manifest deadline
                   `catch` (\(err :: IOException) -> pure (displayException err))
                 threadDelay 100000
                 loop problem
@@ -436,9 +437,10 @@ ipv4Listening destination row =
     _ -> False
 
 -- | Confirm that the helper entered the owning service's private namespaces,
--- then supervise the forwarder until the owner stops or forwarding fails.
-joined :: IORef Bool -> Settings -> [Fd] -> IO ExitCode
-joined interrupted settings handles = do
+-- then wait for an IPv4-reachable TCP listener and supervise the forwarder.
+-- Keep the original deadline across the namespace hand-off.
+joined :: IORef Bool -> Settings -> [Fd] -> Word64 -> IO ExitCode
+joined interrupted settings handles deadline = do
   let raw = map (\(Fd fd) -> fd) handles
   (ownerFd, userFd, netFd) <-
     case handles of
@@ -455,22 +457,45 @@ joined interrupted settings handles = do
   bracket (openNamespace "/proc/self/ns/user") closeFd $ \currentUser -> do
     expected <- sameNamespace currentUser userFd
     unless expected $ invalid "wrong user namespace"
-  stopped <- pidfdExited ownerFd 0
-  when stopped $ invalid "the owning service exited before forwarding started"
-  -- /proc/net/tcp6 does not reveal IPV6_V6ONLY. Inspect the kernel's
-  -- listener metadata without establishing a connection to the application.
-  ipv4 <- B8.readFile "/proc/self/net/tcp"
-  unless (any (ipv4Listening (port settings)) (B8.lines ipv4)) $ do
-    compatible <- throwErrnoIfMinus1Retry "inspect IPv6 listener" $
-      c_ipv6AcceptsIPv4 (fromIntegral (port settings))
-    unless (compatible == 1) $
-      invalid "the IPv6 listener does not accept IPv4 loopback connections"
   finally
-    (bracket (startProxy settings handles)
-      (\(pid, childFd) -> terminateChild pid childFd `finally` closeFd childFd)
-      (\(_, childFd) -> watch childFd ownerFd))
+    (do ready <- waitForListener ownerFd
+        if ready
+          then bracket (startProxy settings handles)
+            (\(pid, childFd) -> terminateChild pid childFd `finally` closeFd childFd)
+            (\(_, childFd) -> watch childFd ownerFd)
+          else pure ExitSuccess)
     (mapM_ (\fd -> closeFd fd `catch` (\(_ :: IOException) -> pure ())) handles)
   where
+    -- An IPv6 wildcard listener may be IPv6-only. Keep the helper and its
+    -- pinned namespace alive until an IPv4 listener or a dual-stack listener
+    -- becomes available. Never open a connection to the application.
+    waitForListener ownerFd = do
+      requested <- readIORef interrupted
+      if requested
+        then pure False
+        else do
+          ownerGone <- pidfdExited ownerFd 0
+          if ownerGone
+            then pure False
+            else do
+              now <- getMonotonicTimeNSec
+              if now >= deadline
+                then invalid ("cannot start forwarding to " ++ owner settings ++
+                              ": TCP listener on 127.0.0.1:" ++
+                              show (port settings) ++ " is not ready")
+                else do
+                  ipv4 <- B8.readFile "/proc/self/net/tcp"
+                  if any (ipv4Listening (port settings)) (B8.lines ipv4)
+                    then pure True
+                    else do
+                      -- Inet-diag reports IPV6_V6ONLY without consuming a
+                      -- connection that belongs to a real client.
+                      compatible <- throwErrnoIfMinus1Retry "inspect IPv6 listener" $
+                        c_ipv6AcceptsIPv4 (fromIntegral (port settings))
+                      if compatible == 1
+                        then pure True
+                        else threadDelay 100000 >> waitForListener ownerFd
+
     -- A proxy exit while its owner is running is a failure, so systemd can
     -- restart the forwarding service.
     watch childFd ownerFd = do
@@ -503,7 +528,7 @@ withSignals action = do
     (const (action requested))
 
 usage :: String
-usage = "Usage: hostenv-system endpoint prepare MANIFEST | serve MANIFEST [--timeout=SECONDS] | joined MANIFEST OWNERFD USERFD NETFD"
+usage = "Usage: hostenv-system endpoint prepare MANIFEST | serve MANIFEST [--timeout=SECONDS] | joined MANIFEST OWNERFD USERFD NETFD DEADLINE_NS"
 
 -- | Prepare the socket path, serve an activated socket, or resume forwarding
 -- after joining the owning service's namespaces.
@@ -516,11 +541,13 @@ dispatch stop ["serve", manifest, option]
   | Just duration <- stripTimeout option = do
       settings <- loadSettings manifest
       attach stop settings manifest duration
-dispatch stop ("joined" : manifest : raw) | length raw == 3 = do
+dispatch stop ["joined", manifest, ownerRaw, userRaw, netRaw, deadlineRaw] = do
   settings <- loadSettings manifest
   fds <- maybe (invalid "invalid namespace descriptor numbers") pure
-    (traverse (readMaybe :: String -> Maybe CInt) raw)
-  joined stop settings (map Fd fds)
+    (traverse (readMaybe :: String -> Maybe CInt) [ownerRaw, userRaw, netRaw])
+  deadline <- maybe (invalid "invalid forwarding deadline") pure
+    (readMaybe deadlineRaw :: Maybe Word64)
+  joined stop settings (map Fd fds) deadline
 dispatch _ _ = invalid usage
 
 -- | Parse a positive, finite timeout of at most one hour.
