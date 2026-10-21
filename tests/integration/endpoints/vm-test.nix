@@ -112,6 +112,48 @@ let
                 + b"\r\nConnection: close\r\n\r\n" + body
             )
   '';
+
+  v6ThenV4Server = pkgs.writeText "endpoint-v6-then-v4.py" ''
+    import socket
+    import sys
+    import time
+    from pathlib import Path
+
+    state = Path(sys.argv[1])
+    state.mkdir(parents=True, exist_ok=True)
+    ipv6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    ipv6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    ipv6.bind(("::", 3300))
+    ipv6.listen(8)
+    (state / "ipv6-listening").touch()
+
+    # IPv4 becomes available after the namespace has already been inspected.
+    time.sleep(4)
+    ipv4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ipv4.bind(("127.0.0.1", 3300))
+    ipv4.listen(8)
+    (state / "ipv4-listening").touch()
+
+    accepted = 0
+    while True:
+        connection, _ = ipv4.accept()
+        accepted += 1
+        (state / "accepted").write_text(str(accepted))
+        with connection:
+            connection.settimeout(5)
+            request = b""
+            while b"\r\n\r\n" not in request:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                request += chunk
+            if request:
+                body = b"ipv4-ready\n"
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
+                    + b"\r\nConnection: close\r\n\r\n" + body
+                )
+  '';
   probe = pkgs.writeShellScript "isolated-service-probe" ''
     ${pkgs.coreutils}/bin/mkdir -p "$1"
     ${pkgs.iproute2}/bin/ip -o link show lo > "$1/loopback"
@@ -149,6 +191,14 @@ let
           ExecStart = "${pkgs.python3}/bin/python3 -I -S ${dualStackServer} ${config.hostenv.runtimeDir}/dual-stack-state";
         };
       };
+      systemd.services.v6-then-v4 = {
+        endpoints.default.port = 3300;
+        hostenv.network.isolated = true;
+        serviceConfig = {
+          Type = "exec";
+          ExecStart = "${pkgs.python3}/bin/python3 -I -S ${v6ThenV4Server} ${config.hostenv.runtimeDir}/v6-then-v4-state";
+        };
+      };
       # This service has no endpoint: namespace setup must also work on its own.
       systemd.services.isolated-probe = {
         hostenv.network.isolated = true;
@@ -179,6 +229,8 @@ let
     endpoints = lib.mapAttrs (_: ep: { inherit (ep) socket socketUnit proxyUnit; }) cfg.systemd.services.example.endpoints;
     delayedSocket = cfg.systemd.services.delayed.endpoints.default.socket;
     dualStackSocket = cfg.systemd.services.dual-stack.endpoints.default.socket;
+    v6ThenV4Socket = cfg.systemd.services.v6-then-v4.endpoints.default.socket;
+    v6ThenV4ProxyUnit = cfg.systemd.services.v6-then-v4.endpoints.default.proxyUnit;
   };
 in
 pkgs.testers.runNixOSTest {
@@ -287,6 +339,25 @@ pkgs.testers.runNixOSTest {
         machine.succeed("grep -Fxq 1 " + quote(a["runtime"] + "/dual-stack-state/requests"))
         # The readiness check must not make an extra connection and close it.
         machine.succeed("grep -Fxq 1 " + quote(a["runtime"] + "/dual-stack-state/accepted"))
+
+    with subtest("IPv6-only listener waits for IPv4 without restarting forwarding"):
+        # A single request activates the owner; its IPv6-only listener opens
+        # first. The proxy must remain running until IPv4 becomes available.
+        machine.fail(control(a, "is-active --quiet v6-then-v4.service"))
+        result = machine.succeed(as_user(
+            a,
+            "${pkgs.curl}/bin/curl --noproxy '*' --fail --silent "
+            "--show-error --max-time 20 --unix-socket "
+            + quote(a["v6ThenV4Socket"]) + " http://localhost/"
+        ))
+        assert result == "ipv4-ready\n", result
+        state = a["runtime"] + "/v6-then-v4-state"
+        machine.succeed("test -f " + quote(state + "/ipv6-listening"))
+        machine.succeed("test -f " + quote(state + "/ipv4-listening"))
+        machine.succeed("grep -Fxq 1 " + quote(state + "/accepted"))
+        assert machine.succeed(
+            control(a, "show -P NRestarts " + a["v6ThenV4ProxyUnit"])
+        ).strip() == "0"
 
     with subtest("several named sockets reach their own private ports"):
         for env in [a, b]:
