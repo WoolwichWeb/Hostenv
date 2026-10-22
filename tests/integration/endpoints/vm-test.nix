@@ -449,52 +449,7 @@ pkgs.testers.runNixOSTest {
         # socket request can cause activation.
         machine.wait_until_succeeds(
             control(a, "show -P MainPID example.service")
-            + " | grep -E '^[1-9][0-9]*        for name in a["endpoints"]:
-            assert a["endpoints"][name]["socket"] == expanded["endpoints"][name]["socket"]
-        machine.succeed(as_user(expanded, expanded["profile"] + "/bin/activate"))
-        for name, port in [("default", 3000), ("api", 3001), ("admin", 3002)]:
-            ready(expanded, name, port)
-        check_processes(expanded)
-        machine.succeed(as_user(a, a["profile"] + "/bin/activate"))
-        machine.fail("test -e " + quote(expanded["endpoints"]["admin"]["socket"]))
-        ready(a, "default", 3000)
-        ready(a, "api", 3001)
-
-    with subtest("socket preflight refuses an unrelated existing object"):
-        ep = a["endpoints"]["api"]
-        owner = main_pid(a, "example.service")
-        unaffected = a["endpoints"]["default"]["proxyUnit"]
-        unaffected_pid = main_pid(a, unaffected)
-        machine.succeed(control(a, "stop " + ep["socketUnit"]))
-        # Stopping one socket must not stop or restart its owner or another
-        # forwarding unit.
-        machine.succeed(control(a, "is-active --quiet example.service"))
-        machine.succeed(control(a, "is-active --quiet " + unaffected))
-        assert main_pid(a, "example.service") == owner
-        assert main_pid(a, unaffected) == unaffected_pid
-        ready(a, "default", 3000)
-        # Intentional socket shutdown must not mark its forwarding service
-        # failed merely because the proxy child received SIGTERM.
-        assert machine.succeed(control(a, "show -P Result " + ep["proxyUnit"])).strip() == "success"
-        machine.succeed("printf '%s' preserved > " + quote(ep["socket"]))
-        machine.fail(control(a, "start " + ep["socketUnit"]))
-        assert machine.succeed("cat " + quote(ep["socket"])).strip() == "preserved"
-        machine.succeed("rm " + quote(ep["socket"]))
-        machine.succeed(control(a, "reset-failed " + ep["socketUnit"]))
-        machine.succeed(control(a, "start " + ep["socketUnit"]))
-        ready(a, "api", 3001)
-
-    with subtest("namespace setup failure does not launch an isolated service"):
-        # Type=exec can report startup before unshare attempts its syscall.
-        machine.execute(control(a, "start isolated-probe-blocked.service"))
-        machine.wait_until_succeeds(
-            control(a, "is-failed --quiet isolated-probe-blocked.service"),
-            timeout=timedelta(seconds=30),
-        )
-        machine.fail("test -e " + quote(a["runtime"] + "/blocked-probe-state/loopback"))
-  '';
-}
- | grep -vx " + quote(owner),
+            + " | grep -E '^[1-9][0-9]*$' | grep -vx " + quote(owner),
             timeout=timedelta(seconds=40),
         )
         machine.wait_until_succeeds(
