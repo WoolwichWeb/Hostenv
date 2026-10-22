@@ -20,7 +20,7 @@
     in
     {
       options.services.gotenberg = {
-        enable = lib.mkEnableOption "Gotenberg PDF conversion over a private Unix socket";
+        enable = lib.mkEnableOption "Gotenberg PDF conversion";
         package = lib.mkPackageOption pkgs "gotenberg" { };
         chromium.package = lib.mkPackageOption pkgs "chromium" { };
         libreoffice.package = lib.mkPackageOption pkgs "libreoffice" { };
@@ -41,17 +41,13 @@
       };
 
       config = lib.mkIf cfg.enable {
-        # The endpoint owns the Unix listener and its forwarding service.
-        # It joins this service's namespace explicitly rather than relying on
-        # JoinsNamespaceOf= between user units (systemd/systemd#29429).
         systemd.services.gotenberg =
           let
             start = pkgs.writeShellApplication {
               name = "gotenberg-start";
               runtimeInputs = [ pkgs.curl pkgs.coreutils ];
               text = ''
-                # The converter only needs its private TCP listener. Activation
-                # descriptors belong to the endpoint's separate proxy service.
+                # Gotenberg listens on a port inside a private network namespace.
                 (
                   # The supervisor, not the converter, signals readiness.
                   unset NOTIFY_SOCKET
@@ -72,8 +68,8 @@
                 trap cleanup EXIT
                 trap 'exit 0' TERM INT
 
-                # Readiness remains a Gotenberg-specific decision. The endpoint
-                # waits for this service to become ready before forwarding.
+                # The endpoint waits for this service to become ready
+                # before forwarding.
                 ready=0
                 for _ in {1..60}; do
                   if ! kill -0 "$gotenberg_pid" 2>/dev/null; then
