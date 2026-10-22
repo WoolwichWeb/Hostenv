@@ -456,20 +456,24 @@ pkgs.testers.runNixOSTest {
             control(a, "is-active --quiet example.service"),
             timeout=timedelta(seconds=40),
         )
-        assert main_pid(a, "example.service") != owner
+        replacement_owner = main_pid(a, "example.service")
+        assert replacement_owner != owner
 
-        # Both socket forwarders must reach the new application namespace.
-        ready(a, "default", 3000)
-        ready(a, "api", 3001)
-        _, _, current_namespace = check_processes(a)
-        assert current_namespace != previous_namespace
-
-        # Neither the crashed process nor the old endpoint forwarders may
-        # remain after recovery.
+        # The old forwarders may still be stopping after the owner has
+        # restarted. Wait for them to exit before inspecting the new cgroups,
+        # where a departing PID could disappear between reads.
         for pid in previous_processes:
             machine.wait_until_succeeds(
-                "test ! -e /proc/" + pid, timeout=timedelta(seconds=15)
+                "test ! -e /proc/" + pid, timeout=timedelta(seconds=30)
             )
+
+        # Both sockets must forward to the replacement application's namespace.
+        ready(a, "default", 3000)
+        ready(a, "api", 3001)
+        current_owner, current_processes, current_namespace = check_processes(a)
+        assert current_owner == replacement_owner
+        assert current_namespace != previous_namespace
+        assert not set(previous_processes).intersection(current_processes)
         ready(b, "api", 3001)
 
     with subtest("upgrade and rollback preserve existing paths"):
