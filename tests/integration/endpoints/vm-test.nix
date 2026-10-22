@@ -481,16 +481,13 @@ pkgs.testers.runNixOSTest {
         ready(a, "default", 3000)
         ready(a, "api", 3001)
         current_owner, current_processes, current_namespace = check_processes(a)
-        # The first replacement PID may itself be replaced during recovery.
-        # Record that event for diagnosis, but assert the actual contract:
-        # automatic restart, working endpoints, isolation and cleanup.
-        if current_owner != replacement_owner:
-            print(
-                "Owner PID changed again during crash recovery:",
-                replacement_owner, "->", current_owner,
-                "NRestarts:",
-                machine.succeed(control(a, "show -P NRestarts example.service")).strip(),
-            )
+        # There should be exactly one owner restart for the injected crash.
+        # Report systemd's restart count if the PID changes again.
+        assert current_owner == replacement_owner, (
+            "Owner restarted more than once after the injected crash",
+            replacement_owner, current_owner,
+            machine.succeed(control(a, "show -P NRestarts example.service")).strip(),
+        )
         assert current_owner != owner
         assert current_namespace != previous_namespace, (
             "The restarted owner is still in the previous namespace",
