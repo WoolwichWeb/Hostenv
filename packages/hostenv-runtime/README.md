@@ -1,9 +1,14 @@
 # Hostenv runtime
 
-The `hostenv-runtime` package builds `hostenv-system`, a command that Hostenv
-runs on its hosting servers.
+The `hostenv-runtime` package provides `hostenv-system`, which Hostenv uses
+in its system-level and per-environment systemd services.
 
-`hostenv-system` prevents certificate requests from interfering with NixOS
-deployments. It holds off new certificate orders while the system switches,
-then resumes them afterwards. Hostenv also uses it to retry certificate
-requests after updating DNS records.
+`hostenv-system acme` prevents certificate requests from interfering with NixOS
+deployments, and retries certificate orders after DNS changes.
+
+`hostenv-system endpoint` prepares Unix socket paths, forwards connections to
+services in private network namespaces, and stops forwarding when those
+services exit.
+
+The small C shim under `cbits/` provides Linux operations for checking socket
+descriptors, inspecting IPv6 listeners and monitoring processes.

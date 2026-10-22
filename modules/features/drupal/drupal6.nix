@@ -249,9 +249,9 @@ in
             after = lib.mkDefault [ "network-online.target" ];
             restartIfChanged = lib.mkDefault false;
             path = [ pkgs.bash ] ++ config.packages;
-            serviceConfig = lib.mkDefault {
-              Type = "oneshot";
-              ExecStart = "${drush}/bin/drush cron -y";
+            serviceConfig = {
+              Type = lib.mkDefault "oneshot";
+              ExecStart = lib.mkDefault "${drush}/bin/drush cron -y";
             };
           };
         };
