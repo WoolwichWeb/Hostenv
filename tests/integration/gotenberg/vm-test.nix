@@ -149,6 +149,11 @@ pkgs.testers.runNixOSTest {
     a = ("${a.hostenv.userName}", 2000, "${a.activatePackage}", "${a.services.gotenberg.socket}")
     b = ("${b.hostenv.userName}", 2001, "${b.activatePackage}", "${b.services.gotenberg.socket}")
     unisolated = ("${unisolated.hostenv.userName}", 2002, "${unisolated.activatePackage}", "${unisolated.services.gotenberg.socket}")
+    proxy_units = {
+        2000: "${a.systemd.services.gotenberg.endpoints.default.proxyUnit}",
+        2001: "${b.systemd.services.gotenberg.endpoints.default.proxyUnit}",
+        2002: "${unisolated.systemd.services.gotenberg.endpoints.default.proxyUnit}",
+    }
 
     def as_user(env, command):
         user, uid, _, _ = env
@@ -183,22 +188,22 @@ pkgs.testers.runNixOSTest {
         ).strip()
         assert supervisor.isdigit() and supervisor != "0", supervisor
 
-        # Look at processes belonging to this systemd unit, not their
-        # short /proc/<pid>/comm names: nixpkgs wraps the Gotenberg
-        # executable as .gotenberg-wrapped, and unshare may retain a
-        # parent process outside the service's private net namespace.
-        cgroup = machine.succeed(
-            systemctl(env, "show -P ControlGroup gotenberg.service")
-        ).strip()
-        assert cgroup.startswith("/") and cgroup.endswith("/gotenberg.service"), cgroup
-        members = machine.succeed(
-            "cat /sys/fs/cgroup" + cgroup + "/cgroup.procs"
-        ).split()
+        # The application keeps its original unit. The endpoint proxy now has
+        # an independent unit, but must join the application's private namespace.
+        # Inspect executable paths rather than truncated process names.
         processes = []
-        for pid in members:
-            status, exe = machine.execute("readlink -f /proc/" + pid + "/exe")
-            if status == 0:
-                processes.append((pid, exe.strip()))
+        for unit in ["gotenberg.service", proxy_units[env[1]]]:
+            cgroup = machine.succeed(
+                systemctl(env, "show -P ControlGroup " + unit)
+            ).strip()
+            assert cgroup.startswith("/") and cgroup.endswith("/" + unit), cgroup
+            members = machine.succeed(
+                "cat /sys/fs/cgroup" + cgroup + "/cgroup.procs"
+            ).split()
+            for pid in members:
+                status, exe = machine.execute("readlink -f /proc/" + pid + "/exe")
+                if status == 0:
+                    processes.append((pid, exe.strip()))
 
         backend = [
             pid for pid, exe in processes
@@ -208,7 +213,7 @@ pkgs.testers.runNixOSTest {
             pid for pid, exe in processes
             if exe.endswith("/systemd-socket-proxyd")
         ]
-        assert len(backend) == 1 and len(proxy) == 1, (cgroup, processes)
+        assert len(backend) == 1 and len(proxy) == 1, processes
 
         # Both application processes must still belong to the environment
         # user, not root or a privileged helper.
@@ -331,6 +336,23 @@ pkgs.testers.runNixOSTest {
                 fields = route.split()
                 if len(fields) > 1:
                     assert fields[1] != "00000000", routes
+
+    with subtest("Gotenberg cannot gain new privileges"):
+        for env in [a, b]:
+            configured = machine.succeed(
+                systemctl(env, "show -P NoNewPrivileges gotenberg.service")
+            ).strip()
+            assert configured == "yes", (env[0], configured)
+
+            supervisor, backend, _, _ = service_processes(env)
+            for pid in [supervisor, backend]:
+                status = machine.succeed("cat /proc/" + pid + "/status")
+                values = [
+                    line.partition(":")[2].strip()
+                    for line in status.splitlines()
+                    if line.startswith("NoNewPrivs:")
+                ]
+                assert values == ["1"], (pid, status)
 
     with subtest("other tenants cannot access the private sockets"):
         machine.fail(health((a[0], a[1], a[2], b[3])))
