@@ -55,6 +55,18 @@ let
     systemd.services.example = owner // { endpoints = { api.port = 3000; alias.port = 3000; }; };
   };
   exactRoot = "/" + lib.concatStrings (lib.replicate 99 "r");
+  # Exercise the Unix socket byte limit with a multibyte character. Derive
+  # the root's length from the configured suffix so the complete socket path
+  # is exactly 107 or 108 bytes.
+  socketSuffixBytes =
+    builtins.stringLength single.systemd.services.example.endpoints.default.socket
+    - builtins.stringLength single.hostenv.runtimeRoot;
+  unicodeRootFor = totalBytes:
+    "/é" + lib.concatStrings (lib.replicate (totalBytes - socketSuffixBytes - 3) "x");
+  unicodeAtLimit = evaluate {
+    hostenv.runtimeRoot = unicodeRootFor 107;
+    systemd.services.example = owner // { endpoints.default.port = 3000; };
+  };
   checks = [
     (unitEvaluates single "example" "default")
     # Declaring endpoints must not silently change the owner's network policy.
@@ -126,6 +138,14 @@ let
     })
     (fails {
       hostenv.runtimeRoot = exactRoot;
+      systemd.services.example = owner // { endpoints.default.port = 3000; };
+    })
+    # Nix counts UTF-8 bytes, as the endpoint runtime does.
+    (builtins.stringLength "é" == 2)
+    (builtins.stringLength unicodeAtLimit.systemd.services.example.endpoints.default.socket == 107)
+    (unitEvaluates unicodeAtLimit "example" "default")
+    (fails {
+      hostenv.runtimeRoot = unicodeRootFor 108;
       systemd.services.example = owner // { endpoints.default.port = 3000; };
     })
   ];

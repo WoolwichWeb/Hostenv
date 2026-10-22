@@ -16,6 +16,8 @@ in
       # Their naming contract is stricter than systemd's unit-name rules.
       safeName = name: builtins.match "[A-Za-z0-9][A-Za-z0-9_.-]*" name != null;
 
+      # Nix's stringLength counts UTF-8 bytes, not characters. The 108-byte
+      # Unix socket path field must also fit its terminating NUL.
       socketPath = service: endpoint:
         let
           path = if endpoint == "default" then

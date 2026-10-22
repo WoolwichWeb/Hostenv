@@ -455,7 +455,17 @@ pkgs.testers.runNixOSTest {
 
     with subtest("socket preflight refuses an unrelated existing object"):
         ep = a["endpoints"]["api"]
+        owner = main_pid(a, "example.service")
+        unaffected = a["endpoints"]["default"]["proxyUnit"]
+        unaffected_pid = main_pid(a, unaffected)
         machine.succeed(control(a, "stop " + ep["socketUnit"]))
+        # Stopping one socket must not stop or restart its owner or another
+        # forwarding unit.
+        machine.succeed(control(a, "is-active --quiet example.service"))
+        machine.succeed(control(a, "is-active --quiet " + unaffected))
+        assert main_pid(a, "example.service") == owner
+        assert main_pid(a, unaffected) == unaffected_pid
+        ready(a, "default", 3000)
         # Intentional socket shutdown must not mark its forwarding service
         # failed merely because the proxy child received SIGTERM.
         assert machine.succeed(control(a, "show -P Result " + ep["proxyUnit"])).strip() == "success"
