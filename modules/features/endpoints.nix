@@ -16,8 +16,8 @@ in
       # Their naming contract is stricter than systemd's unit-name rules.
       safeName = name: builtins.match "[A-Za-z0-9][A-Za-z0-9_.-]*" name != null;
 
-      # Nix's stringLength counts UTF-8 bytes, not characters. The 108-byte
-      # Unix socket path field must also fit its terminating NUL.
+      # Full path to the socket file, ensuring the file name is valid and not
+      # too long.
       socketPath = service: endpoint:
         let
           path = if endpoint == "default" then
@@ -27,6 +27,9 @@ in
         in
         if !(safeName service && safeName endpoint) then
           throw "Endpoint ${service}.${endpoint}: service and endpoint names must be safe path components; templates are not supported."
+        # Note that Nix's stringLength function counts UTF-8 bytes not the
+        # number of characters in a string. The 108 byte Unix socket path
+        # must also fit its terminating NUL.
         else if builtins.stringLength path >= 108 then
           throw "Endpoint ${service}.${endpoint}: its Unix socket path exceeds 107 bytes: ${path}"
         else path;
@@ -53,10 +56,9 @@ in
       paths = map (endpoint: endpoint.socket) entries;
       pathsConflict = a: b: a == b || lib.hasPrefix "${a}/" b || lib.hasPrefix "${b}/" a;
 
-      # Check the filesystem listener paths declared by enabled systemd socket
-      # units. Endpoint paths must not reuse these paths or overlap them as
-      # files and directories. Listeners opened directly by applications
-      # cannot be identified during Nix evaluation.
+      # This makes a best effort attempt at checking filesystem listener
+      # paths declared by enabled systemd socket units, to find any that
+      # conflict. Note this cannot track paths opened directly by applications
       listenPaths = value: lib.filter
         (path: builtins.isString path && lib.hasPrefix "/" path)
         (lib.toList value);
@@ -92,6 +94,7 @@ in
       # The Haskell helper checks socket paths and manages forwarding into
       # the owning service's private network namespace.
       runtime = "${(packagesFor pkgs).hostenv-runtime}/bin/hostenv-system endpoint";
+
       makeUnits = endpoint:
         let
           manifest = pkgs.writeText "hostenv-endpoint-${endpointId endpoint.service endpoint.name}.json" (builtins.toJSON {
