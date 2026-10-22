@@ -443,6 +443,16 @@ pkgs.testers.runNixOSTest {
 
     with subtest("automatic owner crash recovery reattaches both endpoints"):
         owner, previous_processes, previous_namespace = check_processes(a)
+
+        # Pin the original namespace while the owner restarts. Namespace
+        # identifiers can be reused after the last reference disappears.
+        # A bind mount keeps the old namespace alive, making the comparison
+        # with the replacement namespace meaningful.
+        old_namespace_mount = "/tmp/hostenv-crashed-owner-netns"
+        machine.succeed("touch " + quote(old_namespace_mount))
+        machine.succeed(
+            "mount --bind /proc/" + owner + "/ns/net " + quote(old_namespace_mount)
+        )
         machine.succeed("kill -KILL " + owner)
 
         # The owner must restart under its own Restart= policy, before a
@@ -482,8 +492,13 @@ pkgs.testers.runNixOSTest {
                 machine.succeed(control(a, "show -P NRestarts example.service")).strip(),
             )
         assert current_owner != owner
-        assert current_namespace != previous_namespace
+        assert current_namespace != previous_namespace, (
+            "The restarted owner is still in the previous namespace",
+            previous_namespace, current_namespace, owner, current_owner,
+        )
         assert not set(previous_processes).intersection(current_processes)
+        machine.succeed("umount " + quote(old_namespace_mount))
+        machine.succeed("rm " + quote(old_namespace_mount))
         ready(b, "api", 3001)
 
     with subtest("upgrade and rollback preserve existing paths"):
