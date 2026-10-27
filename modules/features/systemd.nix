@@ -107,6 +107,24 @@ in
               Environment variables passed to *all* systemd units (for this user).
             '';
           };
+
+          defaultPath = mkOption {
+            type = types.listOf types.package;
+            default = [ ];
+            defaultText = literalExpression ''
+              [
+                pkgs.coreutils
+                pkgs.findutils
+                pkgs.gnugrep
+                pkgs.gnused
+                config.systemd.package
+              ]
+            '';
+            description = ''
+              Packages appended to the PATH environment variable of all
+              systemd services.
+            '';
+          };
     
         };
     
