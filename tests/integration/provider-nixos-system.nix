@@ -296,6 +296,27 @@ let
     localSystem = foreignSystem;
   };
 
+  # VM scenarios can take the production module stack and extend it without
+  # duplicating the SOPS, plan, node or environment-user module assembly.
+  assembledArgs = providerFlake.lib.provider.nixosSystemArgs {
+    inherit config nodeSystems nodesPath secretsFile secretsPath sopsSecretKeys;
+    node = nodeName;
+    inputs = inputsForSystem;
+    pkgs = pkgsBySystem;
+  };
+  extendedSystemEval = inputs.nixpkgs.lib.nixosSystem (assembledArgs // {
+    modules = assembledArgs.modules ++ [
+      { networking.hostName = lib.mkForce "test-extended-node"; }
+    ];
+  });
+  assemblyExtensionOk =
+    assembledArgs.system == system
+    && assembledArgs.specialArgs.system == system
+    && extendedSystemEval.config.networking.hostName == "test-extended-node"
+    && extendedSystemEval.config.users.users.${envName}.uid == config.environments.${envName}.uid
+    && extendedSystemEval.config.sops.secrets."${envName}/laravel_env".key == "acme/laravel_env"
+    && extendedSystemEval.config.provider.plan.environments.${envName}.requiredSecretFiles == [ "laravel_env" ];
+
   systemMismatch = builtins.tryEval (nixosSystem {
     config = configMismatch;
     inherit
@@ -523,6 +544,9 @@ in
     && firewallPortsOk
     && !systemMismatch.success
   ) "provider nixosSystem should enforce env key/userName alignment";
+  provider-nixos-system-assembly =
+    asserts.assertTrue "provider-nixos-system-assembly" assemblyExtensionOk
+      "shared provider NixOS assembly must be reusable with additional test modules";
   provider-nixos-system-required-secret-restart-script =
     pkgs.writeShellScript "provider-required-secret-restart" secretRestartService.script;
   provider-nixos-system-wheel-sudo = asserts.assertTrue "provider-nixos-system-wheel-sudo" (

@@ -14,9 +14,11 @@ let
   providerServiceDeprecationNote =
     " Temporary compatibility option while deploy-rs provider tooling remains in use; will be deprecated once provider-service is complete.";
 
-  providerNixosSystem =
+  # Build the complete NixOS module stack once for both production systems
+  # and test consumers. The returned attributes are suitable for
+  # nixpkgs.lib.nixosSystem; callers may append test-specific modules.
+  providerNixosSystemArgs =
     { config
-    , nixpkgs
     , pkgs
     , node
     , inputs
@@ -205,38 +207,41 @@ let
 
     in
     if envUserMismatch == [ ] then
-      nixpkgs.lib.nixosSystem
-        {
-          inherit system;
-          specialArgs = { inherit inputs system; };
-          modules =
-            [
-              {
-                _module.args = {
-                  inherit inputs system;
-                };
-              }
-              inputs.sops-nix.nixosModules.sops
-              { sops.defaultSopsFile = secretsPath; }
-            ]
-            ++ providerNixosModules
-            ++ [
-              providerPlanModule
-            ]
-            ++ nodeModules
-            ++ [
-              (nodePath + "/configuration.nix")
-              nodeConfig
-              (sopsSecrets nodeConfig)
-              (userPackages nodeConfig)
-            ];
-        }
+      {
+        inherit system;
+        specialArgs = { inherit inputs system; };
+        modules =
+          [
+            {
+              _module.args = {
+                inherit inputs system;
+              };
+            }
+            inputs.sops-nix.nixosModules.sops
+            { sops.defaultSopsFile = secretsPath; }
+          ]
+          ++ providerNixosModules
+          ++ [
+            providerPlanModule
+          ]
+          ++ nodeModules
+          ++ [
+            (nodePath + "/configuration.nix")
+            nodeConfig
+            (sopsSecrets nodeConfig)
+            (userPackages nodeConfig)
+          ];
+      }
     else
       throw ''
         Environment keys must match hostenv.userName.
 
         Mismatched environments: ${toString envUserMismatch}.
       '';
+
+  # The production path consumes exactly the same assembly as test callers.
+  providerNixosSystem = args@{ nixpkgs, ... }:
+    nixpkgs.lib.nixosSystem (providerNixosSystemArgs args);
 
   providerDeployOutputs =
     { inputs
@@ -581,6 +586,7 @@ in
 
   config.flake.lib.provider = {
     nixosModules = providerNixosModules;
+    nixosSystemArgs = providerNixosSystemArgs;
     nixosSystem = providerNixosSystem;
     deployOutputs = providerDeployOutputs;
     deployPublicKeys = config.provider.deployPublicKeys;
