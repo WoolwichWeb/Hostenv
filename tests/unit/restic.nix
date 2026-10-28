@@ -1,9 +1,9 @@
-{ pkgs }:
+{ pkgs, hostenv }:
 let
   lib = pkgs.lib;
   support = import ../support { inherit pkgs lib; };
   asserts = support.asserts;
-  resticModule = (import ../../modules/features/restic.nix { }).flake.modules.hostenv.restic;
+  resticModule = hostenv.lib.hostenv.modules.restic;
 
   restic_exclusive_repo =
     let

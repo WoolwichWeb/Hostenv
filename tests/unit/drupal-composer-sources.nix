@@ -1,19 +1,16 @@
 # Test the source passed to Composer by the Drupal module.
-{ pkgs }:
+{ pkgs, hostenv }:
 let
   lib = pkgs.lib;
   asserts = (import ../support { inherit pkgs lib; }).asserts;
   root = ./fixtures/drupal-composer-source;
-  drupal = (import ../../modules/features/drupal/drupal.nix {
-    config.flake.lib.hostenv = { };
-  }).flake.modules.hostenv.drupal;
 
   hasFiles = src: paths: lib.all (path: builtins.pathExists "${src}/${path}") paths;
   lacksFiles = src: paths: lib.all (path: !(builtins.pathExists "${src}/${path}")) paths;
 
   testSource = { extraSources, included, excluded }:
     let
-      config = {
+      fixtureConfig = {
         hostenv = {
           inherit root;
           safeEnvironmentName = "test";
@@ -53,8 +50,37 @@ let
         stdenvNoCC.mkDerivation = attrs: if attrs ? name then attrs.src else attrs;
         writeText = _: _: "test-settings";
       };
-      evaluated = drupal { inherit lib config; pkgs = fakePkgs; };
-      project = builtins.elemAt evaluated.config.content.profile 0;
+      evaluated = lib.evalModules {
+        class = "hostenv";
+        modules = [
+          hostenv.lib.hostenv.modules.drupal
+          {
+            options = {
+              hostenv = lib.mkOption { type = lib.types.lazyAttrsOf lib.types.unspecified; };
+              services.drupal = {
+                enable = lib.mkOption { type = lib.types.bool; };
+                majorVersion = lib.mkOption { type = lib.types.int; };
+                codebase = lib.mkOption { type = lib.types.attrsOf lib.types.unspecified; };
+                filesDir = lib.mkOption { type = lib.types.str; };
+                composer = lib.mkOption { type = lib.types.attrsOf lib.types.unspecified; };
+                settings.databases = lib.mkOption { type = lib.types.lines; };
+              };
+              services.phpfpm.pools = lib.mkOption {
+                type = lib.types.lazyAttrsOf lib.types.unspecified;
+              };
+              # Keep unrelated profile packages unevaluated.
+              profile = lib.mkOption { type = lib.types.raw; };
+            };
+            config = fixtureConfig // {
+              _module = {
+                check = false;
+                args.pkgs = fakePkgs;
+              };
+            };
+          }
+        ];
+      };
+      project = builtins.elemAt evaluated.config.profile 0;
     in
     (builtins.tryEval (builtins.deepSeq project.buildPhase true)).success;
 in

@@ -31,6 +31,7 @@ let
       outPath = source;
       __toString = self: toString self.outPath;
       lib.hostenv.${system}.environments = evaluated.config.environments;
+      lib.hostenv.makeHostenv.${system} = makeHostenv;
     };
 
   project = mkProject false;
@@ -87,6 +88,142 @@ let
     };
     secretsFile = "secrets/secrets.yaml";
   } // overrides);
+
+  extendedProject = project // {
+    lib.hostenv = project.lib.hostenv // {
+      makeHostenv.${system} = modules: environmentName:
+        makeHostenv (modules ++ [ {
+          environments.${environmentName}.virtualHosts."${environmentName}.extension.example" = { };
+        } ]) environmentName;
+    };
+  };
+  extendedPlan = lib.importJSON (mkPlan {
+    inputs = planInputs // { org__fixture = extendedProject; };
+  }).plan;
+  projectEvaluatorPreserved =
+    extendedPlan.environments.${mainUser}.virtualHosts ? "main.extension.example"
+    && extendedPlan.environments.${testingUser}.virtualHosts ? "testing.extension.example"
+    && extendedPlan.environments.${mainUser}.hostenv.organisation == "org"
+    && extendedPlan.environments.${mainUser}.hostenv.project == "fixture"
+    && extendedPlan.environments.${mainUser}.hostenv.hostenvHostname == "hosting.test";
+  environmentOverrideProject =
+    let
+      source = pkgs.writeTextDir "hostenv.nix" ''
+        { ... }: {
+          hostenv = {
+            organisation = "other";
+            project = "other";
+            root = "/src/fixture";
+          };
+          environments.main = {
+            enable = true;
+            type = "production";
+            hostenv = {
+              organisation = "different";
+              project = "different";
+              hostenvHostname = "wrong.example";
+            };
+            virtualHosts."main.example" = { };
+          };
+        }
+      '';
+      evaluated = makeHostenv [ (source + /hostenv.nix) ] "main";
+    in
+    {
+      outPath = source;
+      __toString = self: toString self.outPath;
+      lib.hostenv.${system}.environments = evaluated.config.environments;
+      lib.hostenv.makeHostenv.${system} = makeHostenv;
+    };
+  providerIdentity = (lib.evalModules {
+    modules = [
+      inputs.self.lib.hostenv.module
+      {
+        organisation = "org";
+        project = "fixture";
+        environmentName = "main";
+        hostenvHostname = "hosting.test";
+      }
+    ];
+  }).config;
+  environmentOverridePlan = lib.importJSON (mkPlan {
+    inputs = planInputs // { org__fixture = environmentOverrideProject; };
+  }).plan;
+  environmentIdentityEnforced =
+    let
+      hostenv = environmentOverridePlan.environments.${providerIdentity.userName}.hostenv;
+    in
+    hostenv.organisation == "org"
+    && hostenv.project == "fixture"
+    && hostenv.hostenvHostname == "hosting.test"
+    && hostenv.userName == providerIdentity.userName
+    && hostenv.hostname == providerIdentity.hostname
+    && hostenv.runtimeRoot == "/run/hostenv"
+    && hostenv.runtimeDir == providerIdentity.runtimeDir;
+
+  forgeIdentity = changes: modules: environmentName:
+    let
+      result = makeHostenv modules environmentName;
+      env = result.config.environments.${environmentName};
+    in
+    result // {
+      config = result.config // {
+        environments = result.config.environments // {
+          ${environmentName} = env // {
+            hostenv = env.hostenv // changes;
+          };
+        };
+      };
+    };
+  forgedProject = project // {
+    lib.hostenv = project.lib.hostenv // {
+      makeHostenv.${system} = forgeIdentity { userName = "root"; };
+    };
+  };
+  forgedRuntimeProject = project // {
+    lib.hostenv = project.lib.hostenv // {
+      makeHostenv.${system} = forgeIdentity {
+        runtimeDir = "/run/hostenv/user/someone-else";
+      };
+    };
+  };
+  rejects = overriddenProject: !(builtins.tryEval (
+    builtins.deepSeq (lib.importJSON (mkPlan {
+      inputs = planInputs // { org__fixture = overriddenProject; };
+    }).plan) true
+  )).success;
+  forgedIdentityRejected = rejects forgedProject;
+  forgedRuntimeRejected = rejects forgedRuntimeProject;
+  ignoredOverridesProject = project // {
+    lib.hostenv = project.lib.hostenv // {
+      makeHostenv.${system} = _modules: environmentName:
+        makeHostenv [ (project + /hostenv.nix) ] environmentName;
+    };
+  };
+  ignoredOverridesRejected = !(builtins.tryEval (
+    builtins.deepSeq (lib.importJSON (mkPlan {
+      inputs = planInputs // { org__fixture = ignoredOverridesProject; };
+    }).plan) true
+  )).success;
+
+  missingEvaluatorProject = project // {
+    lib.hostenv = builtins.removeAttrs project.lib.hostenv [ "makeHostenv" ];
+  };
+  missingEvaluatorRejected = !(builtins.tryEval (
+    builtins.deepSeq (mkPlan {
+      inputs = planInputs // { org__fixture = missingEvaluatorProject; };
+    }).plan true
+  )).success;
+  disabledMissingEvaluatorProject = missingEvaluatorProject // {
+    lib.hostenv = missingEvaluatorProject.lib.hostenv // {
+      ${system} = { environments = { }; defaultEnvironment = null; };
+    };
+  };
+  disabledMissingEvaluatorRejected = !(builtins.tryEval (
+    builtins.deepSeq (mkPlan {
+      inputs = planInputs // { org__fixture = disabledMissingEvaluatorProject; };
+    }).plan true
+  )).success;
 
   baseline = mkPlan { };
   plan = lib.importJSON baseline.plan;
@@ -154,9 +291,10 @@ let
     };
   };
 
-  providerOptions = (import ../../modules/entrypoints/provider/options.nix {
-    inherit inputs lib;
-    config.flake = inputs.self;
+  providerOptions = (inputs.flake-parts.lib.evalFlakeModule { inherit inputs; } {
+    imports = [ inputs.self.flakeModules.provider ];
+    systems = [ system ];
+    provider.enable = lib.mkForce false;
   }).options.provider;
   evaluateOptions = settings: (lib.evalModules {
     modules = [
@@ -179,6 +317,25 @@ let
   ];
 in
 {
+  provider-plan-project-local-modules = asserts.assertTrue "provider-plan-project-local-modules"
+    projectEvaluatorPreserved
+    "provider re-evaluation must retain project modules and provider identity overrides";
+
+  provider-plan-overrides-environment-identity =
+    asserts.assertTrue "provider-plan-overrides-environment-identity"
+      environmentIdentityEnforced
+      "provider identity must override even environment-specific project settings";
+
+  provider-plan-rejects-forged-identity =
+    asserts.assertTrue "provider-plan-rejects-forged-identity"
+      (forgedIdentityRejected && forgedRuntimeRejected && ignoredOverridesRejected)
+      "provider must reject project evaluators that ignore overrides or forge identity and runtime paths";
+
+  provider-plan-requires-project-evaluator =
+    asserts.assertTrue "provider-plan-requires-project-evaluator"
+      (missingEvaluatorRejected && disabledMissingEvaluatorRejected)
+      "all Hostenv project inputs must supply an evaluator, including disabled projects";
+
   provider-plan-default-state-and-lock = asserts.assertTrue "provider-plan-default-state-and-lock" (
     plan.environments.${mainUser}.uid == 2501
     && plan.environments.${mainUser}.repo.url == "https://example.invalid/org/fixture.git"

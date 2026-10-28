@@ -13,8 +13,7 @@ let
     in
     {
       inherit outPath;
-      modules = outPath;
-      makeHostenv.${localSystem} = makeHostenv;
+      lib.hostenv.makeHostenv.${localSystem} = makeHostenv;
       __toString = self: toString self.outPath;
     };
 
@@ -42,6 +41,7 @@ let
       input = {
         lib = {
           hostenv = {
+            makeHostenv.${localSystem} = makeHostenv;
             environments = sanitisedEnvs;
             defaultEnvironment = eval.config.defaultEnvironment;
             ${localSystem} = {

@@ -1,12 +1,9 @@
-{ pkgs }:
+{ pkgs, hostenv }:
 let
   lib = pkgs.lib;
   support = import ../support { inherit pkgs lib; };
   asserts = support.asserts;
-  mysqlLib = (import ../../modules/lib/mysql.nix { }).flake.lib.hostenv.mysql;
-  mysqlModule = (import ../../modules/features/mysql.nix {
-    config.flake.lib.hostenv.mysql = mysqlLib;
-  }).flake.modules.hostenv.mysql;
+  mysqlModule = hostenv.lib.hostenv.modules.mysql;
 
   eval = support.evalWithBase {
     modules = [

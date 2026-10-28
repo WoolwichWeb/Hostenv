@@ -1,7 +1,7 @@
-{ pkgs, makeHostenv, documentationEnabled }:
+{ pkgs, makeHostenv, hostenv, documentationEnabled }:
 
 # Fast/unit-style suites
-(import ./restic.nix { inherit pkgs; })
+(import ./restic.nix { inherit pkgs hostenv; })
   // (import ./deploy-rsync.nix { inherit pkgs makeHostenv; })
   // (import ./hostenv-assertions.nix { inherit pkgs makeHostenv; })
   // (import ./canonical-host.nix { inherit pkgs makeHostenv; })
@@ -12,11 +12,11 @@
   // (import ./hostenv-provider-service.nix { inherit pkgs documentationEnabled; })
   // (import ./provider-cli.nix { inherit pkgs documentationEnabled; })
   // (import ./backups-repo-host.nix { inherit pkgs makeHostenv; })
-  // (import ./mysql-backups.nix { inherit pkgs; })
-  // (import ./mysql-programs.nix { inherit pkgs; })
-  // (import ./drupal-composer-sources.nix { inherit pkgs; })
-  // (import ./mysql-binlog-retention.nix { inherit pkgs; })
-  // (import ./redis.nix { inherit pkgs; })
+  // (import ./mysql-backups.nix { inherit pkgs hostenv; })
+  // (import ./mysql-programs.nix { inherit pkgs hostenv; })
+  // (import ./drupal-composer-sources.nix { inherit pkgs hostenv; })
+  // (import ./mysql-binlog-retention.nix { inherit pkgs hostenv; })
+  // (import ./redis.nix { inherit pkgs hostenv; })
   // (import ./mysql-backups-dependency.nix { inherit pkgs makeHostenv; })
   // (import ./migrate-tags.nix { inherit pkgs makeHostenv; })
   // (import ./php-app-migrate.nix { inherit pkgs makeHostenv; })

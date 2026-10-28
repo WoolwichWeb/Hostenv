@@ -7,12 +7,18 @@ let
     };
 in
 {
-  # Package definitions live outside the import-tree modules. Consumers use
-  # this accessor rather than depending on the package files' locations.
   flake.lib.hostenv.packagesFor = packagesFor;
 
-  perSystem = { pkgs, ... }:
+  perSystem = { pkgs, config, ... }:
     lib.mkIf (!(inputs ? hostenv) && pkgs.stdenv.hostPlatform.isLinux) {
-      packages.hostenv-runtime = (packagesFor pkgs).hostenv-runtime;
+      packages = {
+        inherit (packagesFor pkgs) hostenv-runtime;
+        hostenv-provider = (packagesFor pkgs).hostenv-provider.override {
+          documentationEnabled = config.documentation.haskell.haddock.enable;
+        };
+        hostenv-provider-service = (packagesFor pkgs).hostenv-provider-service.override {
+          dependencyDocumentationEnabled = config.documentation.haskell.dependencies.enable;
+        };
+      };
     };
 }

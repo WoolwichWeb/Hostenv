@@ -37,8 +37,7 @@ let
     in
     {
       inherit outPath;
-      modules = outPath;
-      makeHostenv.${system} = makeHostenv;
+      lib.hostenv.makeHostenv.${system} = makeHostenv;
       __toString = self: toString outPath;
     };
 
@@ -209,7 +208,9 @@ let
           outPath = projectDir;
           __toString = self: toString projectDir;
           lib = {
-            hostenv = projectHostenvOutput;
+            hostenv = projectHostenvOutput // {
+              makeHostenv.x86_64-linux = makeHostenv;
+            };
           };
         };
       };
@@ -279,6 +280,7 @@ let
         __toString = self: toString projectDir;
         lib = {
           hostenv = {
+            makeHostenv.x86_64-linux = makeHostenv;
             "${"x86_64-linux"}" = {
               environments = eval.config.environments;
               defaultEnvironment = eval.config.defaultEnvironment;
@@ -426,6 +428,7 @@ let
     __toString = self: toString backupsMixedProjectDir;
     lib = {
       hostenv = {
+        makeHostenv.x86_64-linux = makeHostenv;
         "${"x86_64-linux"}" = {
           environments = backupsMixedEval.config.environments;
           defaultEnvironment = backupsMixedEval.config.defaultEnvironment;
@@ -584,6 +587,7 @@ let
           __toString = self: toString projectDir;
           lib = {
             hostenv = {
+              makeHostenv.x86_64-linux = makeHostenv;
               x86_64-linux = {
                 defaultEnvironment = "main";
                 # environments intentionally missing
@@ -668,7 +672,9 @@ let
         outPath = projectDir;
         __toString = self: toString projectDir;
         lib = {
-          hostenv = hostenvOutput;
+          hostenv = hostenvOutput // {
+            makeHostenv.x86_64-linux = makeHostenv;
+          };
         };
       };
     };
@@ -817,7 +823,9 @@ let
           outPath = conflictProjectDir;
           __toString = self: toString conflictProjectDir;
           lib = {
-            hostenv = hostenvOutputConflict;
+            hostenv = hostenvOutputConflict // {
+              makeHostenv.x86_64-linux = makeHostenv;
+            };
           };
         };
       };

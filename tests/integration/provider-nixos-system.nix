@@ -136,14 +136,14 @@ let
     in
     {
       inherit outPath;
-      modules = outPath;
-      makeHostenv.${system} = makeHostenv;
+      lib.hostenv.makeHostenv.${system} = makeHostenv;
       __toString = self: toString outPath;
     };
 
   projectInput = {
     outPath = projectDir;
     __toString = self: toString projectDir;
+    lib.hostenv.makeHostenv.${system} = makeHostenv;
     lib.hostenv.${system} = {
       environments = projectEval.config.environments;
       defaultEnvironment = projectEval.config.defaultEnvironment;

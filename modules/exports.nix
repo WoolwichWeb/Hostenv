@@ -1,9 +1,7 @@
-{ lib, inputs, ... }:
+{ lib, inputs, config, ... }:
 let
   types = lib.types;
-  # Used by downstream projects and providers.
-  # Allows downstream to import hostenv modules with either project or
-  # provider enabled.
+
   mkFlakeModule = cfg: { ... }:
     {
       imports = [
@@ -11,7 +9,6 @@ let
         (inputs.import-tree ./.)
       ];
       _file = builtins.toString ./exports.nix;
-
     } // cfg;
 in
 {
@@ -32,11 +29,19 @@ in
     };
   };
 
-  config.flake.flakeModules = lib.mkIf (inputs ? import-tree) {
-    exports = ./exports.nix;
-    project = mkFlakeModule { project.enable = true; provider.enable = false; };
-    provider = mkFlakeModule { project.enable = false; provider.enable = true; };
-  };
+  config = {
+    flake.flakeModules = lib.mkIf (inputs ? import-tree) {
+      exports = ./exports.nix;
+      project = mkFlakeModule { project.enable = true; provider.enable = false; };
+      provider = mkFlakeModule { project.enable = false; provider.enable = true; };
+    };
 
-  config.flake.modules = lib.mkDefault { };
+    flake.modules = lib.mkDefault { };
+
+    flake.nixosModules = config.flake.modules.nixos;
+    flake.lib.hostenv.modules = config.flake.modules.hostenv;
+
+    # Keep the internal module collection out of public flake outputs.
+    touchup.attr.modules.enable = false;
+  };
 }
