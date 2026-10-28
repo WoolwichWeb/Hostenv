@@ -170,6 +170,14 @@ in
     
         in
         {
+          systemd.defaultPath = [
+            pkgs.coreutils
+            pkgs.findutils
+            pkgs.gnugrep
+            pkgs.gnused
+            config.systemd.package
+          ];
+
           systemd.units =
             mapAttrs' (n: v: nameValuePair "${n}.path" (pathToUnit v)) cfg.paths
             // mapAttrs' (n: v: nameValuePair "${n}.service" (serviceToUnit (wrapPrivateNetwork pkgs v))) cfg.services
