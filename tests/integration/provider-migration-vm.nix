@@ -9,10 +9,7 @@ let
   orphanUid = 2100;
   snapshotId = "0123456789abcdef";
 
-  providerCliPackage = pkgs.callPackage ../../provider/package.nix {
-    providerSrc = ../../provider;
-    documentationEnabled = false;
-  };
+  providerCliPackage = pkgs.callPackage ../../packages/hostenv-provider/package.nix { };
   cliPkg = providerCliPackage.unwrapped;
 
   sshOpts = [

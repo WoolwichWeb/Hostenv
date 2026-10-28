@@ -1,1 +1,1 @@
-packages: ./modules/services/hostenv-provider-service ./provider
+packages: ./packages/hostenv-provider-service ./packages/hostenv-provider

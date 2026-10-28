@@ -1,6 +1,6 @@
 { pkgs, documentationEnabled }:
 let
-  src = ../../modules/services/hostenv-provider-service;
+  src = (pkgs.callPackage ../../packages/hostenv-provider-service/package.nix { }).src;
   rawServicePkg = pkgs.haskellPackages.callCabal2nix "hostenv-provider-service" src { };
   servicePkg =
     if documentationEnabled then

@@ -1,6 +1,5 @@
 { config, ... }:
 let
-  hostenvInputs = config.flake.lib.hostenvInputs;
   # Provider-side infrastructure generator.
   providerPlan =
     {
@@ -48,18 +47,20 @@ let
     }:
 
     let
-      hostenvInput = hostenvInputs.requireInput {
-        inherit inputs;
-        name = "hostenv";
-        context = "the provider configuration";
-      };
-      hostenvMakeHostenv =
-        hostenvInput.makeHostenv.${system}
-          or (throw ''
-            The Hostenv input does not provide makeHostenv.${system}.
+      projectEvaluator = name:
+        let
+          evaluator = lib.attrByPath [ "lib" "hostenv" "makeHostenv" system ] null inputs.${name};
+        in
+        if builtins.isFunction evaluator then
+          evaluator
+        else
+          throw ''
+            Hostenv project input '${name}' must export
+            lib.hostenv.makeHostenv.${system}.
 
-            Update the Hostenv input.
-          '');
+            Update its .hostenv/flake.nix to use a current Hostenv project
+            entrypoint, and update the provider's flake.lock.
+          '';
 
       defaultEnvInputFollows = {
         hostenv = "hostenv";
@@ -119,6 +120,9 @@ let
           ''
         else
           true;
+
+      assertProjectEvaluators =
+        builtins.all (name: builtins.seq (projectEvaluator name) true) projectInputs;
 
       state =
         let
@@ -219,38 +223,90 @@ let
             envRoot =
               envCfg.hostenv.root
                 or (throw "Environment '${envName}' in ${name} is missing hostenv.root.");
-            evaluatedHostenv = hostenvMakeHostenv [
+            evaluatedHostenv = (projectEvaluator name) [
               (inputs.${name} + /hostenv.nix)
               ({ ... }: {
                 hostenv.organisation = lib.mkForce orgAndProject.organisation;
                 hostenv.project = lib.mkForce orgAndProject.project;
                 hostenv.root = lib.mkForce envRoot;
                 hostenv.hostenvHostname = lib.mkForce hostenvHostname;
+
+                environments.${envName}.hostenv = {
+                  organisation = lib.mkForce orgAndProject.organisation;
+                  project = lib.mkForce orgAndProject.project;
+                  root = lib.mkForce envRoot;
+                  hostenvHostname = lib.mkForce hostenvHostname;
+                };
               })
             ] envName;
-            effectiveEnvCfg = evaluatedHostenv.config.environments.${envName} or envCfg;
-            hostenv = effectiveEnvCfg.hostenv;
+            effectiveEnvCfg = evaluatedHostenv.config.environments.${envName}
+              or (throw "Project '${name}' did not evaluate environment '${envName}'.");
+            hostenv = effectiveEnvCfg.hostenv
+              or (throw "Project '${name}' did not return Hostenv identity for '${envName}'.");
+            # A project evaluator can ignore the provider's mkForce overrides.
+            expectedIdentity = (lib.evalModules {
+              modules = [
+                config.flake.lib.hostenv.module
+                {
+                  organisation = orgAndProject.organisation;
+                  project = orgAndProject.project;
+                  environmentName = envName;
+                  inherit hostenvHostname;
+                  root = envRoot;
+                  runtimeRoot = envCfg.hostenv.runtimeRoot or "/run/hostenv";
+                }
+              ];
+            }).config;
+            identityFields = [
+              "organisation"
+              "project"
+              "environmentName"
+              "hostenvHostname"
+              "userName"
+              "hostname"
+              "safeEnvironmentName"
+              "projectNameHash"
+              "root"
+              "runtimeRoot"
+              "runtimeDir"
+              "upstreamRuntimeDir"
+              "dataDir"
+              "stateDir"
+              "cacheDir"
+              "backupsSecretFile"
+              "backupsEnvFile"
+            ];
+            mismatchedIdentityFields = lib.filter
+              (field: !(hostenv ? ${field}) || hostenv.${field} != expectedIdentity.${field})
+              identityFields;
           in
-          effectiveEnvCfg
-          // {
-            node = nodeFor.${effectiveEnvCfg.type} or nodeFor.default;
-            authorizedKeys = builtins.concatMap (user: user.publicKeys or [ ]) (
-              builtins.attrValues effectiveEnvCfg.users
-            );
-            migrations = builtins.filter (name: lib.hasSuffix "-migrate" name) (
-              builtins.attrNames (evaluatedHostenv.config.services.restic.backups or { })
-            );
-            hostenv = hostenv // {
-              inherit hostenvHostname;
-              # Preserve the project's per-environment backup setting,
-              # including an explicit null, rather than leaking a default
-              # from the environment used to discover project metadata.
-              backupsRepoHost = envCfg.hostenv.backupsRepoHost or (hostenv.backupsRepoHost or null);
-            };
-            repo = repo // {
-              ref = hostenv.gitRef;
-            };
-          }
+          if mismatchedIdentityFields != [ ] then
+            throw ''
+              Project '${name}' returned identity or runtime paths that
+              do not match environment '${envName}': ${lib.concatStringsSep ", " mismatchedIdentityFields}.
+
+              Check that the project's evaluator applies the provider's
+              configuration modules. Refusing to generate a deployment plan.
+            ''
+          else
+            effectiveEnvCfg
+            // {
+              node = nodeFor.${effectiveEnvCfg.type} or nodeFor.default;
+              authorizedKeys = builtins.concatMap (user: user.publicKeys or [ ]) (
+                builtins.attrValues effectiveEnvCfg.users
+              );
+              migrations = builtins.filter (name: lib.hasSuffix "-migrate" name) (
+                builtins.attrNames (evaluatedHostenv.config.services.restic.backups or { })
+              );
+              hostenv = hostenv // {
+                inherit hostenvHostname;
+                # Preserve an explicit null backup setting from the project.
+                backupsRepoHost = envCfg.hostenv.backupsRepoHost or (hostenv.backupsRepoHost or null);
+              };
+              repo = repo // {
+                ref = hostenv.gitRef;
+              };
+            }
         ) enabledProjectEnvironments
       ) projectInputs;
 
@@ -612,7 +668,7 @@ let
         );
 
     in
-    assert (assertProjectInputs && assertUnsupportedProviderServiceOptions && assertNodeLifecycle);
+    assert (assertProjectInputs && assertProjectEvaluators && assertUnsupportedProviderServiceOptions && assertNodeLifecycle);
     {
       flake = generatedFlakeFile;
       plan = generatedConfig;

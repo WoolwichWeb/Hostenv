@@ -2,13 +2,13 @@
   inputs,
   lib,
   config,
-  self,
   ...
 }:
 let
   fp = inputs.flake-parts.lib;
   types = lib.types;
   cfg = config.project;
+  cfgTop = config;
 in
 {
   options.project.enable = lib.mkEnableOption "Enable project outputs and hostenv project evaluation.";
@@ -18,11 +18,8 @@ in
       options.hostenvProject = {
         makeHostenv = lib.mkOption {
           type = types.functionTo (types.functionTo types.unspecified);
-          default =
-            if inputs ? hostenv && inputs.hostenv ? makeHostenv then
-              inputs.hostenv.makeHostenv.${system}
-            else
-              self.makeHostenv.${system};
+          # Include Hostenv modules defined by the consuming project.
+          default = cfgTop.flake.lib.hostenv.makeHostenv.${system};
         };
 
         modules = lib.mkOption {
@@ -61,36 +58,24 @@ in
     lib.mkIf cfg.enable (
       let
         makeHostenv = config.hostenvProject.makeHostenv;
-        discoverProject =
-          if inputs ? hostenv then
-            inputs.hostenv.lib.hostenv.discoverProject.${system}
-          else
-            self.lib.hostenv.discoverProject.${system};
+        discoverProject = cfgTop.flake.lib.hostenv.discoverProject.${system};
         baseModules = config.hostenvProject.modules;
-
         project = discoverProject baseModules;
         environmentNames = builtins.attrNames project.environments;
-
         selectedEnvironmentName =
           if config.hostenvProject.environmentName != null then
             config.hostenvProject.environmentName
           else
             project.defaultEnvironment;
 
-        # A full evaluation is still useful for exporting the established rich
-        # environment metadata shape. When there is no default, use a real
-        # declared environment as evaluation context. Empty projects need no
-        # full eval.
+        # Disabled environments must remain visible for retirement.
         metadataEnvironmentName =
-          if
-            selectedEnvironmentName != null && builtins.hasAttr selectedEnvironmentName project.environments
-          then
+          if selectedEnvironmentName != null && builtins.hasAttr selectedEnvironmentName project.environments then
             selectedEnvironmentName
           else if environmentNames != [ ] then
             builtins.head environmentNames
           else
             null;
-
         metadataEval =
           if metadataEnvironmentName == null then null else makeHostenv baseModules metadataEnvironmentName;
 
@@ -120,23 +105,16 @@ in
         hostenvProject.eval = selectedEval;
         hostenvProject.outputs = outputs;
 
-        packages =
-          envPackages
-          // lib.optionalAttrs (selectedEval != null) {
-            # Keep `nix build` selecting the environment activation package.
-            default = selectedEval.config.activatePackage;
-          };
-        apps =
-          projectApps
-          // lib.optionalAttrs (projectApps ? hostenv && !(projectApps ? default)) {
-            # Downstreams can still provide their own stronger apps.default.
-            default = lib.mkDefault projectApps.hostenv;
-          };
+        packages = envPackages // lib.optionalAttrs (selectedEval != null) {
+          default = selectedEval.config.activatePackage;
+        };
+        apps = projectApps // lib.optionalAttrs (projectApps ? hostenv && !(projectApps ? default)) {
+          default = lib.mkDefault projectApps.hostenv;
+        };
         devshells = if selectedEval == null then { } else selectedEval.config.hostenv.devShells;
       }
     );
 
-  # Lift perSystem outputs into flake outputs
   config.flake.lib.hostenv = lib.mkIf cfg.enable (
     lib.genAttrs config.systems (system: config.allSystems.${system}.hostenvProject.outputs)
   );

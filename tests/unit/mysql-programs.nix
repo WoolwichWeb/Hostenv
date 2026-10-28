@@ -1,8 +1,8 @@
-{ pkgs }:
+{ pkgs, hostenv }:
 let
   lib = pkgs.lib;
   asserts = (import ../support { inherit pkgs lib; }).asserts;
-  mysqlLib = (import ../../modules/lib/mysql.nix { }).flake.lib.hostenv.mysql;
+  mysqlLib = hostenv.lib.hostenv.mysql;
 
   mariadbPrograms = mysqlLib.mkPrograms {
     inherit lib pkgs;

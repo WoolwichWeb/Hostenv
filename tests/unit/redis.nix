@@ -1,9 +1,9 @@
-{ pkgs }:
+{ pkgs, hostenv }:
 let
   lib = pkgs.lib;
   support = import ../support { inherit pkgs lib; };
   asserts = support.asserts;
-  redisModule = (import ../../modules/features/redis.nix { }).flake.modules.hostenv.redis;
+  redisModule = hostenv.lib.hostenv.modules.redis;
 
   eval = support.evalWithBase {
     modules = [

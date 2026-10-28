@@ -1,9 +1,6 @@
 { pkgs }:
 let
-  cli = import ../../provider/package.nix {
-    inherit pkgs;
-    providerSrc = ../../provider;
-  };
+  cli = pkgs.callPackage ../../packages/hostenv-provider/package.nix { };
 in
 pkgs.runCommand "provider-acme-cli" { nativeBuildInputs = cli.runtimeInputs; } ''
   set -euo pipefail

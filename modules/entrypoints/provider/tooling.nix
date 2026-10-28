@@ -10,12 +10,12 @@ let
   providerPlan = config.flake.lib.provider.plan;
   hostenvInputs = config.flake.lib.hostenvInputs;
   readYaml = config.flake.lib.hostenv.readYaml;
+  packagesFor = config.flake.lib.hostenv.packagesFor;
   hostenvInput = hostenvInputs.requireInput {
     inherit inputs;
     name = "hostenv";
     context = "the provider tooling configuration";
   };
-  providerRoot = hostenvInput.outPath + "/provider";
 in
 {
   options.perSystem = flakeParts.mkPerSystemOption (
@@ -58,11 +58,9 @@ in
             installDocumentation = config.documentation.haskell.dependencies.enable;
           })
             providerHsDeps;
-        providerCliPackage = pkgs.callPackage (providerRoot + "/package.nix") {
-          providerSrc = providerRoot;
+        hostenvProviderCLI = (packagesFor pkgs).hostenv-provider.override {
           documentationEnabled = config.documentation.haskell.haddock.enable;
         };
-        hostenvProviderCLI = providerCliPackage.wrapped;
         hostenvProviderApp = {
           type = "app";
           program = "${hostenvProviderCLI}/bin/hostenv-provider";

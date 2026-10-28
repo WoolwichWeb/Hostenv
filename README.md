@@ -227,6 +227,9 @@ project grows.
 Your project's hostenv.nix can extend the `hostenv` command. See the
 [Hostenv CLI command API](docs/cli-command-api.md) for more information.
 
+To extend Hostenv's Nix modules or integrate with project and provider flakes,
+see the [Hostenv flake API](docs/flake-api.md).
+
 ## License
 
 Hostenv is licensed under the GNU General Public License,

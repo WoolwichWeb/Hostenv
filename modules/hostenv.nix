@@ -801,22 +801,20 @@ let
   mkHostenvFunctions =
     system:
     let
+      pog = config.flake.lib.hostenvInputs.requireInput {
+        inherit inputs;
+        name = "pog";
+        context = "Hostenv environment evaluation";
+      };
       pkgs = import inputs.nixpkgs {
         inherit system;
-        overlays =
-          let
-            pogOver =
-              if inputs ? pog && inputs.pog ? overlays && inputs.pog.overlays ? default then
-                inputs.pog.overlays.default
-              else
-                throw ''
-                  The Hostenv CLI cannot be built because the Pog input does not provide overlays.default. This is an internal Hostenv configuration error.
+        overlays = [
+          (pog.overlays.default or (throw ''
+            Hostenv requires the Pog flake input to provide overlays.default.
 
-                  Report it at:
-                  https://gitlab.com/woolwichweb/hostenv/-/boards#/
-                '';
-          in
-          [ pogOver ];
+            Check the pinned Pog revision and the Hostenv flake inputs.
+          ''))
+        ];
       };
 
       # Evaluate only the configuration required to discover project
@@ -934,12 +932,6 @@ let
 
 in
 {
-  options.flake.makeHostenv = lib.mkOption {
-    type = lib.types.attrsOf (lib.types.functionTo (lib.types.functionTo lib.types.unspecified));
-    readOnly = true;
-    description = "Evaluate a specific declared project environment.";
-  };
-
   options.perSystem = fp.mkPerSystemOption (
     { ... }: {
       options.hostenv.makeHostenv = lib.mkOption {
@@ -956,8 +948,10 @@ in
     flake.lib.hostenv.discoverProject = lib.mapAttrs (
       _: functions: functions.discoverProject
     ) hostenvFunctions;
+    flake.lib.hostenv.makeHostenv = lib.mapAttrs (
+      _: functions: functions.makeHostenv
+    ) hostenvFunctions;
 
-    # TODO: do not create unknown flake outputs, use lib instead
     flake.modules.hostenv.core = { ... }: {
       options.hostenv = lib.mkOption {
         type = types.submodule hostenvModule;
@@ -965,11 +959,8 @@ in
       };
     };
 
-    # TODO: do not create unknown flake outputs, use lib instead
-    flake.makeHostenv = lib.mapAttrs (_: functions: functions.makeHostenv) hostenvFunctions;
-
     perSystem = { system, ... }: {
-      hostenv.makeHostenv = config.flake.makeHostenv.${system};
+      hostenv.makeHostenv = config.flake.lib.hostenv.makeHostenv.${system};
     };
   };
 }

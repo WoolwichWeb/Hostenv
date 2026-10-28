@@ -1,19 +1,18 @@
 { config, ... }:
 let
-  cfgTop = config;
+  packagesFor = config.flake.lib.hostenv.packagesFor;
 in
 {
   flake.modules.hostenv.hostenv-provider-service =
     { lib, config, pkgs, ... }:
     let
       cfg = config.services.hostenv-provider;
-      providerService = cfgTop.flake.lib.provider.service;
-      serviceSrc = cfg.source;
-      haskellDeps = cfg.haskellDeps;
-      ghc = pkgs.haskellPackages.ghcWithPackages (p: map (name: p.${name}) haskellDeps);
-      serviceBin = pkgs.writeShellScriptBin "hostenv-provider-service" ''
-        exec ${ghc}/bin/runghc -i${serviceSrc} ${serviceSrc}/Main.hs "$@"
-      '';
+      providerService = (packagesFor pkgs).hostenv-provider-service;
+      serviceBin = providerService.override {
+        sourceRoot = cfg.source;
+        haskellDeps = cfg.haskellDeps;
+      };
+      ghc = serviceBin.ghc;
       proxySocket = "http://unix:${cfg.listenSocket}:/";
       configFile = pkgs.writeText "hostenv-provider-config.json" (builtins.toJSON {
         dataDir = cfg.dataDir;
@@ -41,12 +40,14 @@ in
         source = lib.mkOption {
           type = lib.types.path;
           default = providerService.src;
+          defaultText = lib.literalExpression "hostenv-provider-service.src";
           description = "Path to the hostenv-provider-service source tree.";
         };
 
         haskellDeps = lib.mkOption {
           type = lib.types.listOf lib.types.str;
           default = providerService.haskellDeps;
+          defaultText = lib.literalExpression "hostenv-provider-service.haskellDeps";
           description = "Haskell package names required by hostenv-provider-service.";
         };
 
@@ -54,9 +55,10 @@ in
           type = lib.types.package;
           default = serviceBin;
           defaultText = lib.literalExpression ''
-            pkgs.writeShellScriptBin "hostenv-provider-service" '''
-              exec ''${pkgs.haskellPackages.ghcWithPackages [ ... ]}/bin/runghc -i''${config.services.hostenv-provider.source} ''${config.services.hostenv-provider.source}/Main.hs "$@"
-            ''';
+            hostenv-provider-service.override {
+              sourceRoot = config.services.hostenv-provider.source;
+              haskellDeps = config.services.hostenv-provider.haskellDeps;
+            }
           '';
           description = "Package providing the hostenv-provider-service executable.";
         };

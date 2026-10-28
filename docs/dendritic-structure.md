@@ -162,15 +162,15 @@ On Linux, `flake.modules.nixos.scrolling-desktop` might enable [`niri`](https://
 
 ```nix
 # ./modules/hosts.nix
-{ inputs, ... }:
+{ inputs, config, ... }:
 {
   flake.nixosConfigurations.my-host = inputs.nixpkgs.lib.nixosSystem {
-    system = "aarm64-linux";
-    modules = with inputs.self.modules.nixos;  [ ai ssh vpn mac-like-keyboard scrolling-desktop ];
+    system = "aarch64-linux";
+    modules = with config.flake.modules.nixos; [ ai ssh vpn mac-like-keyboard scrolling-desktop ];
   };
   flake.darwinConfigurations.my-host = inputs.nix-darwin.lib.darwinSystem {
-    system = "aarm64-darwin";
-    modules = with inputs.self.modules.darwin; [ ai ssh vpn scrolling-desktop ];
+    system = "aarch64-darwin";
+    modules = with config.flake.modules.darwin; [ ai ssh vpn scrolling-desktop ];
   };
 }
 ```

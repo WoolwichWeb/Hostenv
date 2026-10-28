@@ -7,7 +7,7 @@ in
     lib.mkIf (!(inputs ? hostenv))
       (
         let
-          makeHostenv = cfgTop.flake.makeHostenv.${system};
+          makeHostenv = cfgTop.flake.lib.hostenv.makeHostenv.${system};
           envs = import ../../tests/environments.nix { inherit pkgs makeHostenv; };
           drupalRoot = import ../../tests/integration/drupal/source.nix { inherit pkgs; };
         in
