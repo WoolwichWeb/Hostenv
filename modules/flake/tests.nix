@@ -10,6 +10,9 @@ in
           makeHostenv = cfgTop.flake.lib.hostenv.makeHostenv.${system};
           envs = import ../../tests/environments.nix { inherit pkgs makeHostenv; };
           drupalRoot = import ../../tests/integration/drupal/source.nix { inherit pkgs; };
+          serviceEnv = import ../../tests/integration/systemd-services/environment.nix {
+            inherit pkgs makeHostenv;
+          };
         in
         {
           hostenvProject = {
@@ -32,6 +35,14 @@ in
             inherit pkgs envs makeHostenv inputs;
             documentationEnabled = false;
           }) // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            systemd-service-path = import ../../tests/integration/systemd-services/path-check.nix {
+              inherit pkgs;
+              env = serviceEnv;
+            };
+            postgresql-socket-permissions = import ../../tests/integration/systemd-services/postgresql-config.nix {
+              inherit pkgs;
+              env = serviceEnv;
+            };
             endpoint-contracts = import ../../tests/integration/endpoints/contracts.nix {
               inherit pkgs makeHostenv;
             };
@@ -168,6 +179,12 @@ in
           };
 
           packages = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            systemd-services-vm-test = import ../../tests/integration/systemd-services/vm-test.nix {
+              inherit pkgs;
+              env = serviceEnv;
+              hostenvNixosModule = cfgTop.flake.modules.nixos.hostenv-top-level;
+            };
+
             provider-acme-vm-test = import ../../tests/integration/provider-acme-vm.nix {
               inherit pkgs;
               inherit (inputs) deploy-rs;

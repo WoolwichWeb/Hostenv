@@ -141,7 +141,7 @@
       config = lib.mkIf cfg.enable {
         services.postgresql.settings.listen_addresses = lib.mkDefault "";
         services.postgresql.settings.unix_socket_directories = lib.mkDefault cfg.runtimeDir;
-        services.postgresql.settings.unix_socket_permissions = lib.mkDefault 770;
+        services.postgresql.settings.unix_socket_permissions = lib.mkDefault "0770";
     
         systemd.services.postgresql = {
           description = "PostgreSQL Server";
