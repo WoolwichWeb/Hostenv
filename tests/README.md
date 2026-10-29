@@ -22,3 +22,11 @@ Guidelines for adding tests:
 - Use the helpers above instead of re-declaring option stubs or reshaping envs by hand.
 - Evaluate only the modules you need for the branch under test (keep imports minimal).
 - Assert on resulting config values, not implementation details.
+
+The `systemd-service-path` and `postgresql-socket-permissions` checks run in ordinary CI. The more expensive
+`systemd-services-vm-test` exercises real user services and is available as a
+package for manual runs on hosts with KVM:
+
+```sh
+nix build .#systemd-services-vm-test -L
+```
