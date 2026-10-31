@@ -31,15 +31,31 @@ in
     # private runtime directory as well so this test can never interact with a
     # user manager inherited from the build host.
     install -d -m 0700 "$TMPDIR/run"
-    PATH=${pkgs.coreutils}/bin \
+    # The activation hook runs before Hostenv contacts user systemd.
+    # No user manager exists in the build sandbox, so the full activation
+    # must fail after the hook has exercised the package PATH.
+    if PATH=${pkgs.coreutils}/bin \
       XDG_CONFIG_HOME="$TMPDIR/config" \
       XDG_STATE_HOME="$TMPDIR/state" \
       XDG_CACHE_HOME="$TMPDIR/cache" \
       XDG_RUNTIME_DIR="$TMPDIR/run" \
       HOSTENV_PACKAGES_ACTIVATION_OUTPUT="$output" \
-      ${env.config.activatePackage}/bin/activate
+      ${env.config.activatePackage}/bin/activate >"$TMPDIR/activation-log" 2>&1
+    then
+      echo "Activation unexpectedly succeeded without user systemd" >&2
+      exit 1
+    fi
 
-    grep -Fq 'Hello, world!' "$output"
+    grep -Fq 'Hello, world!' "$output" || {
+      cat "$TMPDIR/activation-log" >&2
+      echo "Activation did not run the package PATH hook" >&2
+      exit 1
+    }
+    grep -Fq 'user systemd service manager is not running' "$TMPDIR/activation-log" || {
+      cat "$TMPDIR/activation-log" >&2
+      echo "Activation failed for a reason other than the missing user manager" >&2
+      exit 1
+    }
     touch "$out"
   '';
 }
