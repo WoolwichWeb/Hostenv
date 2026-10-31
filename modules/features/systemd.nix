@@ -282,6 +282,7 @@ in
               else
                 echo "⚠️ The user systemd service manager is not running, so the environment cannot start." >&2
                 echo "ℹ️ Ensure that it is running, then try again." >&2
+                exit 1
               fi
     
               unset systemdStatus

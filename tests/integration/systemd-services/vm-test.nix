@@ -142,6 +142,14 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("user@${toString uid}.service")
 
+    with subtest("activation fails when the user systemd manager is unreachable"):
+        status, output = machine.execute(as_user(
+            "env XDG_RUNTIME_DIR=/run/hostenv-no-user-manager "
+            "${profile}/bin/activate"
+        ))
+        assert status != 0, "activation reported success without a user manager"
+        assert "user systemd service manager is not running" in output, output
+
     with subtest("activate the real Hostenv systemd units"):
         machine.succeed(as_user("${profile}/bin/activate"))
         for unit in ["mysql.service", "postgresql.service", "phpfpm-smoke.service", "nginx.service"]:
