@@ -80,7 +80,12 @@ in
           })
         certs;
 
-      assertions = lib.concatMap (name: [
+      assertions = lib.optional (certs ? "00-hostenv-account") {
+        assertion = lib.any
+          (target: builtins.elem (orderUnit "00-hostenv-account") target.requires)
+          (lib.attrValues config.systemd.targets);
+        message = "Hostenv's 00-hostenv-account certificate must be the ACME account leader. Check for earlier certificate names or certificates using DNS validation, which nixpkgs prioritises.";
+      } ++ lib.concatMap (name: [
         {
           # Certificate names appear in ExecCondition arguments and the
           # manifest read by hostenv-system. Match its accepted characters;

@@ -76,6 +76,7 @@ let
         virtualHosts."alias.hostenv.test" = {
           enableLetsEncrypt = true;
         };
+        virtualHosts."4-example.test".enableLetsEncrypt = true;
       };
     }
     EOF
@@ -195,7 +196,7 @@ let
         inherit lib pkgs;
         hostenvHostname = "hosting.test";
         letsEncrypt = {
-          enable = false;
+          enable = true;
           adminEmail = "ops@example.test";
           acceptTerms = true;
         };
@@ -407,6 +408,22 @@ let
   );
 
   nginxOk = systemEval.config.services.nginx.enable == true;
+  accountCert = systemEval.config.security.acme.certs."00-hostenv-account";
+  accountOrder = "acme-order-renew-00-hostenv-account.service";
+  accountLeaderOk =
+    accountCert.domain == "${nodeName}.hosting.test"
+    && accountCert.webroot == "/var/lib/acme/acme-challenge"
+    && accountCert.email == systemEval.config.security.acme.certs.${aliasHostName}.email
+    && lib.any (target:
+      builtins.elem accountOrder target.requires
+      && builtins.elem "acme-order-renew-${aliasHostName}.service" target.requiredBy
+      && builtins.elem "acme-order-renew-4-example.test.service" target.requiredBy
+    ) (lib.attrValues systemEval.config.systemd.targets)
+    && accountCert.group == systemEval.config.services.nginx.group
+    && systemEval.config.services.nginx.virtualHosts."${nodeName}.hosting.test"
+      .useACMEHost == "00-hostenv-account"
+    && systemEval.config.services.nginx.virtualHosts."${nodeName}.hosting.test"
+      .acmeRoot == accountCert.webroot;
   vhostOk = builtins.hasAttr hostName systemEval.config.services.nginx.virtualHosts;
   primaryVhost = systemEval.config.services.nginx.virtualHosts.${hostName} or { };
   aliasVhost = systemEval.config.services.nginx.virtualHosts.${aliasHostName} or { };
@@ -528,6 +545,7 @@ in
 {
   provider-nixos-system-eval = asserts.assertTrue "provider-nixos-system-eval" (
     nginxOk
+    && accountLeaderOk
     && vhostOk
     && vhostTlsOk
     && vhostBoundaryOk
