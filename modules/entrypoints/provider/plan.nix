@@ -557,18 +557,42 @@ let
             # This lets deploy reconcile stale Hostenv accounts from the node's
             # actual passwd database even when the node has no current
             # environments.
-            nodes = lib.genAttrs (builtins.attrNames nodeSystems) (_nodeName: {
+            nodes = lib.genAttrs (builtins.attrNames nodeSystems) (nodeName: {
               provider = {
                 inherit deployPublicKeys deployUser;
                 nixSigning.trustedPublicKeys = nixSigning.trustedPublicKeys or [ ];
+              };
+              security.acme = {
+                acceptTerms = letsEncrypt.acceptTerms;
+                defaults.email = letsEncrypt.adminEmail;
               };
 
               # providerNixosSystem derives per-environment packages and
               # secrets from this attrset. Nodes without environments have
               # neither.
               users.users = { };
+            }
+            # nixpkgs requires the account leader's certificate service to
+            # succeed before other certificate services sharing that account
+            # can start. The "00-" prefix sorts before project certificate names,
+            # selecting this provider-controlled hostname as the leader so a
+            # project's DNS or validation failure cannot block other projects.
+            // lib.optionalAttrs (letsEncrypt.enable or true) {
+              security.acme.certs."00-hostenv-account" = {
+                domain = "${nodeName}.${hostenvHostname}";
+                webroot = "/var/lib/acme/acme-challenge";
+                group = "nginx";
+              };
+              services.nginx = {
+                enable = true;
+                virtualHosts."${nodeName}.${hostenvHostname}" = {
+                  useACMEHost = "00-hostenv-account";
+                  locations."/".return = "404";
+                };
+              };
             });
           };
+
           configAttrs = builtins.foldl' (
             acc: env:
             let
@@ -600,10 +624,6 @@ let
                   in
                   lib.recursiveUpdate existing (
                     lib.recursiveUpdate {
-                      security.acme = {
-                        acceptTerms = letsEncrypt.acceptTerms;
-                        defaults.email = letsEncrypt.adminEmail;
-                      };
                       provider = {
                         inherit deployPublicKeys deployUser;
                         nixSigning.trustedPublicKeys = nixSigning.trustedPublicKeys or [ ];
