@@ -371,6 +371,31 @@ in
     && !(plan.nodes ? retired-node)
   ) "every configured provider node must remain deployable even when it has no current environments";
 
+  provider-plan-acme-settings = asserts.assertTrue "provider-plan-acme-settings" (
+    lib.all (nodeName:
+      let acme = plan.nodes.${nodeName}.security.acme;
+      in (acme.acceptTerms or false)
+        && (acme.defaults.email or null) == "ops@example.test"
+        && acme.certs."00-hostenv-account".domain == "${nodeName}.hosting.test"
+        && plan.nodes.${nodeName}.services.nginx.virtualHosts."${nodeName}.hosting.test".useACMEHost
+          == "00-hostenv-account"
+    ) [ "node-a" "old-node" ]
+  ) "the account certificate must preserve ACME terms and email on populated and empty nodes";
+
+  provider-plan-acme-disabled =
+    let
+      disabledPlan = lib.importJSON (mkPlan {
+        letsEncrypt = { enable = false; acceptTerms = false; adminEmail = "disabled@example.test"; };
+      }).plan;
+    in asserts.assertTrue "provider-plan-acme-disabled" (
+      lib.all (nodeName:
+        let acme = disabledPlan.nodes.${nodeName}.security.acme;
+        in acme.acceptTerms == false
+          && acme.defaults.email == "disabled@example.test"
+          && !(acme ? certs)
+      ) [ "node-a" "old-node" ]
+    ) "disabling Let's Encrypt must omit the account certificate and preserve configured ACME settings";
+
   provider-plan-retiring-node-status = asserts.assertTrue "provider-plan-retiring-node-status" (
     retiringPlanData.nodeStatus.old-node == "retiring"
     && retiringPlanData.nodeStatus.node-a == "active"

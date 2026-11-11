@@ -557,7 +557,7 @@ let
             # This lets deploy reconcile stale Hostenv accounts from the node's
             # actual passwd database even when the node has no current
             # environments.
-            nodes = lib.genAttrs (builtins.attrNames nodeSystems) (nodeName: {
+            nodes = lib.genAttrs (builtins.attrNames nodeSystems) (nodeName: lib.recursiveUpdate {
               provider = {
                 inherit deployPublicKeys deployUser;
                 nixSigning.trustedPublicKeys = nixSigning.trustedPublicKeys or [ ];
@@ -577,7 +577,7 @@ let
             # can start. The "00-" prefix sorts before project certificate names,
             # selecting this provider-controlled hostname as the leader so a
             # project's DNS or validation failure cannot block other projects.
-            // lib.optionalAttrs (letsEncrypt.enable or true) {
+            (lib.optionalAttrs (letsEncrypt.enable or true) {
               security.acme.certs."00-hostenv-account" = {
                 domain = "${nodeName}.${hostenvHostname}";
                 webroot = "/var/lib/acme/acme-challenge";
@@ -590,7 +590,7 @@ let
                   locations."/".return = "404";
                 };
               };
-            });
+            }));
           };
 
           configAttrs = builtins.foldl' (
